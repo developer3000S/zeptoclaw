@@ -1,0 +1,94 @@
+# ---------------------------------------------------------------------------
+# ZeptoClaw Agent Mesh — локальная сеть узлов.
+#
+#   ZETOMESH_NODES=3 docker compose -f deploy/docker/docker-compose.yml up -d
+#
+# Порты публикуются как base + index: mesh 4001+i (tcp/udp), api 8081+i,
+# metrics 9464+i. mDNS между контейнерами не работает (разные сетевые
+# имена), поэтому узлы знакомятся через bootstrap-адрес первого узла и DHT.
+# ---------------------------------------------------------------------------
+
+x-node-base: &node-base
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile
+  image: zeptomesh-node:latest
+  restart: unless-stopped
+  stop_grace_period: 30s
+  environment: &node-env
+    ZETOMESH_PICO_MODE: ${ZETOMESH_PICO_MODE:-stub}
+    ZETOMESH_TRUST_MODE: ${ZETOMESH_TRUST_MODE:-open}
+    ZETOMESH_MDNS: "false"
+    ZETOMESH_LOG_LEVEL: ${ZETOMESH_LOG_LEVEL:-info}
+    ZETOMESH_API_HOST: 0.0.0.0
+    ZETOMESH_API_TOKEN: ${ZETOMESH_API_TOKEN:-}
+    ZETOMESH_PSK: ${ZETOMESH_PSK:-}
+    TZ: ${TZ:-UTC}
+  command: ["run"]
+
+services:
+  zepto-0:
+    <<: *node-base
+    hostname: zepto-0
+    environment:
+      <<: *node-env
+      ZETOMESH_INDEX: "0"
+      ZETOMESH_NAME: zepto-0
+      ZETOMESH_MESH_PORT: "4001"
+      ZETOMESH_API_PORT: "8081"
+      ZETOMESH_PROM_LISTEN: "0.0.0.0:9464"
+      ZETOMESH_BOOTSTRAP: ""
+    ports:
+      - "4001:4001/tcp"
+      - "4001:4001/udp"
+      - "127.0.0.1:8081:8081"
+      - "127.0.0.1:9464:9464"
+    volumes:
+      - zepto-0-data:/var/lib/zeptomesh
+
+  zepto-1:
+    <<: *node-base
+    hostname: zepto-1
+    depends_on:
+      - zepto-0
+    environment:
+      <<: *node-env
+      ZETOMESH_INDEX: "1"
+      ZETOMESH_NAME: zepto-1
+      ZETOMESH_MESH_PORT: "4002"
+      ZETOMESH_API_PORT: "8082"
+      ZETOMESH_PROM_LISTEN: "0.0.0.0:9465"
+      ZETOMESH_BOOTSTRAP: /dns4/zepto-0/tcp/4001
+    ports:
+      - "4002:4002/tcp"
+      - "4002:4002/udp"
+      - "127.0.0.1:8082:8082"
+      - "127.0.0.1:9465:9465"
+    volumes:
+      - zepto-1-data:/var/lib/zeptomesh
+
+  zepto-2:
+    <<: *node-base
+    hostname: zepto-2
+    depends_on:
+      - zepto-0
+    environment:
+      <<: *node-env
+      ZETOMESH_INDEX: "2"
+      ZETOMESH_NAME: zepto-2
+      ZETOMESH_MESH_PORT: "4003"
+      ZETOMESH_API_PORT: "8083"
+      ZETOMESH_PROM_LISTEN: "0.0.0.0:9466"
+      ZETOMESH_BOOTSTRAP: /dns4/zepto-0/tcp/4001
+    ports:
+      - "4003:4003/tcp"
+      - "4003:4003/udp"
+      - "127.0.0.1:8083:8083"
+      - "127.0.0.1:9466:9466"
+    volumes:
+      - zepto-2-data:/var/lib/zeptomesh
+
+volumes:
+  zepto-0-data:
+  zepto-1-data:
+  zepto-2-data:

@@ -1,0 +1,123 @@
+# ZeptoClaw Agent Mesh — шаблон узла.
+#
+# Значения ${VAR:-default} подставляет загрузчик конфигурации, поэтому один
+# файл обслуживает сколько угодно экземпляров на одном хосте: достаточно
+# передать разные ZETOMESH_INDEX / порты.
+#
+#   ZETOMESH_INDEX   порядковый номер экземпляра (0,1,2,…)
+#   ZETOMESH_BASE_TCP стартовый TCP/QUIC-порт mesh (по умолчанию 4001)
+#   ZETOMESH_API_PORT стартовый порт админ-API (по умолчанию 8081)
+#   ZETOMESH_DATA    корень данных (в Docker это /var/lib/zeptomesh)
+#   ZETOMESH_BOOTSTRAP необязательный "/ip4/…/p2p/…" адрес входа в сеть
+
+node:
+  name: ${ZETOMESH_NAME:-zepto-${ZETOMESH_INDEX:-0}}
+  data_dir: ${ZETOMESH_DATA:-./zeptomesh-data}/${ZETOMESH_INDEX:-0}
+  listen:
+    - /ip4/0.0.0.0/tcp/${ZETOMESH_MESH_PORT:-4001}
+    - /ip4/0.0.0.0/udp/${ZETOMESH_MESH_PORT:-4001}/quic-v1
+  announce: []
+  private_network_psk: ${ZETOMESH_PSK:-}
+
+identity:
+  key_file: ${ZETOMESH_DATA:-./zeptomesh-data}/${ZETOMESH_INDEX:-0}/keys/peer.key
+
+discovery:
+  local_registry: true
+  local_socket_dir: ${ZETOMESH_DATA:-./zeptomesh-data}/${ZETOMESH_INDEX:-0}/run
+  mdns: ${ZETOMESH_MDNS:-true}
+  mdns_service_name: _zeptomesh._udp
+  bootstrap: []
+  dht: true
+  dht_mode: ${ZETOMESH_DHT_MODE:-auto}
+  peer_exchange: true
+  bootstrap_interval: 30s
+  gossip:
+    enabled: true
+    topic: /zeptomesh/membership/0.1.0
+    heartbeat: 3s
+    full_sync: 60s
+    failure_timeout: 15s
+
+neighbors:
+  min: 6
+  target: 12
+  max: 48
+
+tasks:
+  default_ttl: 5
+  max_ttl: 10
+  max_parallel_tasks: 4
+  default_timeout_seconds: 600
+  max_task_payload_bytes: 1048576
+  max_artifact_bytes: 104857600
+  dedup_window: 15m
+  retention: 168h
+  forwarding:
+    max_fanout: 5
+    max_parallel_candidates: 3
+    max_retries: 2
+    attempt_timeout: 120s
+    retry_interval_seconds: 5s
+
+capabilities:
+  skills: [general]
+  models: []
+  resource_class: medium
+  accept_external_tasks: true
+  allow_shell: false
+  allow_network_tools: true
+  max_parallel_tasks: 4
+  disabled_skills: []
+
+picoclaw:
+  # stub | binary | http  — подробнее в docs/PICOCLAW-INTEGRATION.md
+  mode: ${ZETOMESH_PICO_MODE:-stub}
+  binary: ${ZETOMESH_PICO_BIN:-picoclaw}
+  config: ${ZETOMESH_PICO_CONFIG:-}
+  timeout_seconds: 600
+  max_concurrent_agents: 4
+  extra_args: []
+  prompt_template: ""
+  env: {}
+  http:
+    base_url: ${ZETOMESH_PICO_WS_URL:-http://127.0.0.1:18790}
+    path: /pico/ws
+    health_path: /health
+    token_env: PICOCLAW_MESH_PICO_TOKEN
+    timeout_seconds: 600
+  stub:
+    latency: 50ms
+    echo: true
+
+security:
+  trust_mode: ${ZETOMESH_TRUST_MODE:-limited}
+  require_task_signature: true
+  drop_invalid_signatures: true
+  allowed_peers_file: ${ZETOMESH_ALLOWED_PEERS:-}
+  blocked_peers_file: ${ZETOMESH_BLOCKED_PEERS:-}
+  min_trust_for_tasks: limited
+  max_message_bytes: 4194304
+  rate_limit:
+    requests_per_second: 20
+    burst: 60
+
+api:
+  enabled: true
+  listen: ${ZETOMESH_API_HOST:-127.0.0.1}:${ZETOMESH_API_PORT:-8081}
+  auth_token_env: ZETOMESH_API_TOKEN
+  read_timeout: 15s
+  write_timeout: 600s
+
+telemetry:
+  log_level: ${ZETOMESH_LOG_LEVEL:-info}
+  structured_logs: true
+  # Метрики отдаёт и админ-API (/metrics, с bearer-токеном). Отдельный
+  # слушатель нужен, когда Prometheus скрейпит порт без токена: держите его на
+  # внутреннем интерфейсе. В Docker — 0.0.0.0, иначе порт не будет опубликован.
+  prometheus_listen: ${ZETOMESH_PROM_LISTEN:-}
+
+storage:
+  engine: badger
+  dir: ${ZETOMESH_DATA:-./zeptomesh-data}/${ZETOMESH_INDEX:-0}/db
+  max_task_records: 100000

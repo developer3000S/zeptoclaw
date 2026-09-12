@@ -1,0 +1,358 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/zeptoclaw/zeptomesh/internal/config"
+)
+
+// client is a tiny admin-API HTTP client.
+type client struct {
+	base  string
+	token string
+	http  *http.Client
+}
+
+func newClient(addr, tokenEnv string) (*client, error) {
+	if addr == "" {
+		cfgPath := os.Getenv("ZETOMESH_CONFIG")
+		if cfgPath != "" {
+			if cfg, err := config.Load(cfgPath); err == nil {
+				addr = cfg.API.Listen
+				tokenEnv = cfg.API.AuthTokenEnv
+			}
+		}
+	}
+	if addr == "" {
+		addr = "127.0.0.1:8081"
+	}
+	token := ""
+	if tokenEnv != "" {
+		token = os.Getenv(tokenEnv)
+	}
+	if !strings.Contains(addr, "://") {
+		addr = "http://" + addr
+	}
+	return &client{
+		base:  strings.TrimRight(addr, "/"),
+		token: token,
+		http:  &http.Client{Timeout: 2 * time.Minute},
+	}, nil
+}
+
+func (c *client) do(ctx context.Context, method, path string, body any, out any) error {
+	var rd io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		rd = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
+	if err != nil {
+		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s %s: %w (is the node running at %s?)", method, path, err, c.base)
+	}
+	defer res.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	if err != nil {
+		return err
+	}
+	if res.StatusCode >= 400 {
+		var e struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(payload, &e)
+		if e.Error != "" {
+			return fmt.Errorf("%s %s: http %d: %s", method, path, res.StatusCode, e.Error)
+		}
+		return fmt.Errorf("%s %s: http %d: %s", method, path, res.StatusCode, truncate(string(payload), 300))
+	}
+	if out != nil {
+		return json.Unmarshal(payload, out)
+	}
+	_, err = os.Stdout.Write(payload)
+	return err
+}
+
+// printJSON pretty-prints v.
+func printJSON(v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(b))
+	return nil
+}
+
+func truncate(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// clientFlags parses the shared client flags.
+func clientFlags(fs *flag.FlagSet) (*string, *string) {
+	addr := fs.String("addr", "", "admin API address (default: from ZETOMESH_CONFIG or 127.0.0.1:8081)")
+	tokenEnv := fs.String("token-env", "", "environment variable holding the bearer token")
+	return addr, tokenEnv
+}
+
+func dial(addr, tokenEnv *string) (*client, error) {
+	c, err := newClient(*addr, *tokenEnv)
+	if err != nil {
+		return nil, err
+	}
+	// Local daemons commonly bind plain HTTP; allow https:// explicitly if
+	// an operator fronts the API with a TLS proxy that uses a self-signed cert.
+	if strings.HasPrefix(c.base, "https://") {
+		c.http.Transport = &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
+	}
+	return c, nil
+}
+
+func clientStatus(args []string) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	jsonOut := fs.Bool("json", true, "pretty JSON output")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	if *jsonOut {
+		var v any
+		if err := c.do(ctx, http.MethodGet, "/api/v1/status", nil, &v); err != nil {
+			return err
+		}
+		return printJSON(v)
+	}
+	return c.do(ctx, http.MethodGet, "/api/v1/status", nil, nil)
+}
+
+func clientPeers(args []string) error {
+	fs := flag.NewFlagSet("peers", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	limit := fs.Int("limit", 200, "maximum peers to print")
+	quiet := fs.Bool("quiet", false, "print peer ids only")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodGet,
+		fmt.Sprintf("/api/v1/peers?limit=%d&minimal=%t", *limit, !*quiet), nil, &v); err != nil {
+		return err
+	}
+	if *quiet {
+		m, _ := v.(map[string]any)
+		peers, _ := m["peers"].([]any)
+		for _, p := range peers {
+			if pm, ok := p.(map[string]any); ok {
+				fmt.Println(pm["peer_id"])
+			}
+		}
+		return nil
+	}
+	return printJSON(v)
+}
+
+func clientCapabilities(args []string) error {
+	fs := flag.NewFlagSet("capabilities", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodGet, "/api/v1/capabilities", nil, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+func clientSubmit(args []string) error {
+	fs := flag.NewFlagSet("submit", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	instruction := fs.String("i", "", "task instruction (required)")
+	skills := fs.String("skills", "", "comma-separated required skills")
+	ttl := fs.Int("ttl", 0, "delegation hops remaining (0 = node default)")
+	priority := fs.Int("priority", 0, "1..9 (0 = default 5)")
+	timeout := fs.Int("timeout", 0, "execution timeout seconds (0 = node default)")
+	allowShell := fs.Bool("allow-shell", false, "permit shell tools for this task")
+	allowNet := fs.Bool("allow-network", true, "permit network tools for this task")
+	noDeleg := fs.Bool("no-delegation", false, "forbid forwarding this task")
+	wait := fs.Bool("w", false, "wait for the result")
+	waitSec := fs.Int("wait-seconds", 0, "wait budget when -w (0 = task timeout + slack)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*instruction) == "" {
+		return fmt.Errorf("-i <instruction> is required")
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	body := map[string]any{
+		"instruction":         *instruction,
+		"ttl":                 *ttl,
+		"priority":            *priority,
+		"timeout_seconds":     *timeout,
+		"allow_shell":         *allowShell,
+		"allow_network_tools": *allowNet,
+		"wait":                *wait,
+		"wait_seconds":        *waitSec,
+	}
+	if *skills != "" {
+		var list []string
+		for _, s := range strings.Split(*skills, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				list = append(list, s)
+			}
+		}
+		body["required_skills"] = list
+	}
+	if *noDeleg {
+		body["allow_delegation"] = false
+	}
+	var out map[string]any
+	if err := c.do(context.Background(), http.MethodPost, "/api/v1/tasks", body, &out); err != nil {
+		return err
+	}
+	return printJSON(out)
+}
+
+func clientTasks(args []string) error {
+	fs := flag.NewFlagSet("tasks", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	limit := fs.Int("limit", 50, "maximum tasks to print")
+	status := fs.String("status", "", "filter by status (RUNNING, COMPLETED, …)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	path := fmt.Sprintf("/api/v1/tasks?limit=%d", *limit)
+	if *status != "" {
+		path += "&status=" + strings.ToUpper(*status)
+	}
+	if err := c.do(context.Background(), http.MethodGet, path, nil, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+func clientGet(args []string) error {
+	fs := flag.NewFlagSet("get", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	wait := fs.Bool("w", false, "wait for the result")
+	waitSec := fs.Int("wait-seconds", 120, "wait budget when -w")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: zeptomesh-node get [-w] <task_id>")
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	id := fs.Arg(0)
+	ctx := context.Background()
+	deadline := time.Now().Add(time.Duration(*waitSec) * time.Second)
+	for {
+		var v map[string]any
+		if err := c.do(ctx, http.MethodGet, "/api/v1/tasks/"+id, nil, &v); err != nil {
+			return err
+		}
+		rec, _ := v["task"].(map[string]any)
+		terminal := false
+		if rec != nil {
+			switch rec["status"] {
+			case "COMPLETED", "FAILED", "TIMEOUT", "CANCELED", "REJECTED":
+				terminal = true
+			}
+		}
+		if !*wait || terminal || time.Now().After(deadline) {
+			return printJSON(v)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+func clientCancel(args []string) error {
+	fs := flag.NewFlagSet("cancel", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	reason := fs.String("reason", "canceled by operator", "cancellation reason")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: zeptomesh-node cancel <task_id>")
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	path := "/api/v1/tasks/" + fs.Arg(0) + "/cancel?reason=" + *reason
+	if err := c.do(context.Background(), http.MethodPost, path, map[string]any{}, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+func clientResubmit(args []string) error {
+	fs := flag.NewFlagSet("resubmit", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: zeptomesh-node resubmit <task_id>")
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodPost, "/api/v1/tasks/"+fs.Arg(0)+"/resubmit", map[string]any{}, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}

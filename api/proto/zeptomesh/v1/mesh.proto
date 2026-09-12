@@ -1,0 +1,272 @@
+// Copyright 2026 ZeptoClaw Agent Mesh Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+
+syntax = "proto3";
+
+package zeptomesh.v1;
+
+option go_package = "github.com/zeptoclaw/zeptomesh/gen/zeptomesh/v1;zeptomeshv1";
+
+// ---------------------------------------------------------------------------
+// Transport-level protocol ids (registered on the libp2p host):
+//   /zeptomesh/task/0.1.0      stream: TaskEnvelope  -> TaskAck
+//   /zeptomesh/result/0.1.0    stream: TaskResult    -> ResultAck
+//   /zeptomesh/rpc/0.1.0       stream: RpcRequest    -> RpcResponse
+//   /zeptomesh/membership/0.1.0  pubsub (gossip): MembershipGossip
+// ---------------------------------------------------------------------------
+
+// TaskStatus is the lifecycle state of a task as observed by a node.
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  TASK_STATUS_RECEIVED = 1;
+  TASK_STATUS_VALIDATING = 2;
+  TASK_STATUS_EVALUATING = 3;
+  TASK_STATUS_ACCEPTED = 4;
+  TASK_STATUS_REJECTED = 5;
+  TASK_STATUS_FORWARDED = 6;
+  TASK_STATUS_RUNNING = 7;
+  TASK_STATUS_WAITING_SUBTASKS = 8;
+  TASK_STATUS_AGGREGATING = 9;
+  TASK_STATUS_COMPLETED = 10;
+  TASK_STATUS_FAILED = 11;
+  TASK_STATUS_TIMEOUT = 12;
+  TASK_STATUS_CANCELED = 13;
+}
+
+// AckStatus is the immediate verdict a peer returns for a forwarded task.
+enum AckStatus {
+  ACK_STATUS_UNSPECIFIED = 0;
+  ACK_STATUS_QUEUED = 1;      // accepted for local execution
+  ACK_STATUS_FORWARDED = 2;   // accepted for routing/forwarding
+  ACK_STATUS_REJECTED = 3;    // refused; see reason
+  ACK_STATUS_DUPLICATE = 4;   // task_id already known (deduplication)
+}
+
+// TrustLevel is the local operator-assigned classification of a peer.
+enum TrustLevel {
+  TRUST_LEVEL_UNSPECIFIED = 0;
+  TRUST_LEVEL_TRUSTED = 1;
+  TRUST_LEVEL_KNOWN = 2;
+  TRUST_LEVEL_LIMITED = 3;
+  TRUST_LEVEL_UNTRUSTED = 4;
+  TRUST_LEVEL_BLOCKED = 5;
+}
+
+// TaskConstraints narrows what the executor is allowed to do. A node always
+// intersects these with its own operator policy; a task can only lose rights.
+message TaskConstraints {
+  int32 max_duration_seconds = 1;
+  bool allow_network_tools = 2;
+  bool allow_shell = 3;
+  bool allow_delegation = 4;
+  bool allow_subtasks = 5;
+}
+
+// TaskPayload carries the human/agent readable instruction.
+// Large bodies are never inlined: they go to the artifact store by sha256.
+message TaskPayload {
+  string instruction = 1;
+  string context_digest = 2;          // "sha256:<hex>" of the full context blob
+  repeated ArtifactRef attachments = 3;
+  map<string, string> labels = 4;
+}
+
+// ArtifactRef points to content-addressed bytes.
+message ArtifactRef {
+  string name = 1;
+  string hash = 2;                    // "sha256:<hex>"
+  int64 size = 3;
+  string media_type = 4;
+}
+
+// TaskEnvelope is the signed unit of work exchanged between peers.
+message TaskEnvelope {
+  string task_id = 1;                 // ULID/UUIDv7, globally unique
+  string parent_task_id = 2;          // empty for a root task
+  string origin_peer_id = 3;          // b58str of the peer that injected the task
+  string sender_peer_id = 4;          // b58str of the peer that sent this envelope
+  int64 created_at = 5;               // unix seconds, set by origin
+  int32 ttl = 6;                      // delegation hops remaining
+  int32 priority = 7;                 // 1 (low) .. 9 (high)
+  repeated string required_skills = 8;
+  TaskPayload payload = 9;
+  TaskConstraints constraints = 10;
+  string context_digest = 11;         // "sha256:<hex>" over canonical envelope body
+  repeated string route_stack = 12;   // peers the envelope already visited
+  bytes signature = 13;               // ed25519 over SigningTaskBytes
+  string signature_scheme = 14;       // "zeptomesh-task-v1"
+}
+
+// TaskAck is the synchronous answer to a forwarded TaskEnvelope.
+message TaskAck {
+  string task_id = 1;
+  AckStatus status = 2;
+  string reason = 3;
+  string accepted_by = 4;             // b58str of the responding peer
+  int64 timestamp = 5;
+  bytes signature = 6;
+}
+
+// TaskResult is the signed answer produced by the executing peer. It travels
+// back along the reversed route_stack until it reaches origin_peer_id.
+message TaskResult {
+  string task_id = 1;
+  string worker_peer_id = 2;          // peer that actually executed the task
+  TaskStatus status = 3;
+  string text = 4;                    // agent final answer (bounded)
+  bytes result_digest = 5;            // sha256 over text+artifacts
+  string error_message = 6;
+  int64 started_at = 7;
+  int64 finished_at = 8;
+  repeated ArtifactRef artifacts = 9;
+  string sender_peer_id = 10;         // peer that transmitted this message
+  bytes signature = 11;               // ed25519 over SigningResultBytes
+  string signature_scheme = 12;
+  repeated string route_stack = 13;   // copy of the envelope route at completion
+}
+
+// ResultAck confirms that an intermediate hop accepted a result for relay.
+message ResultAck {
+  string task_id = 1;
+  bool accepted = 2;
+  string reason = 3;
+}
+
+// Capabilities is the signed self-description of a node.
+message Capabilities {
+  string peer_id = 1;                 // b58str
+  string node_name = 2;
+  string version = 3;
+  repeated string skills = 4;
+  repeated string models = 5;
+  int32 max_parallel_tasks = 6;
+  int32 running_tasks = 7;
+  double load = 8;                    // running/max, clamped to [0,1]
+  bool accept_external_tasks = 9;
+  bool allow_shell = 10;
+  bool relay_capable = 11;
+  string resource_class = 12;         // "small" | "medium" | "large"
+  repeated string listen_addrs = 13;  // multiaddrs
+  int64 timestamp = 14;
+  bytes signature = 15;
+}
+
+// PeerState is the gossip-visible projection of a node.
+message PeerState {
+  string peer_id = 1;
+  int64 timestamp = 2;
+  repeated string skills = 3;
+  double load = 4;
+  int32 max_parallel_tasks = 5;
+  string version = 6;
+  string status = 7;                  // "active" | "draining" | "left"
+  repeated string addrs = 8;
+}
+
+// MembershipGossip is published on the membership topic.
+message MembershipGossip {
+  repeated PeerState states = 1;
+  string from_peer_id = 2;
+}
+
+// SubtaskPlan asks a peer to split a task and delegate parts further.
+message SubtaskSpec {
+  string task_id = 1;
+  repeated string required_skills = 2;
+  string instruction = 3;
+  int32 ttl = 4;
+  int32 priority = 5;
+}
+
+// RpcRequest is the multiplexed control-plane request.
+message RpcRequest {
+  oneof kind {
+    PingRequest ping = 1;
+    CapabilitiesRequest capabilities = 2;
+    PeerExchangeRequest peer_exchange = 3;
+    CancelRequest cancel = 4;
+    SkillLookupRequest skill_lookup = 5;
+  }
+}
+
+// RpcResponse is the multiplexed control-plane response.
+message RpcResponse {
+  oneof kind {
+    PingResponse ping = 1;
+    CapabilitiesResponse capabilities = 2;
+    PeerExchangeResponse peer_exchange = 3;
+    CancelResponse cancel = 4;
+    SkillLookupResponse skill_lookup = 5;
+  }
+}
+
+message PingRequest {
+  int64 nonce = 1;
+}
+
+message PingResponse {
+  int64 nonce = 1;
+  int64 peer_time = 2;
+}
+
+message CapabilitiesRequest {
+}
+
+message CapabilitiesResponse {
+  Capabilities capabilities = 1;
+}
+
+message PeerRecord {
+  string peer_id = 1;
+  repeated string addrs = 2;
+  repeated string skills = 3;
+  int64 seen_at = 4;
+}
+
+message PeerExchangeRequest {
+  uint32 count = 1;
+}
+
+message PeerExchangeResponse {
+  repeated PeerRecord peers = 1;
+}
+
+message CancelRequest {
+  string task_id = 1;
+  string origin_peer_id = 2;
+  string sender_peer_id = 3;
+  string reason = 4;
+  bytes signature = 5;
+}
+
+message CancelResponse {
+  bool accepted = 1;
+  string reason = 2;
+}
+
+message SkillLookupRequest {
+  repeated string skills = 1;
+  // full_refresh asks the responder to reload its skill view from every
+  // source it has (DHT provider records, gossip membership, neighbour table)
+  // and to run its routing Select over that complete view, instead of
+  // answering from a cached/partial table.
+  bool full_refresh = 2;
+  // relay_budget is how many further hops this lookup may be fanned out
+  // through, i.e. search-relay depth. 0 means "answer only from what you know".
+  int32 relay_budget = 3;
+  // visited lists peer ids that already answered or forwarded this lookup, so
+  // relaying cannot loop. The responder must not forward to any of them.
+  repeated string visited = 4;
+}
+
+message SkillLookupResponse {
+  repeated PeerRecord peers = 1;
+  // partial reports that the responder's own skill view is limited: it could
+  // not fully confirm whether any peer has the requested skills. The origin
+  // should widen the search (more responders, higher relay_budget).
+  bool partial = 2;
+  // responder_refreshed confirms it honoured full_refresh (reloaded sources).
+  bool responder_refreshed = 3;
+}

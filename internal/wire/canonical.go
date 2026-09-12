@@ -1,0 +1,241 @@
+// Package wire holds the canonical encoders that both task digests and message
+// signatures are computed over. Keeping them in one place means the digest a
+// node stores and the digest it signs can never drift apart.
+//
+// The encoding is length-prefixed and field-ordered, so no combination of field
+// values can shift another field's bytes (the classic "a|b" vs "ab|" collision).
+package wire
+
+import (
+	"crypto/sha256"
+	"encoding/binary"
+	"errors"
+	"sort"
+
+	pb "github.com/zeptoclaw/zeptomesh/gen/zeptomesh/v1"
+)
+
+// ErrNilMessage is returned for a nil input rather than encoding a zero value.
+var ErrNilMessage = errors.New("wire: nil message")
+
+// Digest returns the domain-separated sha256 over a scheme and a body.
+func Digest(scheme string, body []byte) []byte {
+	h := sha256.New()
+	h.Write([]byte("zeptomesh/"))
+	h.Write([]byte(scheme))
+	h.Write([]byte{0})
+	h.Write(body)
+	return h.Sum(nil)
+}
+
+// TaskContent encodes everything the origin authored: identity, skills,
+// payload and constraints. It excludes the mutable routing fields (sender, ttl,
+// route_stack) so any node on the path can recompute it.
+func TaskContent(env *pb.TaskEnvelope) ([]byte, error) {
+	if env == nil {
+		return nil, ErrNilMessage
+	}
+	e := newEncoder()
+	e.str(env.GetTaskId())
+	e.str(env.GetParentTaskId())
+	e.str(env.GetOriginPeerId())
+	e.varint(env.GetCreatedAt())
+	e.varint(int64(env.GetPriority()))
+	e.strList(env.GetRequiredSkills())
+
+	pl := env.GetPayload()
+	e.str(pl.GetInstruction())
+	e.str(pl.GetContextDigest())
+	e.uvarint(uint64(len(pl.GetAttachments())))
+	for _, a := range pl.GetAttachments() {
+		e.str(a.GetName())
+		e.str(a.GetHash())
+		e.varint(a.GetSize())
+		e.str(a.GetMediaType())
+	}
+	e.strMap(pl.GetLabels())
+
+	c := env.GetConstraints()
+	e.varint(int64(c.GetMaxDurationSeconds()))
+	e.boolean(c.GetAllowNetworkTools())
+	e.boolean(c.GetAllowShell())
+	e.boolean(c.GetAllowDelegation())
+	e.boolean(c.GetAllowSubtasks())
+	return e.out(), nil
+}
+
+// TaskBody encodes the full signing body of an envelope: the content digest
+// plus the routing fields a relaying node mutates.
+func TaskBody(env *pb.TaskEnvelope) ([]byte, error) {
+	content, err := TaskContent(env)
+	if err != nil {
+		return nil, err
+	}
+	e := newEncoder()
+	e.raw(content)
+	e.str(env.GetSenderPeerId())
+	e.varint(int64(env.GetTtl()))
+	e.strList(env.GetRouteStack())
+	return e.out(), nil
+}
+
+// ResultBody encodes the signing body of a task result.
+func ResultBody(r *pb.TaskResult) ([]byte, error) {
+	if r == nil {
+		return nil, ErrNilMessage
+	}
+	e := newEncoder()
+	e.str(r.GetTaskId())
+	e.str(r.GetWorkerPeerId())
+	e.str(r.GetSenderPeerId())
+	e.varint(int64(r.GetStatus()))
+	e.str(r.GetText())
+	e.raw(r.GetResultDigest())
+	e.str(r.GetErrorMessage())
+	e.varint(r.GetStartedAt())
+	e.varint(r.GetFinishedAt())
+	e.uvarint(uint64(len(r.GetArtifacts())))
+	for _, a := range r.GetArtifacts() {
+		e.str(a.GetName())
+		e.str(a.GetHash())
+		e.varint(a.GetSize())
+		e.str(a.GetMediaType())
+	}
+	e.strList(r.GetRouteStack())
+	return e.out(), nil
+}
+
+// CancelBody encodes the signing body of a cancel request.
+func CancelBody(c *pb.CancelRequest) ([]byte, error) {
+	if c == nil {
+		return nil, ErrNilMessage
+	}
+	e := newEncoder()
+	e.str(c.GetTaskId())
+	e.str(c.GetOriginPeerId())
+	e.str(c.GetSenderPeerId())
+	e.str(c.GetReason())
+	return e.out(), nil
+}
+
+// CapsBody encodes the signing body of a capabilities advertisement.
+func CapsBody(c *pb.Capabilities) ([]byte, error) {
+	if c == nil {
+		return nil, ErrNilMessage
+	}
+	e := newEncoder()
+	e.str(c.GetPeerId())
+	e.str(c.GetNodeName())
+	e.str(c.GetVersion())
+	e.strList(c.GetSkills())
+	e.strList(c.GetModels())
+	e.varint(int64(c.GetMaxParallelTasks()))
+	e.varint(int64(c.GetRunningTasks()))
+	e.str(formatFloat(c.GetLoad()))
+	e.boolean(c.GetAcceptExternalTasks())
+	e.boolean(c.GetAllowShell())
+	e.boolean(c.GetRelayCapable())
+	e.str(c.GetResourceClass())
+	e.strList(c.GetListenAddrs())
+	e.varint(c.GetTimestamp())
+	return e.out(), nil
+}
+
+// AckBody encodes the signing body of a task acknowledgement.
+func AckBody(a *pb.TaskAck) ([]byte, error) {
+	if a == nil {
+		return nil, ErrNilMessage
+	}
+	e := newEncoder()
+	e.str(a.GetTaskId())
+	e.varint(int64(a.GetStatus()))
+	e.str(a.GetReason())
+	e.str(a.GetAcceptedBy())
+	e.varint(a.GetTimestamp())
+	return e.out(), nil
+}
+
+// encoder accumulates a canonical byte encoding.
+type encoder struct{ buf []byte }
+
+func newEncoder() *encoder { return &encoder{buf: make([]byte, 0, 128)} }
+
+func (e *encoder) out() []byte  { return e.buf }
+func (e *encoder) raw(p []byte) { e.buf = append(e.buf, p...) }
+func (e *encoder) str(s string) {
+	e.uvarint(uint64(len(s)))
+	e.buf = append(e.buf, s...)
+}
+func (e *encoder) varint(v int64) {
+	var tmp [binary.MaxVarintLen64]byte
+	n := binary.PutVarint(tmp[:], v)
+	e.buf = append(e.buf, tmp[:n]...)
+}
+func (e *encoder) uvarint(v uint64) {
+	var tmp [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(tmp[:], v)
+	e.buf = append(e.buf, tmp[:n]...)
+}
+func (e *encoder) boolean(v bool) {
+	if v {
+		e.buf = append(e.buf, 1)
+		return
+	}
+	e.buf = append(e.buf, 0)
+}
+func (e *encoder) strList(vals []string) {
+	e.uvarint(uint64(len(vals)))
+	for _, v := range vals {
+		e.str(v)
+	}
+}
+func (e *encoder) strMap(m map[string]string) {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	e.uvarint(uint64(len(keys)))
+	for _, k := range keys {
+		e.str(k)
+		e.str(m[k])
+	}
+}
+
+// formatFloat renders a float64 deterministically without strconv's exponent
+// surprises for the small load values the mesh reports.
+func formatFloat(f float64) string {
+	if f != f { // NaN
+		return "nan"
+	}
+	if f > 1 {
+		f = 1
+	}
+	if f < 0 {
+		f = 0
+	}
+	i := int64(f*10000 + 0.5)
+	return "bp:" + itoa(i)
+}
+
+func itoa(v int64) string {
+	if v == 0 {
+		return "0"
+	}
+	neg := v < 0
+	if neg {
+		v = -v
+	}
+	var digits [20]byte
+	i := len(digits)
+	for v > 0 {
+		i--
+		digits[i] = byte('0' + v%10)
+		v /= 10
+	}
+	if neg {
+		i--
+		digits[i] = '-'
+	}
+	return string(digits[i:])
+}
