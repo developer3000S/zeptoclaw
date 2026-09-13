@@ -19,14 +19,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zeptoclaw/zeptomesh/internal/api"
-	"github.com/zeptoclaw/zeptomesh/internal/config"
-	"github.com/zeptoclaw/zeptomesh/internal/logging"
-	"github.com/zeptoclaw/zeptomesh/internal/node"
-	"github.com/zeptoclaw/zeptomesh/internal/p2p"
-	"github.com/zeptoclaw/zeptomesh/internal/security"
-	"github.com/zeptoclaw/zeptomesh/internal/version"
+	"github.com/developer3000S/zeptoclaw/internal/api"
+	"github.com/developer3000S/zeptoclaw/internal/config"
+	"github.com/developer3000S/zeptoclaw/internal/logging"
+	"github.com/developer3000S/zeptoclaw/internal/node"
+	"github.com/developer3000S/zeptoclaw/internal/p2p"
+	"github.com/developer3000S/zeptoclaw/internal/security"
+	"github.com/developer3000S/zeptoclaw/internal/version"
 )
+
+// exRestart is the systemd sd_notify convention for "exit for a restart":
+// units pair it with Restart=always (or on-failure) and RestartIsolation.
+const exRestart = 75
 
 const usage = `zeptomesh-node — ZeptoClaw Agent Mesh node daemon
 
@@ -43,6 +47,8 @@ Commands:
   get         show one task (status/result)
   cancel      cancel a task originated here
   resubmit    re-inject a failed/timed-out task
+  reload      re-read the node config file     (POST /admin/reload-config)
+  leave       announce departure and restart   (POST /admin/leave)
   genkey      create an Ed25519 identity key file
   psk         print a private-network PSK
   version     print build information
@@ -88,6 +94,10 @@ func main() {
 		err = clientCancel(args)
 	case "resubmit":
 		err = clientResubmit(args)
+	case "reload":
+		err = clientReload(args)
+	case "leave":
+		err = clientLeave(args)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -122,7 +132,7 @@ func runNode(args []string) error {
 		return err
 	}
 
-	logger := logging.New(logging.Options{
+	logger, levelVar := logging.New(logging.Options{
 		Level:  cfg.Telemetry.LogLevel,
 		Format: map[bool]string{true: "text", false: "json"}[!cfg.Telemetry.StructuredLogs],
 	})
@@ -132,13 +142,30 @@ func runNode(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	n, err := node.New(node.Options{Config: cfg, Logger: logger})
+	n, err := node.New(node.Options{
+		Config: cfg, Logger: logger, ConfigPath: *cfgPath, LevelVar: levelVar,
+	})
 	if err != nil {
 		return err
 	}
 	if err := n.Start(ctx); err != nil {
 		return err
 	}
+
+	// SIGHUP reloads the same file the admin endpoint does; operators
+	// scripting outside the API get one more path to the same behaviour.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		for range hup {
+			d, err := n.ReloadConfig()
+			if err != nil {
+				logger.Error("config_reload_failed", "err", err.Error())
+				continue
+			}
+			logger.Info("config_reloaded", "hot", len(d.Hot), "requires_restart", len(d.RequiresRestart))
+		}
+	}()
 
 	stopNode := func() {
 		sctx, scancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -168,10 +195,22 @@ func runNode(args []string) error {
 	}
 
 	logger.Info("zeptomesh_node_running", "config", *cfgPath)
-	<-ctx.Done()
-	logger.Info("shutdown_signal_received")
+	restart := false
+	select {
+	case <-ctx.Done():
+		logger.Info("shutdown_signal_received")
+	case <-n.Quit():
+		// /admin/leave: a supervisor-managed restart (systemd ExitCode=75,
+		// docker restart policy) applies the on-disk configuration cleanly.
+		logger.Info("leave_requested_restarting_process")
+		restart = true
+	}
+	signal.Stop(hup)
 	stop()
 	stopNode()
+	if restart {
+		os.Exit(exRestart)
+	}
 	return nil
 }
 

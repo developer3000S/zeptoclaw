@@ -14,8 +14,8 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 
-	pb "github.com/zeptoclaw/zeptomesh/gen/zeptomesh/v1"
-	"github.com/zeptoclaw/zeptomesh/internal/wire"
+	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
+	"github.com/developer3000S/zeptoclaw/internal/wire"
 )
 
 // Status is the task lifecycle state, mirroring pb.TaskStatus.
@@ -372,15 +372,60 @@ func DeriveSubtask(parent *pb.TaskEnvelope, childID string, req BuildRequest, no
 	return child
 }
 
-// TimeoutSeconds resolves the effective execution deadline for a task.
-func TimeoutSeconds(env *pb.TaskEnvelope, def int) int {
+// TimeoutSeconds resolves the effective execution deadline for a task: the
+// requested value when set, otherwise the node default — always capped by the
+// operator's ceiling (ТЗ 6.8.3). Without the cap a remote requester could pin
+// a worker slot for an arbitrarily long time by asking for a huge timeout.
+func TimeoutSeconds(env *pb.TaskEnvelope, def, max int) int {
+	t := def
 	if c := env.GetConstraints().GetMaxDurationSeconds(); c > 0 {
-		return int(c)
+		t = int(c)
 	}
-	if def <= 0 {
-		return 600
+	if t <= 0 {
+		t = 600
 	}
-	return def
+	if max > 0 && t > max {
+		t = max
+	}
+	return t
+}
+
+// ErrorClass maps a status and message onto the machine-readable taxonomy of
+// ТЗ 6.12. Relays use it to decide whether retrying makes sense: network and
+// no-worker failures are retryable, security/validation ones never are.
+func ErrorClass(st pb.TaskStatus, msg string) pb.TaskErrorClass {
+	switch st {
+	case pb.TaskStatus_TASK_STATUS_CANCELED:
+		return pb.TaskErrorClass_TASK_ERROR_CLASS_CANCELED
+	case pb.TaskStatus_TASK_STATUS_TIMEOUT:
+		return pb.TaskErrorClass_TASK_ERROR_CLASS_TIMEOUT
+	case pb.TaskStatus_TASK_STATUS_REJECTED:
+		return pb.TaskErrorClass_TASK_ERROR_CLASS_VALIDATION
+	case pb.TaskStatus_TASK_STATUS_FAILED:
+	default:
+		return pb.TaskErrorClass_TASK_ERROR_CLASS_UNSPECIFIED
+	}
+	low := strings.ToLower(msg)
+	switch {
+	case strings.Contains(low, "signature"), strings.Contains(low, "trust"),
+		strings.Contains(low, "blocked"), strings.Contains(low, "allow"):
+		return pb.TaskErrorClass_TASK_ERROR_CLASS_SECURITY
+	case strings.Contains(low, "digest"), strings.Contains(low, "valid"),
+		strings.Contains(low, "ttl"), strings.Contains(low, "unknown task"):
+		return pb.TaskErrorClass_TASK_ERROR_CLASS_VALIDATION
+	case strings.Contains(low, "queue"), strings.Contains(low, "rate"),
+		strings.Contains(low, "disk"), strings.Contains(low, "memory"),
+		strings.Contains(low, "limit"):
+		return pb.TaskErrorClass_TASK_ERROR_CLASS_LIMITS
+	case strings.Contains(low, "connect"), strings.Contains(low, "reset"),
+		strings.Contains(low, "unreachable"), strings.Contains(low, "timeout "):
+		return pb.TaskErrorClass_TASK_ERROR_CLASS_NETWORK
+	case strings.Contains(low, "no eligible"), strings.Contains(low, "no candidate"),
+		strings.Contains(low, "skills"):
+		return pb.TaskErrorClass_TASK_ERROR_CLASS_NO_WORKER
+	default:
+		return pb.TaskErrorClass_TASK_ERROR_CLASS_EXECUTION
+	}
 }
 
 // NormalizeSkills lowercases, trims, deduplicates and sorts a skill list.

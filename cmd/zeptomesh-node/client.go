@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zeptoclaw/zeptomesh/internal/config"
+	"github.com/developer3000S/zeptoclaw/internal/config"
 )
 
 // client is a tiny admin-API HTTP client.
@@ -213,6 +213,8 @@ func clientSubmit(args []string) error {
 	allowShell := fs.Bool("allow-shell", false, "permit shell tools for this task")
 	allowNet := fs.Bool("allow-network", true, "permit network tools for this task")
 	noDeleg := fs.Bool("no-delegation", false, "forbid forwarding this task")
+	var subs stringList
+	fs.Var(&subs, "subtask", "decomposition entry '<skills>|<instruction>' (repeatable); the parent then only aggregates")
 	wait := fs.Bool("w", false, "wait for the result")
 	waitSec := fs.Int("wait-seconds", 0, "wait budget when -w (0 = task timeout + slack)")
 	if err := fs.Parse(args); err != nil {
@@ -247,11 +249,76 @@ func clientSubmit(args []string) error {
 	if *noDeleg {
 		body["allow_delegation"] = false
 	}
+	if len(subs) > 0 {
+		list := make([]map[string]any, 0, len(subs))
+		for _, s := range subs {
+			skillsPart, instrPart, _ := strings.Cut(s, "|")
+			if strings.TrimSpace(instrPart) == "" {
+				return fmt.Errorf("--subtask expects '<skills>|<instruction>', got %q", s)
+			}
+			entry := map[string]any{"instruction": strings.TrimSpace(instrPart)}
+			var sl []string
+			for _, q := range strings.Split(skillsPart, ",") {
+				if q = strings.TrimSpace(q); q != "" {
+					sl = append(sl, q)
+				}
+			}
+			if len(sl) > 0 {
+				entry["required_skills"] = sl
+			}
+			list = append(list, entry)
+		}
+		body["subtasks"] = list
+	}
 	var out map[string]any
 	if err := c.do(context.Background(), http.MethodPost, "/api/v1/tasks", body, &out); err != nil {
 		return err
 	}
 	return printJSON(out)
+}
+
+// stringList is a repeatable string flag value (--subtask a --subtask b).
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, "; ") }
+
+func (s *stringList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+func clientReload(args []string) error {
+	fs := flag.NewFlagSet("reload", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodPost, "/api/v1/admin/reload-config", map[string]any{}, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+func clientLeave(args []string) error {
+	fs := flag.NewFlagSet("leave", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodPost, "/api/v1/admin/leave", map[string]any{}, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
 }
 
 func clientTasks(args []string) error {

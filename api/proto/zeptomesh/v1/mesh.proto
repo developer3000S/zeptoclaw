@@ -7,7 +7,7 @@ syntax = "proto3";
 
 package zeptomesh.v1;
 
-option go_package = "github.com/zeptoclaw/zeptomesh/gen/zeptomesh/v1;zeptomeshv1";
+option go_package = "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1;zeptomeshv1";
 
 // ---------------------------------------------------------------------------
 // Transport-level protocol ids (registered on the libp2p host):
@@ -125,6 +125,29 @@ message TaskResult {
   bytes signature = 11;               // ed25519 over SigningResultBytes
   string signature_scheme = 12;
   repeated string route_stack = 13;   // copy of the envelope route at completion
+  // worker_signature is produced by worker_peer_id over the result body and is
+  // never rewritten by relays: each relay re-signs the transport copy
+  // (signature) but the origin verifies THIS field against the worker's key,
+  // so an intermediate node cannot silently edit the answer (ТЗ 6.10.3, 11.5).
+  bytes worker_signature = 14;
+  TaskErrorClass error_class = 15;
+  // aggregated marks a result that merged child subtask results (ТЗ 6.10.5).
+  bool aggregated = 16;
+}
+
+// TaskErrorClass is the machine-readable failure taxonomy (ТЗ 6.12). It lets a
+// relay decide whether a failure is retryable (network, no_worker) or terminal
+// (security, validation) without parsing human text.
+enum TaskErrorClass {
+  TASK_ERROR_CLASS_UNSPECIFIED = 0;
+  TASK_ERROR_CLASS_VALIDATION = 1;   // malformed or policy-invalid task
+  TASK_ERROR_CLASS_SECURITY = 2;     // signature, trust, allow-list
+  TASK_ERROR_CLASS_EXECUTION = 3;    // the agent itself failed
+  TASK_ERROR_CLASS_NO_WORKER = 4;    // no eligible executor found
+  TASK_ERROR_CLASS_NETWORK = 5;      // transport/peer unreachable
+  TASK_ERROR_CLASS_TIMEOUT = 6;      // deadline exceeded
+  TASK_ERROR_CLASS_LIMITS = 7;       // disk/memory/queue/rate limits
+  TASK_ERROR_CLASS_CANCELED = 8;     // canceled by user/admin/policy
 }
 
 // ResultAck confirms that an intermediate hop accepted a result for relay.

@@ -15,9 +15,9 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"google.golang.org/protobuf/proto"
 
-	pb "github.com/zeptoclaw/zeptomesh/gen/zeptomesh/v1"
-	"github.com/zeptoclaw/zeptomesh/internal/config"
-	"github.com/zeptoclaw/zeptomesh/internal/security"
+	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
+	"github.com/developer3000S/zeptoclaw/internal/config"
+	"github.com/developer3000S/zeptoclaw/internal/security"
 )
 
 // clockSkewSeconds bounds how far a peer's clock may drift from ours before its

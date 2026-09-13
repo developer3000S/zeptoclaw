@@ -13,7 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/zeptoclaw/zeptomesh/internal/config"
+	"github.com/developer3000S/zeptoclaw/internal/config"
 )
 
 // Pico Protocol message types, as defined by PicoClaw's pico channel.
@@ -182,7 +182,7 @@ func (a *WSAdapter) Execute(ctx context.Context, req Request) (*Response, error)
 
 	text, model, err := a.readTurn(ectx, conn, id)
 	finished := time.Now().UTC()
-	arts, _ := collectArtifacts(req.Workspace)
+	arts, _ := collectArtifacts(req.Workspace, req.MaxWorkspaceBytes)
 	resp := &Response{
 		Text:       text,
 		Model:      model,

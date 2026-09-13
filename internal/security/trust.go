@@ -254,8 +254,22 @@ func (p *Policy) explicitlyAllowed(pid peer.ID) bool {
 	return p.allow[pid]
 }
 
-// Mode returns the configured posture.
-func (p *Policy) Mode() Mode { return p.mode }
+// Mode returns the current posture.
+func (p *Policy) Mode() Mode {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.mode
+}
+
+// SetPosture swaps the live trust posture. Explicit allow/deny entries and
+// per-peer observations survive unchanged: revoking or admitting a peer is
+// its own deliberate act, never a side effect of a config reload (ТЗ 11.2 п.4).
+func (p *Policy) SetPosture(mode Mode, minTrustForTasks Trust) {
+	p.mu.Lock()
+	p.mode = mode
+	p.minTrustForTasks = minTrustForTasks
+	p.mu.Unlock()
+}
 
 // Snapshot lists peers with an explicit operator decision.
 func (p *Policy) Snapshot() (allowed, blocked []string) {
@@ -268,4 +282,23 @@ func (p *Policy) Snapshot() (allowed, blocked []string) {
 		blocked = append(blocked, pid.String())
 	}
 	return allowed, blocked
+}
+
+// MinTrustForTasks is the currently effective floor for accepting work.
+func (p *Policy) MinTrustForTasks() Trust {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.minTrustForTasks
+}
+
+// String implements fmt.Stringer for log and status output.
+func (m Mode) String() string {
+	switch m {
+	case ModeOpen:
+		return "open"
+	case ModePrivate:
+		return "private"
+	default:
+		return "limited"
+	}
 }

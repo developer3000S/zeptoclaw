@@ -13,8 +13,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 
-	pb "github.com/zeptoclaw/zeptomesh/gen/zeptomesh/v1"
-	"github.com/zeptoclaw/zeptomesh/internal/config"
+	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
+	"github.com/developer3000S/zeptoclaw/internal/config"
 )
 
 // testNode wires a Host plus a Service with the given handlers on a live

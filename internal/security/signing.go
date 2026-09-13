@@ -7,18 +7,19 @@ import (
 	ic "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 
-	pb "github.com/zeptoclaw/zeptomesh/gen/zeptomesh/v1"
-	"github.com/zeptoclaw/zeptomesh/internal/wire"
+	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
+	"github.com/developer3000S/zeptoclaw/internal/wire"
 )
 
 // Signature schemes. The name travels on the wire so a future format can be
 // introduced without ambiguity.
 const (
-	SchemeTask   = "zeptomesh-task-v1"
-	SchemeResult = "zeptomesh-result-v1"
-	SchemeCancel = "zeptomesh-cancel-v1"
-	SchemeCaps   = "zeptomesh-caps-v1"
-	SchemeAck    = "zeptomesh-ack-v1"
+	SchemeTask         = "zeptomesh-task-v1"
+	SchemeResult       = "zeptomesh-result-v1"
+	SchemeResultWorker = "zeptomesh-result-worker-v1"
+	SchemeCancel       = "zeptomesh-cancel-v1"
+	SchemeCaps         = "zeptomesh-caps-v1"
+	SchemeAck          = "zeptomesh-ack-v1"
 )
 
 // KeyLookup resolves a public key for a peer whose id does not embed one.
@@ -75,6 +76,46 @@ func (s *Signer) SignResult(r *pb.TaskResult) error {
 	r.Signature = sig
 	r.SignatureScheme = SchemeResult
 	return nil
+}
+
+// SignWorkerResult additionally stamps the worker chain signature (ТЗ 6.10.3,
+// 11.5). Unlike Signature, it is computed over the routing-independent content
+// and is never rewritten by relays, so the origin can prove what the executing
+// peer actually returned even after several hops re-signed the transport copy.
+func (s *Signer) SignWorkerResult(r *pb.TaskResult) error {
+	if err := s.SignResult(r); err != nil {
+		return err
+	}
+	content, err := wire.ResultContent(r)
+	if err != nil {
+		return err
+	}
+	sig, err := s.id.Sign(wire.Digest(SchemeResultWorker, content))
+	if err != nil {
+		return err
+	}
+	r.WorkerSignature = sig
+	return nil
+}
+
+// VerifyWorkerResult checks the chain signature against worker_peer_id. It is
+// independent of the last-hop signature and therefore survives relaying.
+func VerifyWorkerResult(r *pb.TaskResult, lookup KeyLookup) error {
+	if r == nil {
+		return errors.New("security: nil task result")
+	}
+	if len(r.GetWorkerSignature()) == 0 {
+		return ErrUnsigned
+	}
+	pid, err := peer.Decode(r.GetWorkerPeerId())
+	if err != nil {
+		return fmt.Errorf("security: result worker: %w", err)
+	}
+	content, err := wire.ResultContent(r)
+	if err != nil {
+		return err
+	}
+	return Verify(pid, wire.Digest(SchemeResultWorker, content), r.GetWorkerSignature(), lookup)
 }
 
 // SignCancel signs a cancel request in place.

@@ -183,21 +183,30 @@ priority, required_skills, payload со вложениями и метками, 
 
 ### 3.3. Правила приёма конверта (нормативные)
 
-`TaskManager` (этап 6) обязан применить проверки именно в этом порядке —
-дешёвые и отбрасывающие раньше дорогих:
+`tasks.Manager.OnTask` применяет проверки именно в этом порядке — дешёвые и
+отбрасывающие раньше дорогих (реализовано; см. `internal/p2p/service_test.go`,
+интеграционные сценарии ТЗ 17.2 — в работе):
 
-1. размер фрейма ≤ `security.max_message_bytes`;
+1. размер фрейма ≤ `security.max_message_bytes` (`p2p/framing.go`);
 2. `tasks.Validate(env, max_payload, now)` — структура, лимиты, возраст,
    сверка `context_digest`;
-3. `security.VerifyTask` — подпись против `sender_peer_id` (ключ из id);
-4. `tasks.CheckRoute(env, self)` — `ttl > 0` и отсутствие `self` в `route_stack`;
-5. `Policy.AllowTasksFrom(sender)` и `Limiter.Allow(sender)`;
-6. `storage.ClaimDedup(task_id, dedup_window)` — иначе `ACK DUPLICATE`;
-7. пересечение `constraints` с локальной политикой;
-8. решение «исполнить / делегировать» по `routing.Table.Select`.
+3. `sender_peer_id` совпадает с аутентифицированным удалённым пиром стрима;
+4. `security.VerifyTask` — подпись против `sender_peer_id` (ключ из id),
+   если `security.require_task_signature: true`;
+5. `tasks.CheckRoute(env, self)` — `ttl > 0` и отсутствие `self` в `route_stack`;
+6. сверка `deadline_at` (ограничение `tasks.max_timeout_seconds`);
+7. `Policy.AllowTasksFrom(sender)`, затем `Limiter.Allow(sender)` и лимит
+   `tasks.max_parallel_tasks_per_peer` для этого пира;
+8. `storage.ClaimDedup(task_id, dedup_window)` — иначе `ACK DUPLICATE`;
+9. пересечение `constraints` с локальной политикой (`canExecute`);
+10. решение «исполнить / делегировать»: `routing.Table.Select` + расширение
+    области поиска search-relay; при `constraints.allow_delegation = false`
+    узел без собственной мощности обязан отклонить задачу.
 
-Отрицательный исход любого шага ≥ 3 пишется в журнал безопасности и увеличивает
-счётчик протокольных ошибок пира.
+Отрицательный исход шагов 2–4 и 7 (`task_invalid`, `task_sender_mismatch`,
+`task_bad_signature`, `task_untrusted`) пишется в журнал безопасности; отказ по
+маршруту, дедлайну, rate limit и квоте пира — только `ACK REJECTED` (это
+легальное поведение соседа, а не протокольное нарушение).
 
 ### 3.4. Gossip-сообщение
 
@@ -246,11 +255,23 @@ task  key = CIDv1( codec=raw, mh=identity( sha256( "zeptomesh/task/v1/" + task_i
   проверкой) не определён — без него результат с файлами физически не забрать.
 - **Подтверждение получения результата origin'ом.** `ResultAck` даёт
   подтверждение только на одном хопе; end-to-end ack не определён.
-- **Отзыв (`cancel`) и его распространение.** Формат есть, семантика для уже
-  запущенного PicoClaw (прерывание процесса или только отмена пересылки) — нет.
-- **Агрегация подзадач.** `SubtaskSpec`/`SubtaskPlan` описаны в proto, но
-  правило сведения нескольких ответов в один (большинство, все, лучший) не
-  зафиксировано.
+- **Отзыв (`cancel`) и его распространение.** Реализовано: `OnCancel` принимает
+  запрос только от `origin_peer_id` и по валидной подписи, `applyCancelLocal`
+  дёргает `cancelFn` задачи (дочерний процесс PicoClaw убивается вместе с
+  группой процессов), отмена спускается по `downstream` и на детей разложенного
+  плана. Не определено только подтверждение отмены: `CancelResponse.accepted`
+  возвращается на каждом хопе, но end-to-end гарантии «весь тракт встал» origin
+  не собирает.
+- **Агрегация подзадач.** Правило сведения зафиксировано и реализовано
+  (`internal/tasks/decomposition.go`): ожидаются **все** дети; итог `COMPLETED`
+  только если все дети завершились; тексты склеиваются в порядке плана секциями
+  `### subtask N`, артефакты дедуплицируются по hash; первая ошибка определяет
+  итоговый статус и класс ошибки; `aggregated=true`, считается `result_digest`,
+  итог подписывается как исполнителем (`worker_signature`) — origin получает один
+  подписанный ответ, а не N. Retryable-ребёнок повторяется ровно один раз
+  (`maxSubtaskRetries=1`). План передаётся в поле `subtasks` JSON-API и
+  повторяемым CLI `--subtask`; `pb.SubtaskSpec` в proto объявлен, но не
+  используется (план живёт в `tasks.SubtaskRequest`).
 - **Делегирование доверия.** `TaskAck` подписан, но «цепочка принятия»
   (кто именно из промежуточных узлов обещал результат) в один field не
   упакована.

@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,15 +18,16 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/zeptoclaw/zeptomesh/internal/config"
-	"github.com/zeptoclaw/zeptomesh/internal/metrics"
-	"github.com/zeptoclaw/zeptomesh/internal/p2p"
-	"github.com/zeptoclaw/zeptomesh/internal/picoclaw"
-	"github.com/zeptoclaw/zeptomesh/internal/routing"
-	"github.com/zeptoclaw/zeptomesh/internal/security"
-	"github.com/zeptoclaw/zeptomesh/internal/storage"
+	"github.com/developer3000S/zeptoclaw/internal/config"
+	"github.com/developer3000S/zeptoclaw/internal/metrics"
+	"github.com/developer3000S/zeptoclaw/internal/p2p"
+	"github.com/developer3000S/zeptoclaw/internal/picoclaw"
+	"github.com/developer3000S/zeptoclaw/internal/routing"
+	"github.com/developer3000S/zeptoclaw/internal/security"
+	"github.com/developer3000S/zeptoclaw/internal/storage"
+	"github.com/developer3000S/zeptoclaw/internal/wire"
 
-	pb "github.com/zeptoclaw/zeptomesh/gen/zeptomesh/v1"
+	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
 )
 
 // SkillSource is the slice of membership/discovery the manager needs to answer
@@ -93,6 +95,12 @@ type handle struct {
 	downstream peer.ID
 	running    bool
 	cancelFn   context.CancelFunc
+	// parentID marks this task as a subtask injected by this node (ТЗ 6.10.5):
+	// its result folds into the aggregator's fanout instead of a waiter or an
+	// upstream relay.
+	parentID string
+	// fan is set on the parent handle while decomposition is in flight.
+	fan *fanout
 }
 
 // Options wires the manager to its collaborators.
@@ -177,6 +185,10 @@ type SubmitRequest struct {
 	AllowDeleg     *bool
 	AllowSubtasks  *bool
 	Labels         map[string]string
+	// Subtasks is the decomposition plan (ТЗ 6.9.1). When non-empty the task is
+	// not executed as a whole: each entry becomes an independently routed
+	// subtask and the results come back as one signed aggregate (ТЗ 6.10.5).
+	Subtasks []*SubtaskRequest
 }
 
 // Submit injects a root task authored by this node, starts routing it and
@@ -184,6 +196,17 @@ type SubmitRequest struct {
 func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (string, error) {
 	if strings.TrimSpace(req.Instruction) == "" {
 		return "", errors.New("tasks: empty instruction")
+	}
+	if len(req.Subtasks) > MaxSubtasks {
+		return "", fmt.Errorf("tasks: %d subtasks exceeds the limit of %d", len(req.Subtasks), MaxSubtasks)
+	}
+	if len(req.Subtasks) > 0 && req.AllowSubtasks != nil && !*req.AllowSubtasks {
+		return "", errors.New("tasks: subtask plan given while allow_subtasks=false")
+	}
+	for i, s := range req.Subtasks {
+		if s == nil || strings.TrimSpace(s.Instruction) == "" {
+			return "", fmt.Errorf("tasks: subtask %d has an empty instruction", i)
+		}
 	}
 	if req.TTL <= 0 {
 		req.TTL = int32(m.cfg.Tasks.DefaultTTL)
@@ -213,12 +236,32 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (string, error)
 
 	deadline := time.Now().UTC().Add(m.totalBudget(env))
 	h := &handle{env: env, deadline: deadline, waiter: make(chan *pb.TaskResult, 1)}
+	var fan *fanout
+	if len(req.Subtasks) > 0 {
+		fan = newFanout(env, deadline, req.Subtasks)
+		h.fan = fan
+	}
 	if !m.register(env.TaskId, h) {
 		return "", fmt.Errorf("tasks: task %s already tracked", env.TaskId)
 	}
 	m.recordJournal(env, Received, false)
 	m.countReceived()
 
+	if fan != nil {
+		go func() {
+			if err := m.decompose(fan); err != nil {
+				// The plan never got off the ground (bad ttl, rejected child):
+				// fail the parent instead of leaving a task that waits forever.
+				res := m.errorResult(env, "decomposition: "+err.Error(), pb.TaskStatus_TASK_STATUS_FAILED)
+				if serr := m.signer.SignResult(res); serr == nil {
+					m.absorbResult(res)
+				}
+				m.deliverWaiter(h, res)
+				m.resolve(env.GetTaskId())
+			}
+		}()
+		return env.GetTaskId(), nil
+	}
 	go m.routeOrigin(env, deadline)
 	return env.GetTaskId(), nil
 }
@@ -285,6 +328,25 @@ func (m *Manager) Cancel(ctx context.Context, taskID, reason string) error {
 		return err
 	}
 	m.applyCancelLocal(taskID, "canceled by origin: "+reason)
+	if h.fan != nil {
+		// A decomposed parent owns children on this node; cancelling the plan
+		// must cancel every outstanding child too, not just the parent record.
+		for _, cid := range h.fan.liveChildren() {
+			if ch := m.handleOf(cid); ch != nil {
+				cr := proto.Clone(req).(*pb.CancelRequest)
+				cr.TaskId = cid
+				if err := m.signer.SignCancel(cr); err == nil {
+					m.applyCancelLocal(cid, "canceled with parent: "+reason)
+					if ch.downstream != "" {
+						cctx, cancel := context.WithTimeout(ctx, m.svc.Timeout())
+						_, _ = m.svc.RPC(cctx, ch.downstream, &pb.RpcRequest{Kind: &pb.RpcRequest_Cancel{Cancel: cr}})
+						cancel()
+					}
+				}
+			}
+		}
+		return nil
+	}
 	if h.downstream != "" {
 		cctx, cancel := context.WithTimeout(ctx, m.svc.Timeout())
 		defer cancel()
@@ -388,6 +450,12 @@ func (m *Manager) OnTask(ctx context.Context, remote peer.ID, env *pb.TaskEnvelo
 	if m.limiter != nil && !m.limiter.Allow(remote.String()) {
 		return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_REJECTED, "rate limit exceeded"), nil
 	}
+	// Per-sender concurrency cap (tasks.max_parallel_tasks_per_peer): one busy
+	// origin must not occupy every local slot. Checked before registration so a
+	// refused task never occupies the inflight map or the dedup claim.
+	if limit := m.cfg.Tasks.MaxParallelPerPeer; limit > 0 && m.senderInflight(remote) >= limit {
+		return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_REJECTED, "per-peer parallel limit reached"), nil
+	}
 
 	claimed, _, err := m.store.ClaimDedup(env.GetTaskId(), m.cfg.Tasks.DedupWindow.D())
 	if err != nil {
@@ -443,9 +511,26 @@ func (m *Manager) OnResult(ctx context.Context, remote peer.ID, res *pb.TaskResu
 		return &pb.ResultAck{TaskId: res.GetTaskId(), Accepted: false, Reason: "unknown task"}, nil
 
 	case h.waiter != nil: // we are the origin: absorb and deliver
+		// The transport signature only proves who forwarded the result; the
+		// worker chain signature proves what the executing peer actually
+		// returned. A relay that edited the answer fails here (ТЗ 11.5).
+		if err := security.VerifyWorkerResult(res, m.keyLookup()); err != nil {
+			m.securityEvent("result_worker_signature", remote, res.GetTaskId(), err.Error())
+			return &pb.ResultAck{TaskId: res.GetTaskId(), Accepted: false, Reason: "worker signature: " + err.Error()}, nil
+		}
 		m.absorbResult(res)
 		m.deliverWaiter(h, res)
 		m.resolve(res.GetTaskId())
+		return &pb.ResultAck{TaskId: res.GetTaskId(), Accepted: true}, nil
+
+	case h.parentID != "": // a subtask we injected: settle it into the parent fanout
+		if err := security.VerifyWorkerResult(res, m.keyLookup()); err != nil {
+			m.securityEvent("subtask_worker_signature", remote, res.GetTaskId(), err.Error())
+			return &pb.ResultAck{TaskId: res.GetTaskId(), Accepted: false, Reason: "worker signature: " + err.Error()}, nil
+		}
+		m.absorbResult(res)
+		m.resolve(res.GetTaskId())
+		m.foldIfChild(h, res)
 		return &pb.ResultAck{TaskId: res.GetTaskId(), Accepted: true}, nil
 
 	default: // intermediate hop: relay upstream under our own signature
@@ -520,10 +605,19 @@ func (m *Manager) OnRPC(ctx context.Context, remote peer.ID, req *pb.RpcRequest)
 			want = 16
 		}
 		var recs []*pb.PeerRecord
-		for _, n := range m.table.Sample(want) {
+		for _, n := range m.table.Sample(want * 2) {
+			// A blocked or departed peer is never disclosed — an address answer
+			// is an inducement to connect, so it obeys the same policy gate as a
+			// skill-lookup response.
+			if n.Left || (m.policy != nil && !m.policy.AllowConnection(n.PeerID)) {
+				continue
+			}
 			recs = append(recs, &pb.PeerRecord{
 				PeerId: n.PeerID.String(), Addrs: n.Addrs, Skills: n.Skills, SeenAt: n.LastSeen.Unix(),
 			})
+			if len(recs) >= want {
+				break
+			}
 		}
 		return &pb.RpcResponse{Kind: &pb.RpcResponse_PeerExchange{PeerExchange: &pb.PeerExchangeResponse{Peers: recs}}}, nil
 	case *pb.RpcRequest_Cancel:
@@ -847,6 +941,11 @@ func (m *Manager) routeOrigin(env *pb.TaskEnvelope, deadline time.Time) {
 		m.absorbResult(res)
 	}
 	if h := m.handleOf(env.GetTaskId()); h != nil {
+		if h.parentID != "" {
+			m.resolve(env.GetTaskId())
+			m.foldIfChild(h, res)
+			return
+		}
 		m.deliverWaiter(h, res)
 		m.resolve(env.GetTaskId())
 	}
@@ -858,6 +957,11 @@ func (m *Manager) routeOrigin(env *pb.TaskEnvelope, deadline time.Time) {
 func (m *Manager) forward(env *pb.TaskEnvelope, deadline time.Time) bool {
 	if env.GetTtl() <= 1 {
 		return false // one more hop would spend the ttl
+	}
+	// The origin's right to keep the task local is binding (ТЗ 6.4.3): a node
+	// that cannot execute a no-delegation task must refuse it, not forward it.
+	if !env.GetConstraints().GetAllowDelegation() {
+		return false
 	}
 	fanout := m.cfg.Tasks.Forwarding.MaxFanout
 	cands := m.table.Select(env.GetRequiredSkills(), m.policy, m.self, fanout, nil)
@@ -1030,7 +1134,7 @@ func (m *Manager) runLocal(env *pb.TaskEnvelope, deadline time.Time) {
 		defer m.mets.TasksRunning.Dec()
 		defer m.mets.PicoClawRunning.Dec()
 	}
-	m.log.Info("task_executing", "task_id", env.GetTaskId(), "origin", env.GetOriginPeerId)
+	m.log.Info("task_executing", "task_id", env.GetTaskId(), "origin", env.GetOriginPeerId())
 
 	home, workspace, err := m.prepareSandbox(env)
 	if err != nil {
@@ -1039,15 +1143,17 @@ func (m *Manager) runLocal(env *pb.TaskEnvelope, deadline time.Time) {
 	}
 
 	resp, execErr := m.adapter.Execute(ectx, picoclaw.Request{
-		TaskID:       env.GetTaskId(),
-		Instruction:  env.GetPayload().GetInstruction(),
-		Skills:       append([]string(nil), env.GetRequiredSkills()...),
-		Workspace:    workspace,
-		Home:         home,
-		AllowShell:   env.GetConstraints().GetAllowShell() && m.cfg.Capabilities.AllowShell,
-		AllowNetwork: env.GetConstraints().GetAllowNetworkTools() && m.cfg.Capabilities.AllowNetworkTools,
-		Timeout:      timeout,
-		SessionKey:   "mesh:" + env.GetTaskId(),
+		TaskID:            env.GetTaskId(),
+		Instruction:       env.GetPayload().GetInstruction(),
+		Skills:            append([]string(nil), env.GetRequiredSkills()...),
+		Workspace:         workspace,
+		Home:              home,
+		AllowShell:        env.GetConstraints().GetAllowShell() && m.cfg.Capabilities.AllowShell,
+		AllowNetwork:      env.GetConstraints().GetAllowNetworkTools() && m.cfg.Capabilities.AllowNetworkTools,
+		Timeout:           timeout,
+		MaxWorkspaceBytes: m.cfg.Tasks.MaxWorkspaceBytes,
+		MaxMemoryBytes:    m.cfg.Tasks.MaxTaskMemoryBytes,
+		SessionKey:        "mesh:" + env.GetTaskId(),
 	})
 
 	res := m.baseResult(env, pb.TaskStatus_TASK_STATUS_COMPLETED)
@@ -1074,7 +1180,18 @@ func (m *Manager) runLocal(env *pb.TaskEnvelope, deadline time.Time) {
 // finishExecution delivers a locally produced result: origin absorbs,
 // executor relays upstream.
 func (m *Manager) finishExecution(env *pb.TaskEnvelope, res *pb.TaskResult) {
-	if err := m.signer.SignResult(res); err != nil {
+	// Content digest first: it commits text and artifact hashes, and both the
+	// transport signature and the task journal record cover it (ТЗ 9.2).
+	if d, err := wire.ResultDigest(res); err == nil {
+		res.ResultDigest = d
+	} else {
+		m.log.Warn("result_digest_failed", "task_id", env.GetTaskId(), "err", err.Error())
+	}
+	// The worker signature is the chain anchor (ТЗ 6.10.3): relays overwrite
+	// the transport signature with their own, but this one covers only the
+	// worker-authored content and lets the origin detect an intermediate node
+	// tampering with the answer.
+	if err := m.signer.SignWorkerResult(res); err != nil {
 		m.log.Error("result_sign_failed", "task_id", env.GetTaskId(), "err", err.Error())
 		return
 	}
@@ -1090,6 +1207,13 @@ func (m *Manager) finishExecution(env *pb.TaskEnvelope, res *pb.TaskResult) {
 		m.absorbResult(res)
 		m.deliverWaiter(h, res)
 		m.resolve(env.GetTaskId())
+		return
+	}
+	if h.parentID != "" {
+		// Executed locally as part of our own decomposition plan.
+		m.recordOutcome(res)
+		m.resolve(env.GetTaskId())
+		m.foldIfChild(h, res)
 		return
 	}
 	m.recordOutcome(res)
@@ -1163,10 +1287,17 @@ func (m *Manager) applyCancelLocal(taskID, reason string) {
 	}
 	res := m.errorResult(h.env, reason, pb.TaskStatus_TASK_STATUS_CANCELED)
 	if err := m.signer.SignResult(res); err == nil {
-		if h.waiter != nil {
+		switch {
+		case h.waiter != nil:
 			m.absorbResult(res)
 			m.deliverWaiter(h, res)
-		} else {
+		case h.parentID != "":
+			m.recordOutcome(res)
+			m.resolve(taskID)
+			m.foldIfChild(h, res)
+			m.countCanceled()
+			return
+		default:
 			m.recordOutcome(res)
 			if h.upstream != "" {
 				dctx, cancel := context.WithTimeout(context.Background(), m.svc.Timeout())
@@ -1212,6 +1343,9 @@ func (m *Manager) janitor(ctx context.Context) {
 					case h.waiter <- res:
 					default:
 					}
+				case h.parentID != "":
+					m.recordOutcome(res)
+					m.foldIfChild(h, res)
 				default:
 					m.recordOutcome(res)
 					if h.upstream != "" {
@@ -1302,6 +1436,20 @@ func (m *Manager) handleOf(taskID string) *handle {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.inflight[taskID]
+}
+
+// senderInflight counts tasks accepted from one origin peer that have not
+// settled yet; it backs tasks.max_parallel_tasks_per_peer.
+func (m *Manager) senderInflight(remote peer.ID) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, h := range m.inflight {
+		if h.env.GetOriginPeerId() == remote.String() {
+			n++
+		}
+	}
+	return n
 }
 
 func (m *Manager) deliverWaiter(h *handle, res *pb.TaskResult) {
@@ -1407,10 +1555,18 @@ func (m *Manager) totalBudget(env *pb.TaskEnvelope) time.Duration {
 }
 
 func timeoutSeconds(env *pb.TaskEnvelope, cfg *config.Config) int {
-	return TimeoutSeconds(env, cfg.Tasks.DefaultTimeoutSeconds)
+	return TimeoutSeconds(env, cfg.Tasks.DefaultTimeoutSeconds, cfg.Tasks.MaxTimeoutSeconds)
 }
 
 func (m *Manager) prepareSandbox(env *pb.TaskEnvelope) (home, workspace string, err error) {
+	// Disk guard first (ТЗ 6.8.4): refusing a task while the volume still has
+	// headroom beats starting it and failing halfway on ENOSPC. The check is
+	// best-effort — an unsupported filesystem must not block execution.
+	if min := m.cfg.Tasks.MaxDiskFreeBytes; min > 0 {
+		if free, derr := diskFree(m.cfg.TasksDir()); derr == nil && free < uint64(min) {
+			return "", "", fmt.Errorf("free disk %d bytes is below the configured minimum of %d", free, min)
+		}
+	}
 	base := filepath.Join(m.cfg.TasksDir(), sanitizeID(env.GetTaskId()))
 	home = filepath.Join(base, "home")
 	workspace = filepath.Join(base, "workspace")
@@ -1493,6 +1649,7 @@ func (m *Manager) baseResult(env *pb.TaskEnvelope, st pb.TaskStatus) *pb.TaskRes
 func (m *Manager) errorResult(env *pb.TaskEnvelope, msg string, st pb.TaskStatus) *pb.TaskResult {
 	res := m.baseResult(env, st)
 	res.ErrorMessage = capText(msg, 1024)
+	res.ErrorClass = ErrorClass(st, msg)
 	return res
 }
 
@@ -1502,14 +1659,17 @@ func cloneEnv(env *pb.TaskEnvelope) *pb.TaskEnvelope {
 
 func recordFromResult(res *pb.TaskResult) *storage.ResultRecord {
 	rec := &storage.ResultRecord{
-		TaskID:       res.GetTaskId(),
-		Status:       StatusFromProto(res.GetStatus()).String(),
-		Text:         res.GetText(),
-		ErrorMessage: res.GetErrorMessage(),
-		WorkerPeerID: res.GetWorkerPeerId(),
-		StartedAt:    time.Unix(res.GetStartedAt(), 0).UTC(),
-		FinishedAt:   time.Unix(res.GetFinishedAt(), 0).UTC(),
-		Signature:    append([]byte(nil), res.GetSignature()...),
+		TaskID:          res.GetTaskId(),
+		Status:          StatusFromProto(res.GetStatus()).String(),
+		Text:            res.GetText(),
+		ErrorMessage:    res.GetErrorMessage(),
+		WorkerPeerID:    res.GetWorkerPeerId(),
+		StartedAt:       time.Unix(res.GetStartedAt(), 0).UTC(),
+		FinishedAt:      time.Unix(res.GetFinishedAt(), 0).UTC(),
+		Signature:       append([]byte(nil), res.GetSignature()...),
+		WorkerSignature: append([]byte(nil), res.GetWorkerSignature()...),
+		ResultDigest:    fmt.Sprintf("%x", res.GetResultDigest()),
+		Aggregated:      res.GetAggregated(),
 	}
 	for _, a := range res.GetArtifacts() {
 		rec.Artifacts = append(rec.Artifacts, storage.ArtifactInfo{Name: a.GetName(), Hash: a.GetHash(), Size: a.GetSize()})
@@ -1519,15 +1679,20 @@ func recordFromResult(res *pb.TaskResult) *storage.ResultRecord {
 
 func resultFromRecord(rec *storage.ResultRecord) *pb.TaskResult {
 	res := &pb.TaskResult{
-		TaskId:       rec.TaskID,
-		Status:       statusToProtoByName(rec.Status),
-		Text:         rec.Text,
-		ErrorMessage: rec.ErrorMessage,
-		WorkerPeerId: rec.WorkerPeerID,
-		SenderPeerId: rec.WorkerPeerID,
-		StartedAt:    rec.StartedAt.Unix(),
-		FinishedAt:   rec.FinishedAt.Unix(),
-		Signature:    rec.Signature,
+		TaskId:          rec.TaskID,
+		Status:          statusToProtoByName(rec.Status),
+		Text:            rec.Text,
+		ErrorMessage:    rec.ErrorMessage,
+		WorkerPeerId:    rec.WorkerPeerID,
+		SenderPeerId:    rec.WorkerPeerID,
+		StartedAt:       rec.StartedAt.Unix(),
+		FinishedAt:      rec.FinishedAt.Unix(),
+		Signature:       rec.Signature,
+		WorkerSignature: rec.WorkerSignature,
+		Aggregated:      rec.Aggregated,
+	}
+	if d, err := hex.DecodeString(rec.ResultDigest); err == nil && rec.ResultDigest != "" {
+		res.ResultDigest = d
 	}
 	for _, a := range rec.Artifacts {
 		res.Artifacts = append(res.Artifacts, &pb.ArtifactRef{Name: a.Name, Hash: a.Hash, Size: a.Size})
@@ -1564,4 +1729,52 @@ func halfMax(cfg *config.Config) int {
 
 func sanitizeErr(err error) string {
 	return capText(strings.TrimSpace(err.Error()), 512)
+}
+
+// OnPeerDisconnected fails every task whose accepted downstream holder just
+// dropped the connection (ТЗ 17.2.5: a worker crashing mid-task must not
+// leave the origin waiting until the deadline). Tasks executing locally are
+// unaffected. The failure is routed exactly like a normal result: origin
+// waiter, subtask fanout, or upstream relay.
+func (m *Manager) OnPeerDisconnected(p peer.ID) {
+	m.mu.Lock()
+	var victims []*handle
+	for _, h := range m.inflight {
+		if h.downstream == p && !h.running {
+			victims = append(victims, h)
+			h.downstream = "" // the cancel path must not chase a dead peer
+		}
+	}
+	m.mu.Unlock()
+
+	for _, h := range victims {
+		res := m.errorResult(h.env, "downstream peer disconnected before returning a result",
+			pb.TaskStatus_TASK_STATUS_TIMEOUT)
+		if err := m.signer.SignResult(res); err != nil {
+			m.recordOutcome(res)
+			m.resolve(h.env.GetTaskId())
+			continue
+		}
+		switch {
+		case h.waiter != nil:
+			m.absorbResult(res)
+			m.deliverWaiter(h, res)
+		case h.parentID != "":
+			m.resolve(h.env.GetTaskId())
+			m.foldIfChild(h, res)
+			continue
+		case h.upstream != "":
+			m.recordOutcome(res)
+			dctx, cancel := context.WithTimeout(context.Background(), m.svc.Timeout())
+			if _, err := m.svc.SendResult(dctx, h.upstream, res); err != nil {
+				m.log.Warn("failure_relay_failed", "task_id", h.env.GetTaskId(), "err", err.Error())
+			}
+			cancel()
+		default:
+			m.recordOutcome(res)
+		}
+		m.resolve(h.env.GetTaskId())
+		m.countTimeout()
+		m.log.Info("task_failed_peer_gone", "task_id", h.env.GetTaskId(), "peer", p.String())
+	}
 }

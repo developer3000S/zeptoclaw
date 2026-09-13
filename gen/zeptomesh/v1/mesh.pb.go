@@ -224,6 +224,76 @@ func (TrustLevel) EnumDescriptor() ([]byte, []int) {
 	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{2}
 }
 
+// TaskErrorClass is the machine-readable failure taxonomy (ТЗ 6.12). It lets a
+// relay decide whether a failure is retryable (network, no_worker) or terminal
+// (security, validation) without parsing human text.
+type TaskErrorClass int32
+
+const (
+	TaskErrorClass_TASK_ERROR_CLASS_UNSPECIFIED TaskErrorClass = 0
+	TaskErrorClass_TASK_ERROR_CLASS_VALIDATION  TaskErrorClass = 1 // malformed or policy-invalid task
+	TaskErrorClass_TASK_ERROR_CLASS_SECURITY    TaskErrorClass = 2 // signature, trust, allow-list
+	TaskErrorClass_TASK_ERROR_CLASS_EXECUTION   TaskErrorClass = 3 // the agent itself failed
+	TaskErrorClass_TASK_ERROR_CLASS_NO_WORKER   TaskErrorClass = 4 // no eligible executor found
+	TaskErrorClass_TASK_ERROR_CLASS_NETWORK     TaskErrorClass = 5 // transport/peer unreachable
+	TaskErrorClass_TASK_ERROR_CLASS_TIMEOUT     TaskErrorClass = 6 // deadline exceeded
+	TaskErrorClass_TASK_ERROR_CLASS_LIMITS      TaskErrorClass = 7 // disk/memory/queue/rate limits
+	TaskErrorClass_TASK_ERROR_CLASS_CANCELED    TaskErrorClass = 8 // canceled by user/admin/policy
+)
+
+// Enum value maps for TaskErrorClass.
+var (
+	TaskErrorClass_name = map[int32]string{
+		0: "TASK_ERROR_CLASS_UNSPECIFIED",
+		1: "TASK_ERROR_CLASS_VALIDATION",
+		2: "TASK_ERROR_CLASS_SECURITY",
+		3: "TASK_ERROR_CLASS_EXECUTION",
+		4: "TASK_ERROR_CLASS_NO_WORKER",
+		5: "TASK_ERROR_CLASS_NETWORK",
+		6: "TASK_ERROR_CLASS_TIMEOUT",
+		7: "TASK_ERROR_CLASS_LIMITS",
+		8: "TASK_ERROR_CLASS_CANCELED",
+	}
+	TaskErrorClass_value = map[string]int32{
+		"TASK_ERROR_CLASS_UNSPECIFIED": 0,
+		"TASK_ERROR_CLASS_VALIDATION":  1,
+		"TASK_ERROR_CLASS_SECURITY":    2,
+		"TASK_ERROR_CLASS_EXECUTION":   3,
+		"TASK_ERROR_CLASS_NO_WORKER":   4,
+		"TASK_ERROR_CLASS_NETWORK":     5,
+		"TASK_ERROR_CLASS_TIMEOUT":     6,
+		"TASK_ERROR_CLASS_LIMITS":      7,
+		"TASK_ERROR_CLASS_CANCELED":    8,
+	}
+)
+
+func (x TaskErrorClass) Enum() *TaskErrorClass {
+	p := new(TaskErrorClass)
+	*p = x
+	return p
+}
+
+func (x TaskErrorClass) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (TaskErrorClass) Descriptor() protoreflect.EnumDescriptor {
+	return file_zeptomesh_v1_mesh_proto_enumTypes[3].Descriptor()
+}
+
+func (TaskErrorClass) Type() protoreflect.EnumType {
+	return &file_zeptomesh_v1_mesh_proto_enumTypes[3]
+}
+
+func (x TaskErrorClass) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use TaskErrorClass.Descriptor instead.
+func (TaskErrorClass) EnumDescriptor() ([]byte, []int) {
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{3}
+}
+
 // TaskConstraints narrows what the executor is allowed to do. A node always
 // intersects these with its own operator policy; a task can only lose rights.
 type TaskConstraints struct {
@@ -692,8 +762,16 @@ type TaskResult struct {
 	Signature       []byte                 `protobuf:"bytes,11,opt,name=signature,proto3" json:"signature,omitempty"`                             // ed25519 over SigningResultBytes
 	SignatureScheme string                 `protobuf:"bytes,12,opt,name=signature_scheme,json=signatureScheme,proto3" json:"signature_scheme,omitempty"`
 	RouteStack      []string               `protobuf:"bytes,13,rep,name=route_stack,json=routeStack,proto3" json:"route_stack,omitempty"` // copy of the envelope route at completion
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// worker_signature is produced by worker_peer_id over the result body and is
+	// never rewritten by relays: each relay re-signs the transport copy
+	// (signature) but the origin verifies THIS field against the worker's key,
+	// so an intermediate node cannot silently edit the answer (ТЗ 6.10.3, 11.5).
+	WorkerSignature []byte         `protobuf:"bytes,14,opt,name=worker_signature,json=workerSignature,proto3" json:"worker_signature,omitempty"`
+	ErrorClass      TaskErrorClass `protobuf:"varint,15,opt,name=error_class,json=errorClass,proto3,enum=zeptomesh.v1.TaskErrorClass" json:"error_class,omitempty"`
+	// aggregated marks a result that merged child subtask results (ТЗ 6.10.5).
+	Aggregated    bool `protobuf:"varint,16,opt,name=aggregated,proto3" json:"aggregated,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TaskResult) Reset() {
@@ -815,6 +893,27 @@ func (x *TaskResult) GetRouteStack() []string {
 		return x.RouteStack
 	}
 	return nil
+}
+
+func (x *TaskResult) GetWorkerSignature() []byte {
+	if x != nil {
+		return x.WorkerSignature
+	}
+	return nil
+}
+
+func (x *TaskResult) GetErrorClass() TaskErrorClass {
+	if x != nil {
+		return x.ErrorClass
+	}
+	return TaskErrorClass_TASK_ERROR_CLASS_UNSPECIFIED
+}
+
+func (x *TaskResult) GetAggregated() bool {
+	if x != nil {
+		return x.Aggregated
+	}
+	return false
 }
 
 // ResultAck confirms that an intermediate hop accepted a result for relay.
@@ -2179,7 +2278,7 @@ const file_zeptomesh_v1_mesh_proto_rawDesc = "" +
 	"\vaccepted_by\x18\x04 \x01(\tR\n" +
 	"acceptedBy\x12\x1c\n" +
 	"\ttimestamp\x18\x05 \x01(\x03R\ttimestamp\x12\x1c\n" +
-	"\tsignature\x18\x06 \x01(\fR\tsignature\"\xe4\x03\n" +
+	"\tsignature\x18\x06 \x01(\fR\tsignature\"\xee\x04\n" +
 	"\n" +
 	"TaskResult\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12$\n" +
@@ -2198,7 +2297,13 @@ const file_zeptomesh_v1_mesh_proto_rawDesc = "" +
 	"\tsignature\x18\v \x01(\fR\tsignature\x12)\n" +
 	"\x10signature_scheme\x18\f \x01(\tR\x0fsignatureScheme\x12\x1f\n" +
 	"\vroute_stack\x18\r \x03(\tR\n" +
-	"routeStack\"X\n" +
+	"routeStack\x12)\n" +
+	"\x10worker_signature\x18\x0e \x01(\fR\x0fworkerSignature\x12=\n" +
+	"\verror_class\x18\x0f \x01(\x0e2\x1c.zeptomesh.v1.TaskErrorClassR\n" +
+	"errorClass\x12\x1e\n" +
+	"\n" +
+	"aggregated\x18\x10 \x01(\bR\n" +
+	"aggregated\"X\n" +
 	"\tResultAck\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1a\n" +
 	"\baccepted\x18\x02 \x01(\bR\baccepted\x12\x16\n" +
@@ -2321,7 +2426,17 @@ const file_zeptomesh_v1_mesh_proto_rawDesc = "" +
 	"\x11TRUST_LEVEL_KNOWN\x10\x02\x12\x17\n" +
 	"\x13TRUST_LEVEL_LIMITED\x10\x03\x12\x19\n" +
 	"\x15TRUST_LEVEL_UNTRUSTED\x10\x04\x12\x17\n" +
-	"\x13TRUST_LEVEL_BLOCKED\x10\x05B=Z;github.com/zeptoclaw/zeptomesh/gen/zeptomesh/v1;zeptomeshv1b\x06proto3"
+	"\x13TRUST_LEVEL_BLOCKED\x10\x05*\xaa\x02\n" +
+	"\x0eTaskErrorClass\x12 \n" +
+	"\x1cTASK_ERROR_CLASS_UNSPECIFIED\x10\x00\x12\x1f\n" +
+	"\x1bTASK_ERROR_CLASS_VALIDATION\x10\x01\x12\x1d\n" +
+	"\x19TASK_ERROR_CLASS_SECURITY\x10\x02\x12\x1e\n" +
+	"\x1aTASK_ERROR_CLASS_EXECUTION\x10\x03\x12\x1e\n" +
+	"\x1aTASK_ERROR_CLASS_NO_WORKER\x10\x04\x12\x1c\n" +
+	"\x18TASK_ERROR_CLASS_NETWORK\x10\x05\x12\x1c\n" +
+	"\x18TASK_ERROR_CLASS_TIMEOUT\x10\x06\x12\x1b\n" +
+	"\x17TASK_ERROR_CLASS_LIMITS\x10\a\x12\x1d\n" +
+	"\x19TASK_ERROR_CLASS_CANCELED\x10\bBBZ@github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1;zeptomeshv1b\x06proto3"
 
 var (
 	file_zeptomesh_v1_mesh_proto_rawDescOnce sync.Once
@@ -2335,65 +2450,67 @@ func file_zeptomesh_v1_mesh_proto_rawDescGZIP() []byte {
 	return file_zeptomesh_v1_mesh_proto_rawDescData
 }
 
-var file_zeptomesh_v1_mesh_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_zeptomesh_v1_mesh_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
 var file_zeptomesh_v1_mesh_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_zeptomesh_v1_mesh_proto_goTypes = []any{
 	(TaskStatus)(0),              // 0: zeptomesh.v1.TaskStatus
 	(AckStatus)(0),               // 1: zeptomesh.v1.AckStatus
 	(TrustLevel)(0),              // 2: zeptomesh.v1.TrustLevel
-	(*TaskConstraints)(nil),      // 3: zeptomesh.v1.TaskConstraints
-	(*TaskPayload)(nil),          // 4: zeptomesh.v1.TaskPayload
-	(*ArtifactRef)(nil),          // 5: zeptomesh.v1.ArtifactRef
-	(*TaskEnvelope)(nil),         // 6: zeptomesh.v1.TaskEnvelope
-	(*TaskAck)(nil),              // 7: zeptomesh.v1.TaskAck
-	(*TaskResult)(nil),           // 8: zeptomesh.v1.TaskResult
-	(*ResultAck)(nil),            // 9: zeptomesh.v1.ResultAck
-	(*Capabilities)(nil),         // 10: zeptomesh.v1.Capabilities
-	(*PeerState)(nil),            // 11: zeptomesh.v1.PeerState
-	(*MembershipGossip)(nil),     // 12: zeptomesh.v1.MembershipGossip
-	(*SubtaskSpec)(nil),          // 13: zeptomesh.v1.SubtaskSpec
-	(*RpcRequest)(nil),           // 14: zeptomesh.v1.RpcRequest
-	(*RpcResponse)(nil),          // 15: zeptomesh.v1.RpcResponse
-	(*PingRequest)(nil),          // 16: zeptomesh.v1.PingRequest
-	(*PingResponse)(nil),         // 17: zeptomesh.v1.PingResponse
-	(*CapabilitiesRequest)(nil),  // 18: zeptomesh.v1.CapabilitiesRequest
-	(*CapabilitiesResponse)(nil), // 19: zeptomesh.v1.CapabilitiesResponse
-	(*PeerRecord)(nil),           // 20: zeptomesh.v1.PeerRecord
-	(*PeerExchangeRequest)(nil),  // 21: zeptomesh.v1.PeerExchangeRequest
-	(*PeerExchangeResponse)(nil), // 22: zeptomesh.v1.PeerExchangeResponse
-	(*CancelRequest)(nil),        // 23: zeptomesh.v1.CancelRequest
-	(*CancelResponse)(nil),       // 24: zeptomesh.v1.CancelResponse
-	(*SkillLookupRequest)(nil),   // 25: zeptomesh.v1.SkillLookupRequest
-	(*SkillLookupResponse)(nil),  // 26: zeptomesh.v1.SkillLookupResponse
-	nil,                          // 27: zeptomesh.v1.TaskPayload.LabelsEntry
+	(TaskErrorClass)(0),          // 3: zeptomesh.v1.TaskErrorClass
+	(*TaskConstraints)(nil),      // 4: zeptomesh.v1.TaskConstraints
+	(*TaskPayload)(nil),          // 5: zeptomesh.v1.TaskPayload
+	(*ArtifactRef)(nil),          // 6: zeptomesh.v1.ArtifactRef
+	(*TaskEnvelope)(nil),         // 7: zeptomesh.v1.TaskEnvelope
+	(*TaskAck)(nil),              // 8: zeptomesh.v1.TaskAck
+	(*TaskResult)(nil),           // 9: zeptomesh.v1.TaskResult
+	(*ResultAck)(nil),            // 10: zeptomesh.v1.ResultAck
+	(*Capabilities)(nil),         // 11: zeptomesh.v1.Capabilities
+	(*PeerState)(nil),            // 12: zeptomesh.v1.PeerState
+	(*MembershipGossip)(nil),     // 13: zeptomesh.v1.MembershipGossip
+	(*SubtaskSpec)(nil),          // 14: zeptomesh.v1.SubtaskSpec
+	(*RpcRequest)(nil),           // 15: zeptomesh.v1.RpcRequest
+	(*RpcResponse)(nil),          // 16: zeptomesh.v1.RpcResponse
+	(*PingRequest)(nil),          // 17: zeptomesh.v1.PingRequest
+	(*PingResponse)(nil),         // 18: zeptomesh.v1.PingResponse
+	(*CapabilitiesRequest)(nil),  // 19: zeptomesh.v1.CapabilitiesRequest
+	(*CapabilitiesResponse)(nil), // 20: zeptomesh.v1.CapabilitiesResponse
+	(*PeerRecord)(nil),           // 21: zeptomesh.v1.PeerRecord
+	(*PeerExchangeRequest)(nil),  // 22: zeptomesh.v1.PeerExchangeRequest
+	(*PeerExchangeResponse)(nil), // 23: zeptomesh.v1.PeerExchangeResponse
+	(*CancelRequest)(nil),        // 24: zeptomesh.v1.CancelRequest
+	(*CancelResponse)(nil),       // 25: zeptomesh.v1.CancelResponse
+	(*SkillLookupRequest)(nil),   // 26: zeptomesh.v1.SkillLookupRequest
+	(*SkillLookupResponse)(nil),  // 27: zeptomesh.v1.SkillLookupResponse
+	nil,                          // 28: zeptomesh.v1.TaskPayload.LabelsEntry
 }
 var file_zeptomesh_v1_mesh_proto_depIdxs = []int32{
-	5,  // 0: zeptomesh.v1.TaskPayload.attachments:type_name -> zeptomesh.v1.ArtifactRef
-	27, // 1: zeptomesh.v1.TaskPayload.labels:type_name -> zeptomesh.v1.TaskPayload.LabelsEntry
-	4,  // 2: zeptomesh.v1.TaskEnvelope.payload:type_name -> zeptomesh.v1.TaskPayload
-	3,  // 3: zeptomesh.v1.TaskEnvelope.constraints:type_name -> zeptomesh.v1.TaskConstraints
+	6,  // 0: zeptomesh.v1.TaskPayload.attachments:type_name -> zeptomesh.v1.ArtifactRef
+	28, // 1: zeptomesh.v1.TaskPayload.labels:type_name -> zeptomesh.v1.TaskPayload.LabelsEntry
+	5,  // 2: zeptomesh.v1.TaskEnvelope.payload:type_name -> zeptomesh.v1.TaskPayload
+	4,  // 3: zeptomesh.v1.TaskEnvelope.constraints:type_name -> zeptomesh.v1.TaskConstraints
 	1,  // 4: zeptomesh.v1.TaskAck.status:type_name -> zeptomesh.v1.AckStatus
 	0,  // 5: zeptomesh.v1.TaskResult.status:type_name -> zeptomesh.v1.TaskStatus
-	5,  // 6: zeptomesh.v1.TaskResult.artifacts:type_name -> zeptomesh.v1.ArtifactRef
-	11, // 7: zeptomesh.v1.MembershipGossip.states:type_name -> zeptomesh.v1.PeerState
-	16, // 8: zeptomesh.v1.RpcRequest.ping:type_name -> zeptomesh.v1.PingRequest
-	18, // 9: zeptomesh.v1.RpcRequest.capabilities:type_name -> zeptomesh.v1.CapabilitiesRequest
-	21, // 10: zeptomesh.v1.RpcRequest.peer_exchange:type_name -> zeptomesh.v1.PeerExchangeRequest
-	23, // 11: zeptomesh.v1.RpcRequest.cancel:type_name -> zeptomesh.v1.CancelRequest
-	25, // 12: zeptomesh.v1.RpcRequest.skill_lookup:type_name -> zeptomesh.v1.SkillLookupRequest
-	17, // 13: zeptomesh.v1.RpcResponse.ping:type_name -> zeptomesh.v1.PingResponse
-	19, // 14: zeptomesh.v1.RpcResponse.capabilities:type_name -> zeptomesh.v1.CapabilitiesResponse
-	22, // 15: zeptomesh.v1.RpcResponse.peer_exchange:type_name -> zeptomesh.v1.PeerExchangeResponse
-	24, // 16: zeptomesh.v1.RpcResponse.cancel:type_name -> zeptomesh.v1.CancelResponse
-	26, // 17: zeptomesh.v1.RpcResponse.skill_lookup:type_name -> zeptomesh.v1.SkillLookupResponse
-	10, // 18: zeptomesh.v1.CapabilitiesResponse.capabilities:type_name -> zeptomesh.v1.Capabilities
-	20, // 19: zeptomesh.v1.PeerExchangeResponse.peers:type_name -> zeptomesh.v1.PeerRecord
-	20, // 20: zeptomesh.v1.SkillLookupResponse.peers:type_name -> zeptomesh.v1.PeerRecord
-	21, // [21:21] is the sub-list for method output_type
-	21, // [21:21] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	6,  // 6: zeptomesh.v1.TaskResult.artifacts:type_name -> zeptomesh.v1.ArtifactRef
+	3,  // 7: zeptomesh.v1.TaskResult.error_class:type_name -> zeptomesh.v1.TaskErrorClass
+	12, // 8: zeptomesh.v1.MembershipGossip.states:type_name -> zeptomesh.v1.PeerState
+	17, // 9: zeptomesh.v1.RpcRequest.ping:type_name -> zeptomesh.v1.PingRequest
+	19, // 10: zeptomesh.v1.RpcRequest.capabilities:type_name -> zeptomesh.v1.CapabilitiesRequest
+	22, // 11: zeptomesh.v1.RpcRequest.peer_exchange:type_name -> zeptomesh.v1.PeerExchangeRequest
+	24, // 12: zeptomesh.v1.RpcRequest.cancel:type_name -> zeptomesh.v1.CancelRequest
+	26, // 13: zeptomesh.v1.RpcRequest.skill_lookup:type_name -> zeptomesh.v1.SkillLookupRequest
+	18, // 14: zeptomesh.v1.RpcResponse.ping:type_name -> zeptomesh.v1.PingResponse
+	20, // 15: zeptomesh.v1.RpcResponse.capabilities:type_name -> zeptomesh.v1.CapabilitiesResponse
+	23, // 16: zeptomesh.v1.RpcResponse.peer_exchange:type_name -> zeptomesh.v1.PeerExchangeResponse
+	25, // 17: zeptomesh.v1.RpcResponse.cancel:type_name -> zeptomesh.v1.CancelResponse
+	27, // 18: zeptomesh.v1.RpcResponse.skill_lookup:type_name -> zeptomesh.v1.SkillLookupResponse
+	11, // 19: zeptomesh.v1.CapabilitiesResponse.capabilities:type_name -> zeptomesh.v1.Capabilities
+	21, // 20: zeptomesh.v1.PeerExchangeResponse.peers:type_name -> zeptomesh.v1.PeerRecord
+	21, // 21: zeptomesh.v1.SkillLookupResponse.peers:type_name -> zeptomesh.v1.PeerRecord
+	22, // [22:22] is the sub-list for method output_type
+	22, // [22:22] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_zeptomesh_v1_mesh_proto_init() }
@@ -2420,7 +2537,7 @@ func file_zeptomesh_v1_mesh_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_zeptomesh_v1_mesh_proto_rawDesc), len(file_zeptomesh_v1_mesh_proto_rawDesc)),
-			NumEnums:      3,
+			NumEnums:      4,
 			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   0,

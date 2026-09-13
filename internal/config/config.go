@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -61,11 +62,43 @@ type Config struct {
 
 // NodeConfig describes the daemon's own identity on disk and on the wire.
 type NodeConfig struct {
-	Name           string   `yaml:"name"`
-	DataDir        string   `yaml:"data_dir"`
-	Listen         []string `yaml:"listen"`
-	Announce       []string `yaml:"announce"`
-	PrivateNetwork string   `yaml:"private_network_psk"` // optional hex PSK: isolates the mesh
+	Name           string      `yaml:"name"`
+	DataDir        string      `yaml:"data_dir"`
+	Listen         []string    `yaml:"listen"`
+	Announce       []string    `yaml:"announce"`
+	PrivateNetwork string      `yaml:"private_network_psk"` // optional hex PSK: isolates the mesh
+	Relay          RelayConfig `yaml:"relay"`
+}
+
+// RelayConfig controls circuit-relay v2 (ТЗ 6.3.3.4): nodes behind NAT connect
+// through peers that run the relay service. Relay is off by default; direct
+// connections are always preferred, and the relay only carries the encrypted
+// libp2p stream — it can never read task content.
+type RelayConfig struct {
+	// Enabled makes this node use relays when a direct connection fails.
+	Enabled bool `yaml:"enabled"`
+	// AdvertiseAsRelay turns this node into a relay for others.
+	AdvertiseAsRelay bool `yaml:"advertise_as_relay"`
+	// StaticRelays is an optional explicit list of relay AddrInfos.
+	StaticRelays []string `yaml:"static_relays"`
+	// Limit bounds the relay service: connections, reservations, bandwidth.
+	Limit RelayLimitConfig `yaml:"limit"`
+}
+
+// RelayLimitConfig bounds what a relay service spends on foreign traffic.
+type RelayLimitConfig struct {
+	// MaxReservations caps how many behind-NAT peers may hold a slot here.
+	MaxReservations int `yaml:"max_reservations"`
+	// MaxCircuits caps simultaneously open relayed connections per peer.
+	MaxCircuits int `yaml:"max_circuits"`
+	// ReservationTTL is how long a reservation stays valid (refreshed by the
+	// relayed peer). Default 1h.
+	ReservationTTL Duration `yaml:"reservation_ttl"`
+	// ConnDuration is the hard lifetime of one relayed connection (0 = 2min).
+	ConnDuration Duration `yaml:"conn_duration"`
+	// ConnDataBytes is the per-direction data cap of one relayed connection
+	// before it is reset (0 = 128KB). This is the bandwidth bound of 6.3.3.4.
+	ConnDataBytes int64 `yaml:"conn_data_bytes"`
 }
 
 // IdentityConfig points at the Ed25519 key material.
@@ -108,9 +141,14 @@ type TasksConfig struct {
 	DefaultTTL            int              `yaml:"default_ttl"`
 	MaxTTL                int              `yaml:"max_ttl"`
 	MaxParallelTasks      int              `yaml:"max_parallel_tasks"`
+	MaxParallelPerPeer    int              `yaml:"max_parallel_tasks_per_peer"`
 	DefaultTimeoutSeconds int              `yaml:"default_timeout_seconds"`
+	MaxTimeoutSeconds     int              `yaml:"max_timeout_seconds"`
 	MaxPayloadBytes       int64            `yaml:"max_task_payload_bytes"`
 	MaxArtifactBytes      int64            `yaml:"max_artifact_bytes"`
+	MaxWorkspaceBytes     int64            `yaml:"max_workspace_bytes"`
+	MaxDiskFreeBytes      int64            `yaml:"min_free_disk_bytes"`
+	MaxTaskMemoryBytes    int64            `yaml:"max_task_memory_bytes"`
 	DedupWindow           Duration         `yaml:"dedup_window"`
 	Forwarding            ForwardingConfig `yaml:"forwarding"`
 	Retention             Duration         `yaml:"retention"`
@@ -241,6 +279,17 @@ func Default() *Config {
 				"/ip4/0.0.0.0/tcp/4001",
 				"/ip4/0.0.0.0/udp/4001/quic-v1",
 			},
+			Relay: RelayConfig{
+				Enabled:          false,
+				AdvertiseAsRelay: false,
+				Limit: RelayLimitConfig{
+					MaxReservations: 128,
+					MaxCircuits:     16,
+					ReservationTTL:  Duration(time.Hour),
+					ConnDuration:    Duration(2 * time.Minute),
+					ConnDataBytes:   1 << 17, // 128 KB per direction
+				},
+			},
 		},
 		Identity: IdentityConfig{KeyFile: ""},
 		Discovery: DiscoveryConfig{
@@ -265,9 +314,14 @@ func Default() *Config {
 			DefaultTTL:            5,
 			MaxTTL:                10,
 			MaxParallelTasks:      4,
+			MaxParallelPerPeer:    2,
 			DefaultTimeoutSeconds: 600,
+			MaxTimeoutSeconds:     3600,
 			MaxPayloadBytes:       1 << 20,
 			MaxArtifactBytes:      100 << 20,
+			MaxWorkspaceBytes:     512 << 20,
+			MaxDiskFreeBytes:      1 << 30,
+			MaxTaskMemoryBytes:    1 << 30,
 			DedupWindow:           Duration(15 * time.Minute),
 			Retention:             Duration(7 * 24 * time.Hour),
 			Forwarding: ForwardingConfig{
@@ -516,6 +570,30 @@ func (c *Config) Validate() error {
 	if c.Tasks.Forwarding.MaxParallelCandidates > c.Tasks.Forwarding.MaxFanout {
 		errs = append(errs, errors.New("tasks.forwarding.max_parallel_candidates must be <= max_fanout"))
 	}
+	if c.Tasks.MaxParallelPerPeer < 0 {
+		errs = append(errs, errors.New("tasks.max_parallel_tasks_per_peer must be >= 0"))
+	}
+	if c.Tasks.DefaultTimeoutSeconds <= 0 {
+		c.Tasks.DefaultTimeoutSeconds = 600
+	}
+	if c.Tasks.MaxTimeoutSeconds <= 0 {
+		errs = append(errs, errors.New("tasks.max_timeout_seconds must be > 0"))
+	}
+	if c.Tasks.MaxTimeoutSeconds < c.Tasks.DefaultTimeoutSeconds {
+		errs = append(errs, errors.New("tasks.max_timeout_seconds must be >= tasks.default_timeout_seconds"))
+	}
+	if c.Tasks.MaxPayloadBytes <= 0 {
+		errs = append(errs, errors.New("tasks.max_task_payload_bytes must be > 0"))
+	}
+	if c.Tasks.MaxArtifactBytes <= 0 {
+		errs = append(errs, errors.New("tasks.max_artifact_bytes must be > 0"))
+	}
+	if c.Tasks.MaxWorkspaceBytes < 0 || c.Tasks.MaxDiskFreeBytes < 0 || c.Tasks.MaxTaskMemoryBytes < 0 {
+		errs = append(errs, errors.New("tasks resource limits must be >= 0 (0 disables the guard)"))
+	}
+	if c.Node.Relay.Limit.MaxReservations < 0 || c.Node.Relay.Limit.MaxCircuits < 0 {
+		errs = append(errs, errors.New("node.relay.limit values must be >= 0"))
+	}
 	if c.Neighbors.Max < c.Neighbors.Target || c.Neighbors.Target < c.Neighbors.Min {
 		errs = append(errs, errors.New("neighbors must satisfy min <= target <= max"))
 	}
@@ -594,4 +672,56 @@ func (c *Config) EffectiveSkills() []string {
 		}
 	}
 	return out
+}
+
+// ReloadDiff classifies what changed between the running config and a freshly
+// parsed one: some sections are honoured by live code (the task manager reads
+// cfg.Tasks every call; trust decisions read cfg.Capabilities), others are
+// baked in at startup (listeners, PSK, gossip topic, DHT, API bind).
+//
+// Anything that can only be honoured by a restart is listed honestly rather
+// than half-applied: the admin must know the process is not yet using it.
+type ReloadDiff struct {
+	Hot             []string `json:"hot"`
+	RequiresRestart []string `json:"requires_restart"`
+}
+
+// Diff compares the running config c with the candidate next (already
+// defaulted and validated). Sections absent from both lists are unchanged.
+func (c *Config) Diff(next *Config) ReloadDiff {
+	var d ReloadDiff
+	addHot := func(name string, changed bool) {
+		if changed {
+			d.Hot = append(d.Hot, name)
+		}
+	}
+	addRestart := func(name string, changed bool) {
+		if changed {
+			d.RequiresRestart = append(d.RequiresRestart, name)
+		}
+	}
+	addHot("security.trust_mode", c.Security.TrustMode != next.Security.TrustMode)
+	addHot("security.min_trust_for_tasks", c.Security.MinTrustForTasks != next.Security.MinTrustForTasks)
+	addHot("security.rate_limit", !reflect.DeepEqual(c.Security.RateLimit, next.Security.RateLimit))
+	addHot("security.allowed_peers_file", c.Security.AllowedPeersFile != next.Security.AllowedPeersFile)
+	addHot("security.blocked_peers_file", c.Security.BlockedPeersFile != next.Security.BlockedPeersFile)
+	addHot("telemetry.log_level", c.Telemetry.LogLevel != next.Telemetry.LogLevel)
+	// "Hot" means the value has a synchronised live owner (Policy, Limiter,
+	// slog.LevelVar) that ReloadConfig updates; the config struct itself is
+	// never mutated, so readers of Cfg keep a consistent startup snapshot.
+	// Everything else is read from unsynchronised hot paths and honestly
+	// requires a restart.
+	addRestart("tasks", !reflect.DeepEqual(c.Tasks, next.Tasks))
+	addRestart("security.require_task_signature", c.Security.RequireTaskSignature != next.Security.RequireTaskSignature)
+	addRestart("security.drop_invalid_signatures", c.Security.DropInvalidSignatures != next.Security.DropInvalidSignatures)
+	addRestart("security.max_message_bytes", c.Security.MaxMessageBytes != next.Security.MaxMessageBytes)
+	addRestart("capabilities", !reflect.DeepEqual(c.Capabilities, next.Capabilities))
+	addRestart("node", !reflect.DeepEqual(c.Node, next.Node))
+	addRestart("identity", c.Identity.KeyFile != next.Identity.KeyFile)
+	addRestart("discovery", !reflect.DeepEqual(c.Discovery, next.Discovery))
+	addRestart("api", !reflect.DeepEqual(c.API, next.API))
+	addRestart("storage", !reflect.DeepEqual(c.Storage, next.Storage))
+	addRestart("picoclaw", !reflect.DeepEqual(c.PicoClaw, next.PicoClaw))
+	addRestart("neighbors", !reflect.DeepEqual(c.Neighbors, next.Neighbors))
+	return d
 }

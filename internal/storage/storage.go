@@ -546,7 +546,13 @@ type ResultRecord struct {
 	FinishedAt   time.Time      `json:"finished_at,omitempty"`
 	Artifacts    []ArtifactInfo `json:"artifacts,omitempty"`
 	Signature    []byte         `json:"signature,omitempty"`
-	ResultDigest string         `json:"result_digest,omitempty"`
+	// WorkerSignature is the chain signature of the executing peer (ТЗ 6.10.3).
+	// The transport Signature only proves who forwarded the result; this one
+	// proves what the worker returned and must survive a restart so the origin
+	// can re-verify a stored answer (ТЗ 9.2, 11.5).
+	WorkerSignature []byte `json:"worker_signature,omitempty"`
+	ResultDigest    string `json:"result_digest,omitempty"`
+	Aggregated      bool   `json:"aggregated,omitempty"`
 }
 
 // ArtifactInfo describes one stored artifact.

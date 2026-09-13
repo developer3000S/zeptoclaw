@@ -19,8 +19,9 @@ type Options struct {
 }
 
 // New builds a slog.Logger writing structured records.
-func New(opts Options) *slog.Logger {
-	lvl := parseLevel(opts.Level)
+func New(opts Options) (*slog.Logger, *slog.LevelVar) {
+	lvl := new(slog.LevelVar)
+	lvl.Set(parseLevel(opts.Level))
 
 	h := slog.HandlerOptions{Level: lvl}
 	var handler slog.Handler
@@ -38,7 +39,7 @@ func New(opts Options) *slog.Logger {
 	if opts.PeerID != "" {
 		attrs = append(attrs, "peer_id", opts.PeerID)
 	}
-	return slog.New(handler).With(attrs...)
+	return slog.New(handler).With(attrs...), lvl
 }
 
 // BridgeStdlib routes the standard library logger (used by libp2p and badger)
@@ -73,3 +74,7 @@ func parseLevel(s string) slog.Level {
 		return slog.LevelInfo
 	}
 }
+
+// Level maps a configuration string to a slog level, exposed so the node can
+// retune the live handler on a config reload.
+func Level(s string) slog.Level { return parseLevel(s) }

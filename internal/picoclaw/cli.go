@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zeptoclaw/zeptomesh/internal/config"
+	"github.com/developer3000S/zeptoclaw/internal/config"
 )
 
 // Logo is the emoji PicoClaw prefixes to every CLI answer.
@@ -131,9 +131,12 @@ func (a *CLIAdapter) Execute(ctx context.Context, req Request) (*Response, error
 	}
 	args = append(args, a.extra...)
 
-	cmd := exec.CommandContext(ectx, a.binary, args...)
+	bin, argv := limitedCommand(req.MaxMemoryBytes, a.binary, args)
+	cmd := exec.CommandContext(ectx, bin, argv...)
+	cmd.Cancel = func() error { killChildGroup(cmd); return nil }
 	cmd.Dir = req.Workspace
 	cmd.Env = a.baseEnv(req)
+	prepareChild(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -153,7 +156,7 @@ func (a *CLIAdapter) Execute(ctx context.Context, req Request) (*Response, error
 		resp.ExitCode = -1
 	}
 
-	arts, artErr := collectArtifacts(req.Workspace)
+	arts, artErr := collectArtifacts(req.Workspace, req.MaxWorkspaceBytes)
 	if artErr != nil && a.log != nil {
 		a.log.Debug("picoclaw_artifact_scan", "task_id", req.TaskID, "err", artErr.Error())
 	}
@@ -271,11 +274,12 @@ func isBannerLine(l string) bool {
 	return false
 }
 
-func collectArtifacts(root string) ([]Artifact, error) {
+func collectArtifacts(root string, maxBytes int64) ([]Artifact, error) {
 	if root == "" {
 		return nil, nil
 	}
 	var out []Artifact
+	var total int64
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // a vanished temp file is not a failure
@@ -291,6 +295,10 @@ func collectArtifacts(root string) ([]Artifact, error) {
 		if strings.HasSuffix(path, ".tmp") {
 			return nil
 		}
+		if maxBytes > 0 && total+info.Size() > maxBytes {
+			return filepath.SkipAll // the ТЗ 6.8.4 workspace quota is spent
+		}
+		total += info.Size()
 		rel, rerr := filepath.Rel(root, path)
 		if rerr != nil {
 			rel = filepath.Base(path)

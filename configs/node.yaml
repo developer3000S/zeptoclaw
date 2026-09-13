@@ -5,8 +5,8 @@
 # передать разные ZETOMESH_INDEX / порты.
 #
 #   ZETOMESH_INDEX   порядковый номер экземпляра (0,1,2,…)
-#   ZETOMESH_BASE_TCP стартовый TCP/QUIC-порт mesh (по умолчанию 4001)
-#   ZETOMESH_API_PORT стартовый порт админ-API (по умолчанию 8081)
+#   ZETOMESH_MESH_PORT TCP/QUIC-порт mesh этого экземпляра (install.sh: 4001+i)
+#   ZETOMESH_API_PORT порт админ-API этого экземпляра (install.sh: 8081+i)
 #   ZETOMESH_DATA    корень данных (в Docker это /var/lib/zeptomesh)
 #   ZETOMESH_BOOTSTRAP необязательный "/ip4/…/p2p/…" адрес входа в сеть
 
@@ -18,6 +18,23 @@ node:
     - /ip4/0.0.0.0/udp/${ZETOMESH_MESH_PORT:-4001}/quic-v1
   announce: []
   private_network_psk: ${ZETOMESH_PSK:-}
+  # Circuit relay (libp2p relay v2): помощь узлам за NAT.
+  #  enabled            — пользоваться чужими ретрансляторами, когда прямое
+  #                       соединение недоступно;
+  #  advertise_as_relay — разрешить транзит трафика другим узлам;
+  #  static_relays      — явные адреса ретрансляторов (иначе — поиск через DHT);
+  #  limit              — потолок резервирований/схем и одна ретранслируемая
+  #                       сессия по длительности и объёму.
+  relay:
+    enabled: true
+    advertise_as_relay: ${ZETOMESH_RELAY_ADVERTISE:-false}
+    static_relays: []
+    limit:
+      max_reservations: 128
+      max_circuits: 16
+      reservation_ttl: 1h
+      conn_duration: 2m
+      conn_data_bytes: 131072
 
 identity:
   key_file: ${ZETOMESH_DATA:-./zeptomesh-data}/${ZETOMESH_INDEX:-0}/keys/peer.key
@@ -48,9 +65,19 @@ tasks:
   default_ttl: 5
   max_ttl: 10
   max_parallel_tasks: 4
+  # Сколько задач одновременно может занять один инициатор (защита от
+  # "один сосед съел все слоты"); 0 = без ограничения.
+  max_parallel_tasks_per_peer: 2
   default_timeout_seconds: 600
+  # Потолок времени выполнения: больше запросить можно, но узел всё равно
+  # обрежет до этого значения.
+  max_timeout_seconds: 3600
   max_task_payload_bytes: 1048576
   max_artifact_bytes: 104857600
+  # Квоты ресурсов исполняемой задачи (ТЗ 6.8.4): 0 = не ограничивать.
+  max_workspace_bytes: 536870912        # размер артефактов из workspace
+  min_free_disk_bytes: 1073741824       # не брать задачу, если диск забит
+  max_task_memory_bytes: 1073741824     # RLIMIT_AS процесса PicoClaw
   dedup_window: 15m
   retention: 168h
   forwarding:

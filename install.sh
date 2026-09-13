@@ -173,7 +173,7 @@ build_binary() {
   mkdir -p "$(dirname "$out")"
   log "сборка $out (go $(go env GOVERSION))"
   ( cd "$REPO_DIR" && GOFLAGS=-mod=mod CGO_ENABLED=0 go build -trimpath \
-      -ldflags "-s -w -X github.com/zeptoclaw/zeptomesh/internal/version.GitCommit=${commit} -X github.com/zeptoclaw/zeptomesh/internal/version.BuildDate=${date}" \
+      -ldflags "-s -w -X github.com/developer3000S/zeptoclaw/internal/version.GitCommit=${commit} -X github.com/developer3000S/zeptoclaw/internal/version.BuildDate=${date}" \
       -o "$out" ./cmd/zeptomesh-node )
   chmod 0755 "$out"
 }
@@ -321,6 +321,10 @@ Environment=ZETOMESH_DATA=$DATA_DIR
 EnvironmentFile=$DATA_DIR/%i/instance.env
 ExecStart=$bin run -config $cfg_file
 WorkingDirectory=$DATA_DIR/%i
+# SIGHUP перечитывает конфигурацию (совпадает с POST /admin/reload-config).
+ExecReload=/bin/kill -HUP $MAINPID
+# Узел при admin/leave завершается кодом 75 — systemd перезапускает его,
+# и сеть получает корректное объявление об уходе вместо таймаута.
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30

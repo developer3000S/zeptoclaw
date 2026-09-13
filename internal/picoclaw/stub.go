@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zeptoclaw/zeptomesh/internal/config"
+	"github.com/developer3000S/zeptoclaw/internal/config"
 )
 
 // StubAdapter is a deterministic executor used for tests, demos and meshes

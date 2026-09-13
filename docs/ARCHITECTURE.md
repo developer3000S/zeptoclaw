@@ -44,18 +44,18 @@ mesh продолжает работать.
 ## 2. Компоненты узла
 
 ```text
-node (сборка и жизненный цикл — ещё не реализован)
-├── config        YAML → модель, дефолты, валидация, ${ENV}
+node (сборка узлов, жизненный цикл, maintenance-циклы)
+├── config        YAML → модель, дефолты, валидация, ${ENV}, Diff(hot|restart)
 ├── security      Identity(Ed25519) │ Signer/Verify │ Policy │ Limiter │ Audit
 ├── storage       BadgerDB (journal, peers, dedup, meta) + artifacts/sha256
-├── p2p.Host      libp2p: QUIC+TCP │ Noise │ Yamux │ DHT(опц.) │ PSK(опц.)
+├── p2p.Host      libp2p: QUIC+TCP │ Noise │ Yamux │ DHT(опц.) │ PSK(опц.) │ relay v2(опц.)
 ├── p2p.Service   прикладные протоколы: task / result / rpc
 ├── discovery     local │ mdns │ bootstrap │ dht │ membership(gossip)
 ├── routing       Table (соседи, метрики, скоринг) + Select()
-├── tasks         модель и инварианты (готово) + TaskManager (не реализован)
-├── picoclaw      Adapter: stub │ binary (CLI) │ http (Pico WebSocket)
+├── tasks         модель/инварианты + TaskManager + декомпозиция/агрегация
+├── picoclaw      Adapter: stub │ binary (CLI) │ http (Pico WebSocket) + лимиты
 ├── metrics       Prometheus (приватный registry)
-└── api           административный HTTP/JSON (не реализован)
+└── api           административный HTTP/JSON
 ```
 
 ### Поток данных при приёме задачи
@@ -64,14 +64,26 @@ node (сборка и жизненный цикл — ещё не реализо
 stream /zeptomesh/task/0.1.0
   → p2p.Service.handleTask        readFrame + proto.Unmarshal
     → tasks.Validate              структура, лимиты, возраст, сверка context_digest
+    → сверка sender_peer_id с аутентифицированным удалённым пиром
     → security.VerifyTask         подпись по sender_peer_id (ключ из peer ID)
+    → tasks.CheckRoute            ttl > 0, нет петли по route_stack, не истёк deadline
     → security.Policy.AllowTasksFrom   trust_mode + списки
     → security.Limiter.Allow(peer)     token bucket
-    → storage.ClaimDedup(task_id)      идемпотентность
-    → routing.Table.Select(...)        если локально невозможно
-      → p2p.Service.SendTask(候选)     параллельно ≤ max_parallel_candidates
+    → лимит задач одного пира           tasks.max_parallel_tasks_per_peer
+    → storage.ClaimDedup(task_id)      идемпотентность → ACK DUPLICATE
+    → canExecute(constraints, skills)?
+        да  → picoclaw.Adapter.Execute в песочнице задачи → TaskResult
+        нет → routing.Table.Select(...) + search-relay (расширение области поиска)
+              → p2p.Service.SendTask(кандидат) параллельно ≤ max_parallel_candidates
+              → иначе REJECTED («no capability, no eligible neighbours»)
   → TaskAck (подписан) обратно по тому же стриму
 ```
+
+План декомпозиции (`subtasks`) перехватывается на том же входе: родитель
+переходит в `WAITING_SUBTASKS`, каждый пункт становится отдельным конвертом
+(`tasks.DeriveSubtask`, `ttl-1`, пересечение ограничений) и уходит в обычный
+конвейер. Когда дети собраны, `AGGREGATING → aggregateResult` даёт один
+подписанный итог (см. [6.9.1]/[6.10.5] в [STATUS.md](STATUS.md)).
 
 Возврат результата:
 
@@ -100,8 +112,16 @@ libp2p.Security(noise.ID, noise.New)         // шифрование для TCP
 libp2p.Muxer(yamux.ID, yamux.DefaultTransport)
 libp2p.Transport(quic.NewTransport)          // основной
 libp2p.Transport(tcp.NewTCPTransport)        // резервный
-libp2p.DisableRelay()                        // circuit-relay отключён по умолчанию
+libp2p.DisableRelay()                        // только если relay не включён ни в какой роли
 ```
+
+`node.relay` управляет circuit-relay v2 ([6.3.3.4]): `enabled` — узел пользуется
+чужими реле, `advertise_as_relay` — сам обслуживает чужие цепи с лимитами
+(`relay.limit`: одновременно открытых цепей, длительность и объём на соединение),
+`static_relays` — явный список ретрансляторов; без него кандидаты берутся из DHT.
+По умолчанию relay выключен целиком (`DisableRelay()`), а при активном
+AutoReachability узел публикует relay-адреса только если сам подтверждён за NAT —
+прямое соединение всегда приоритетнее.
 
 Дополнительно: `AddrsFactory` (при заданном `node.announce`), `ConnectionGater`,
 `PrivateNetwork(psk)`, `Routing(...)` с `dht.New(h, dht.Mode(...))`.
@@ -336,6 +356,7 @@ key = CIDv1(Raw, sha256("zeptomesh/skill/v1/" + skill))
 |---|---|
 | Падение узла-исполнителя | gossip перестаёт получать его `PeerState` → по истечении `failure_timeout` пир выпадает из вида; `onExpire` + `Table.PruneStale` удаляют его из таблицы, задачи перемаршрутизируются |
 | Обрыв канала к соседу | `Connected=false`, штраф ×0.85 в скоринге; RTT-метрика больше не обновляется |
+| Пропал downstream, которому отдали задачу | `Manager.OnPeerDisconnected` немедленно завершает такие незапущенные задачи как TIMEOUT и отправляет результат по назначению — ожидание `forwarding.attempt_timeout` не требуется |
 | Задача «зависла» у соседа | `forwarding.attempt_timeout` + `max_retries` + `retry_interval_seconds` |
 | Двойная доставка одного `task_id` | `ClaimDedup` → `ACK DUPLICATE`, повторного исполнения нет |
 | Цикл маршрута | `ErrRouteLoop` по `route_stack` |
@@ -347,7 +368,7 @@ key = CIDv1(Raw, sha256("zeptomesh/skill/v1/" + skill))
 Возврат результата устойчив к перезапуску промежуточного узла лишь частично:
 `route_stack` перезаписывается отправителем, поэтому для надёжного
 восстановления результата нужен `parent_task_id`-ориентированный relay (см.
-«Дальнейшее развитие» в STATUS.md).
+«План добивания», п.1 в STATUS.md).
 
 ---
 
@@ -377,6 +398,7 @@ key = CIDv1(Raw, sha256("zeptomesh/skill/v1/" + skill))
   компромисс между replay-защитой и терпимостью к дрейфу.
 - **PSK** — симметричная секретная сеть: отсекает чужие узлы, но не заменяет
   per-peer доверие (все внутри PSK имеют один ключ).
-- **Circuit relay выключён** (`libp2p.DisableRelay()`): узлы за строгим NAT без
-  прямого пути друг к другу не соединятся. Для продакшена с таким NAT нужны
-  публичные адреса/Port-Mapping или явно включённый relay.
+- **Circuit relay по умолчанию выключён** (`libp2p.DisableRelay()`): узлы за
+  строгим NAT без прямого пути друг к другу не соединятся. Для продакшена с таким
+  NAT — публичные адреса/Port-Mapping либо явное включение `node.relay`
+  (+`advertise_as_relay` на узлах с публичным адресом, см. [7.1]/[6.3.3.4]).

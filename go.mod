@@ -1,4 +1,4 @@
-module github.com/zeptoclaw/zeptomesh
+module github.com/developer3000S/zeptoclaw
 
 go 1.26.0
 

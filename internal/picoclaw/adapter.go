@@ -47,6 +47,14 @@ type Request struct {
 	AllowNetwork bool
 	// Timeout bounds the whole execution.
 	Timeout time.Duration
+	// MaxWorkspaceBytes caps the total size of artifacts collected from
+	// Workspace (ТЗ 6.8.4 "максимальный объем дискового пространства"). Files
+	// beyond the quota are not returned as artifacts. 0 = unlimited.
+	MaxWorkspaceBytes int64
+	// MaxMemoryBytes caps the child process address space via RLIMIT_AS
+	// (ТЗ 6.8.4 "максимальный объем памяти процесса"). CLI mode only, 0 = no
+	// limit: the gateway mode has no child process to bound here.
+	MaxMemoryBytes int64
 	// Model optionally overrides the configured model.
 	Model string
 	// SessionKey isolates conversation state for this task.

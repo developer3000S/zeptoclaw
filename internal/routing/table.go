@@ -14,9 +14,9 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
-	"github.com/zeptoclaw/zeptomesh/internal/config"
-	"github.com/zeptoclaw/zeptomesh/internal/security"
-	"github.com/zeptoclaw/zeptomesh/internal/storage"
+	"github.com/developer3000S/zeptoclaw/internal/config"
+	"github.com/developer3000S/zeptoclaw/internal/security"
+	"github.com/developer3000S/zeptoclaw/internal/storage"
 )
 
 // Category labels where a neighbour sits relative to this node.

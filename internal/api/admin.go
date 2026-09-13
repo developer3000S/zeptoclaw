@@ -21,11 +21,12 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/zeptoclaw/zeptomesh/internal/config"
-	"github.com/zeptoclaw/zeptomesh/internal/metrics"
-	"github.com/zeptoclaw/zeptomesh/internal/node"
+	"github.com/developer3000S/zeptoclaw/internal/config"
+	"github.com/developer3000S/zeptoclaw/internal/metrics"
+	"github.com/developer3000S/zeptoclaw/internal/node"
+	"github.com/developer3000S/zeptoclaw/internal/tasks"
 
-	pb "github.com/zeptoclaw/zeptomesh/gen/zeptomesh/v1"
+	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
 )
 
 // Server hosts the admin API.
@@ -57,8 +58,11 @@ func New(n *node.Node, cfg *config.Config, mets *metrics.Collector, logger *slog
 	s.authed(mux, "GET /api/v1/tasks", s.handleList)
 	s.authed(mux, "GET /api/v1/tasks/{id}", s.handleGetTask)
 	s.authed(mux, "POST /api/v1/tasks/{id}/cancel", s.handleCancel)
+	s.authed(mux, "DELETE /api/v1/tasks/{id}", s.handleCancel)
 	s.authed(mux, "POST /api/v1/tasks/{id}/resubmit", s.handleResubmit)
 	s.authed(mux, "GET /api/v1/config", s.handleConfigView)
+	s.authed(mux, "POST /api/v1/admin/reload-config", s.handleReloadConfig)
+	s.authed(mux, "POST /api/v1/admin/leave", s.handleLeave)
 	if mets != nil {
 		mux.Handle("GET /metrics", promhttp.HandlerFor(mets.Registry(), promhttp.HandlerOpts{}))
 	}
@@ -213,9 +217,21 @@ type submitRequest struct {
 	AllowDeleg     *bool             `json:"allow_delegation,omitempty"`
 	AllowSubtasks  *bool             `json:"allow_subtasks,omitempty"`
 	Labels         map[string]string `json:"labels,omitempty"`
+	// Subtasks is an optional decomposition plan (ТЗ 6.9.1): when present the
+	// task is executed as a set of independently routed children whose results
+	// return as one signed aggregate.
+	Subtasks []subtaskRequest `json:"subtasks,omitempty"`
 	// Wait blocks the response until the task resolves or wait_seconds passes.
 	Wait       bool `json:"wait,omitempty"`
 	WaitSecond int  `json:"wait_seconds,omitempty"`
+}
+
+// subtaskRequest is one entry of a decomposition plan.
+type subtaskRequest struct {
+	Instruction    string   `json:"instruction"`
+	RequiredSkills []string `json:"required_skills,omitempty"`
+	TTL            int      `json:"ttl,omitempty"`
+	Priority       int      `json:"priority,omitempty"`
 }
 
 func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
@@ -232,9 +248,22 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "priority must be within 1..9 (0 = default)")
 		return
 	}
+	if len(req.Subtasks) > tasks.MaxSubtasks {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("too many subtasks (max %d)", tasks.MaxSubtasks))
+		return
+	}
 	allowNet := true
 	if req.AllowNetwork != nil {
 		allowNet = *req.AllowNetwork
+	}
+	var subs []*tasks.SubtaskRequest
+	for _, st := range req.Subtasks {
+		subs = append(subs, &tasks.SubtaskRequest{
+			Instruction:    st.Instruction,
+			RequiredSkills: st.RequiredSkills,
+			TTL:            int32(st.TTL),
+			Priority:       int32(st.Priority),
+		})
 	}
 	n := s.node
 	id, err := n.Manager.Submit(r.Context(), node.SubmitRequest{
@@ -248,6 +277,7 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		AllowDeleg:     req.AllowDeleg,
 		AllowSubtasks:  req.AllowSubtasks,
 		Labels:         req.Labels,
+		Subtasks:       subs,
 	})
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, err.Error())
@@ -340,6 +370,34 @@ func (s *Server) handleConfigView(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"config": cfg, "data_dir": s.cfg.Node.DataDir})
 }
 
+// handleReloadConfig re-reads the node's config file and applies the
+// hot-reloadable sections, reporting honestly which changes need a restart
+// (ТЗ 13.1.1).
+func (s *Server) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
+	d, err := s.node.ReloadConfig()
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	resp := map[string]any{"applied": d.Hot, "requires_restart": d.RequiresRestart}
+	if len(d.RequiresRestart) > 0 {
+		resp["hint"] = "POST /api/v1/admin/leave (or systemctl restart) to apply them"
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleLeave announces departure from the mesh and makes the daemon exit so
+// the supervisor relaunches it with the on-disk configuration (ТЗ 13.1.1).
+func (s *Server) handleLeave(w http.ResponseWriter, r *http.Request) {
+	s.log.Info("admin_leave_requested")
+	writeJSON(w, http.StatusOK, map[string]any{"status": "leaving"})
+	// Flush the response before the process begins its shutdown.
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	s.node.Leave(r.Context())
+}
+
 // ---------- helpers ----------
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -381,6 +439,18 @@ func resultJSON(res *pb.TaskResult) map[string]any {
 		"route_stack": res.GetRouteStack(),
 		"artifacts":   arts,
 		"signed":      len(res.GetSignature()) > 0,
+	}
+	if ec := res.GetErrorClass(); ec != pb.TaskErrorClass_TASK_ERROR_CLASS_UNSPECIFIED {
+		m["error_class"] = ec.String()
+	}
+	if res.GetAggregated() {
+		m["aggregated"] = true
+	}
+	if len(res.GetWorkerSignature()) > 0 {
+		m["worker_signed"] = true
+	}
+	if d := res.GetResultDigest(); len(d) > 0 {
+		m["result_digest"] = fmt.Sprintf("%x", d)
 	}
 	if res.GetErrorMessage() != "" {
 		m["error"] = res.GetErrorMessage()

@@ -18,18 +18,19 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
 
-	"github.com/zeptoclaw/zeptomesh/internal/config"
-	"github.com/zeptoclaw/zeptomesh/internal/discovery"
-	"github.com/zeptoclaw/zeptomesh/internal/metrics"
-	"github.com/zeptoclaw/zeptomesh/internal/p2p"
-	"github.com/zeptoclaw/zeptomesh/internal/picoclaw"
-	"github.com/zeptoclaw/zeptomesh/internal/routing"
-	"github.com/zeptoclaw/zeptomesh/internal/security"
-	"github.com/zeptoclaw/zeptomesh/internal/storage"
-	"github.com/zeptoclaw/zeptomesh/internal/tasks"
-	"github.com/zeptoclaw/zeptomesh/internal/version"
+	"github.com/developer3000S/zeptoclaw/internal/config"
+	"github.com/developer3000S/zeptoclaw/internal/discovery"
+	"github.com/developer3000S/zeptoclaw/internal/logging"
+	"github.com/developer3000S/zeptoclaw/internal/metrics"
+	"github.com/developer3000S/zeptoclaw/internal/p2p"
+	"github.com/developer3000S/zeptoclaw/internal/picoclaw"
+	"github.com/developer3000S/zeptoclaw/internal/routing"
+	"github.com/developer3000S/zeptoclaw/internal/security"
+	"github.com/developer3000S/zeptoclaw/internal/storage"
+	"github.com/developer3000S/zeptoclaw/internal/tasks"
+	"github.com/developer3000S/zeptoclaw/internal/version"
 
-	pb "github.com/zeptoclaw/zeptomesh/gen/zeptomesh/v1"
+	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
 )
 
 // SubmitRequest is re-exported so callers outside the tasks package (the admin
@@ -61,23 +62,54 @@ type Node struct {
 	log     *slog.Logger
 	started time.Time
 
+	// skipDiscovery makes this node reachable only through explicitly dialed
+	// peers. It exists for air-gapped single-node setups and for integration
+	// tests that need a deterministic topology.
+	skipDiscovery bool
+
+	// configPath and levelVar back the admin reload (ТЗ 13.1.1): the running
+	// process re-reads the same file it started with and retunes the live
+	// logger without a restart.
+	configPath string
+	levelVar   *slog.LevelVar
+	// quit is closed by Leave: the daemon's main loop treats it as "exit now,
+	// systemd/docker will relaunch a fresh process" — a graceful, operator-
+	// driven restart that keeps the mesh membership announcements honest.
+	quit     chan struct{}
+	quitOnce sync.Once
+
 	mu      sync.Mutex
 	running bool
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 	notifee *network.NotifyBundle
+
+	// introducing guards the capabilities handshake we run for a peer whose
+	// connection we passively accepted, so repeated multi-transport links to
+	// the same peer do not stampede the RPC.
+	introduceMu sync.Mutex
+	introducing map[peer.ID]bool
 }
 
 // Options parameterise New.
 type Options struct {
 	Config *config.Config
 	Logger *slog.Logger
+	// ConfigPath is the file the node was loaded from; when set, an admin
+	// POST /api/v1/admin/reload-config re-reads it.
+	ConfigPath string
+	// LevelVar makes telemetry.log_level hot-reloadable.
+	LevelVar *slog.LevelVar
 	// Adapter overrides the configured PicoClaw adapter (integration tests).
 	Adapter picoclaw.Adapter
 	// SkipDiscovery disables network-facing discovery (unit tests, air-gapped
 	// bootstrap of a local-only cluster).
 	SkipDiscovery bool
 }
+
+// Quit returns a channel closed when an operator asks the node to leave the
+// mesh via the admin API; the daemon exits and the supervisor starts it fresh.
+func (n *Node) Quit() <-chan struct{} { return n.quit }
 
 // New builds every component, wired but not started.
 func New(opts Options) (*Node, error) {
@@ -164,6 +196,8 @@ func New(opts Options) (*Node, error) {
 		Cfg: cfg, Identity: identity, Store: store, Policy: policy,
 		Limiter: security.NewLimiter(cfg.Security.RateLimit.RequestsPerSecond, cfg.Security.RateLimit.Burst),
 		Audit:   audit, Metrics: mets, Table: table, Adapter: adapter, log: logger,
+		configPath: opts.ConfigPath, levelVar: opts.LevelVar, quit: make(chan struct{}),
+		introducing: make(map[peer.ID]bool), skipDiscovery: opts.SkipDiscovery,
 	}
 
 	ph, err := p2p.New(context.Background(), p2p.Options{
@@ -230,9 +264,16 @@ func (n *Node) dispatchRPC(ctx context.Context, remote peer.ID, req *pb.RpcReque
 	return n.Manager.OnRPC(ctx, remote, req)
 }
 
-// buildDiscovery prepares the discovery layer.
+// buildDiscovery prepares the discovery layer. skipDiscovery keeps the node
+// fully manual: only peers dialed by the operator (or the tests) are ever
+// reachable, which is what a deterministic topology needs. A disabled gossip
+// section alone still permits bootstrap/local-registry/DHT discovery.
 func (n *Node) buildDiscovery() error {
 	cfg := n.Cfg
+	if n.skipDiscovery {
+		n.log.Info("discovery_disabled_manual_peers_only")
+		return nil
+	}
 	if cfg.Discovery.LocalRegistry {
 		rec := discovery.LocalRecord{
 			NodeName: cfg.Node.Name,
@@ -267,15 +308,23 @@ func (n *Node) buildDiscovery() error {
 		n.DHT = discovery.NewDHT(n.Host.DHT(), cfg.EffectiveSkills(), n.log)
 	}
 
-	m, err := discovery.NewMembership(context.Background(), n.Host.Underlying(),
-		cfg.Discovery.Gossip, n.Policy, n.Audit, n.log)
-	if err != nil {
-		return fmt.Errorf("node: membership: %w", err)
+	if cfg.Discovery.Gossip.Enabled {
+		m, err := discovery.NewMembership(context.Background(), n.Host.Underlying(),
+			cfg.Discovery.Gossip, n.Policy, n.Audit, n.log)
+		if err != nil {
+			return fmt.Errorf("node: membership: %w", err)
+		}
+		n.Membership = m
+		m.SetSelfStateFunc(n.peerState)
+		m.SetOnPeer(n.onGossipPeer)
+		m.SetOnExpire(n.onPeerExpire)
+	} else {
+		// Gossip is the only mechanism that learns peers it was not told about,
+		// so disabling it makes the mesh strictly explicit: reachability comes
+		// from bootstrap entries and manual dials. Everything else — signed
+		// capabilities, task routing, result relay — keeps working.
+		n.log.Info("gossip_disabled", "hint", "peers are reachable only via discovery.bootstrap or manual dialing")
 	}
-	n.Membership = m
-	m.SetSelfStateFunc(n.peerState)
-	m.SetOnPeer(n.onGossipPeer)
-	m.SetOnExpire(n.onPeerExpire)
 	return nil
 }
 
@@ -307,7 +356,7 @@ func (n *Node) Start(ctx context.Context) error {
 		go func() { defer n.wg.Done(); n.Probe.Serve() }()
 	}
 
-	if n.Cfg.Discovery.MDNS {
+	if n.Cfg.Discovery.MDNS && !n.skipDiscovery {
 		m, err := discovery.NewMDNS(n.Host.Underlying(), n.Cfg.Discovery.MDNSServiceName, n.log)
 		switch {
 		case err != nil:
@@ -329,12 +378,16 @@ func (n *Node) Start(ctx context.Context) error {
 			n.log.Warn("dht_start_failed", "err", err.Error())
 		}
 	}
-	if err := n.Membership.Start(runCtx); err != nil {
-		return fmt.Errorf("node: membership start: %w", err)
+	if n.Membership != nil {
+		if err := n.Membership.Start(runCtx); err != nil {
+			return fmt.Errorf("node: membership start: %w", err)
+		}
 	}
 
-	n.wg.Add(1)
-	go func() { defer n.wg.Done(); n.Bootstrap.Run(runCtx, n.needMorePeers) }()
+	if n.Bootstrap != nil {
+		n.wg.Add(1)
+		go func() { defer n.wg.Done(); n.Bootstrap.Run(runCtx, n.needMorePeers) }()
+	}
 	n.wg.Add(1)
 	go func() { defer n.wg.Done(); n.maintenance(runCtx) }()
 
@@ -478,10 +531,14 @@ func (n *Node) Status() Status {
 		Tracked:     n.Manager.TrackedCount(),
 		Neighbors:   n.Table.Len(),
 		Connected:   n.Table.ConnectedCount(),
-		Membership:  n.Membership.Len(),
 	}
-	st.Bootstrap.Configured = n.Bootstrap.Count()
-	st.Bootstrap.Reachable = len(n.Bootstrap.Healthy(n.Cfg.Discovery.Gossip.FailureTimeout.D() * 2))
+	if n.Membership != nil {
+		st.Membership = n.Membership.Len()
+	}
+	if n.Bootstrap != nil {
+		st.Bootstrap.Configured = n.Bootstrap.Count()
+		st.Bootstrap.Reachable = len(n.Bootstrap.Healthy(n.Cfg.Discovery.Gossip.FailureTimeout.D() * 2))
+	}
 	st.Discovery.LocalRegistry = n.Registry != nil
 	st.Discovery.MDNS = n.MDNS != nil
 	st.Discovery.DHT = n.DHT != nil && n.DHT.Enabled()
@@ -497,9 +554,11 @@ func (n *Node) Status() Status {
 	st.Adapter.Name = inf.Name
 	st.Adapter.Healthy = inf.Healthy
 	st.Adapter.Detail = inf.Detail
-	st.Security.TrustMode = n.Cfg.Security.TrustMode
+	// Read the live posture, not the config snapshot: a reload changes the
+	// policy before (or instead of) anything the process can restart with.
+	st.Security.TrustMode = n.Policy.Mode().String()
 	st.Security.RequireTaskSig = n.Cfg.Security.RequireTaskSignature
-	st.Security.MinTrustForTasks = n.Cfg.Security.MinTrustForTasks
+	st.Security.MinTrustForTasks = n.Policy.MinTrustForTasks().String()
 	st.Security.RateLimitedPeers = n.Limiter.Size()
 	st.Security.AuditLog = n.Audit.Path()
 	if s, err := n.Store.Stats(); err == nil {
@@ -760,14 +819,51 @@ func (n *Node) installConnNotifier() {
 			})
 			n.Metrics.PeersConnected.Set(float64(n.Table.ConnectedCount()))
 			n.Metrics.PeersTotal.Set(float64(n.Table.Len()))
+			go n.introduce(pid)
 		},
 		DisconnectedF: func(_ network.Network, conn network.Conn) {
 			n.Table.SetConnected(conn.RemotePeer(), false)
 			n.Metrics.PeersConnected.Set(float64(n.Table.ConnectedCount()))
+			if n.Manager != nil {
+				n.Manager.OnPeerDisconnected(conn.RemotePeer())
+			}
 		},
 	}
 	n.notifee = bundle
 	n.Host.Underlying().Network().Notify(bundle)
+}
+
+// introduce completes the capability handshake for a peer whose connection we
+// did not dial ourselves. Without it a passively-connected node stays blind:
+// it has no signed skill list and, under the limited posture, no trust
+// elevation for the peer — so it can never delegate work back the way the
+// task arrived. One fetch per peer is enough; gossip keeps it refreshed.
+func (n *Node) introduce(pid peer.ID) {
+	if pid == "" || pid == n.Identity.PeerID() {
+		return
+	}
+	if nb, ok := n.Table.Get(pid); ok && len(nb.Skills) > 0 {
+		return
+	}
+	n.introduceMu.Lock()
+	if n.introducing[pid] {
+		n.introduceMu.Unlock()
+		return
+	}
+	if n.introducing == nil {
+		n.introducing = make(map[peer.ID]bool)
+	}
+	n.introducing[pid] = true
+	n.introduceMu.Unlock()
+	defer func() {
+		n.introduceMu.Lock()
+		delete(n.introducing, pid)
+		n.introduceMu.Unlock()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	n.refreshCapabilities(ctx, pid)
 }
 
 // classify labels a connection's locality: same host, same LAN, or WAN.
@@ -853,9 +949,11 @@ func (n *Node) maintenance(ctx context.Context) {
 	t := time.NewTicker(beat)
 	full := time.NewTicker(n.Cfg.Discovery.Gossip.FullSync.D())
 	local := time.NewTicker(5 * time.Second)
+	rtt := time.NewTicker(15 * time.Second)
 	defer t.Stop()
 	defer full.Stop()
 	defer local.Stop()
+	defer rtt.Stop()
 
 	for {
 		select {
@@ -864,17 +962,24 @@ func (n *Node) maintenance(ctx context.Context) {
 		case <-local.C:
 			n.syncLocalRegistry(ctx)
 			n.syncDHT(ctx)
+		case <-rtt.C:
+			n.measureRTT(ctx)
 		case <-t.C:
 			if n.Table.ConnectedCount() < n.Cfg.Neighbors.Min && n.Cfg.Discovery.PeerExchange {
 				n.requestPeerExchange(ctx)
 			}
 			for _, gone := range n.Table.PruneStale(n.Cfg.Discovery.Gossip.FailureTimeout.D() * 3) {
-				n.Membership.MarkLeft(gone)
+				if n.Membership != nil {
+					n.Membership.MarkLeft(gone)
+				}
 				n.log.Debug("neighbor_dropped", "peer", gone.String())
 			}
 			n.Metrics.PeersTotal.Set(float64(n.Table.Len()))
 			n.Metrics.PeersConnected.Set(float64(n.Table.ConnectedCount()))
 		case <-full.C:
+			if n.Membership == nil {
+				continue
+			}
 			if err := n.Membership.PublishFull(ctx); err != nil {
 				n.log.Debug("gossip_full_sync", "err", err.Error())
 			}
@@ -977,6 +1082,94 @@ func (n *Node) requestPeerExchange(ctx context.Context) {
 			n.log.Debug("pex_candidate", "peer", pid.String(), "from", nb.PeerID.String())
 		}
 	}
+}
+
+// measureRTT pings a bounded sample of connected neighbours so the routing
+// score's latency term (ТЗ 6.9.2) reflects reality: an unmeasured peer keeps
+// the neutral 0.5 and a stale average decays only as new samples arrive.
+func (n *Node) measureRTT(ctx context.Context) {
+	for _, nb := range n.Table.Sample(8) {
+		if !nb.Connected {
+			continue
+		}
+		pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		start := time.Now()
+		resp, err := n.Service.RPC(pctx, nb.PeerID, &pb.RpcRequest{
+			Kind: &pb.RpcRequest_Ping{Ping: &pb.PingRequest{Nonce: time.Now().UnixNano()}},
+		})
+		elapsed := time.Since(start)
+		cancel()
+		// A failed ping is not a task-execution failure: it must not drain the
+		// peer's success-rate term, it just means we keep the old estimate.
+		if err != nil || resp == nil || resp.GetPing() == nil {
+			continue
+		}
+		n.Table.RecordRTT(nb.PeerID, elapsed)
+	}
+}
+
+// ReloadConfig re-reads the configuration file the node started with and
+// applies the section that live objects own (ТЗ 13.1.1 reload). The config
+// struct itself is left untouched — components that read it without
+// synchronisation keep a consistent startup snapshot — while the trust
+// policy, the rate limiter and the log level are swapped through their own
+// locks. The diff says honestly which sections need a restart.
+func (n *Node) ReloadConfig() (config.ReloadDiff, error) {
+	if n.configPath == "" {
+		return config.ReloadDiff{}, errors.New("node: no config file to reload (started without -config)")
+	}
+	next, err := config.Load(n.configPath)
+	if err != nil {
+		return config.ReloadDiff{}, err
+	}
+	d := n.Cfg.Diff(next)
+
+	mode, err := security.ParseMode(next.Security.TrustMode)
+	if err != nil {
+		return d, err
+	}
+	minTrust, err := security.ParseTrust(next.Security.MinTrustForTasks)
+	if err != nil {
+		return d, err
+	}
+	n.Policy.SetPosture(mode, minTrust)
+	// List files merge in: entries added since startup (or edited in place)
+	// take effect; existing entries are never silently dropped.
+	if _, err := n.Policy.LoadPeerFile(next.Security.AllowedPeersFile, true); err != nil {
+		n.log.Warn("reload_allowed_peers", "err", err.Error())
+	}
+	if _, err := n.Policy.LoadPeerFile(next.Security.BlockedPeersFile, false); err != nil {
+		n.log.Warn("reload_blocked_peers", "err", err.Error())
+	}
+	if rps := next.Security.RateLimit.RequestsPerSecond; rps > 0 {
+		n.Limiter.SetRate(rps, next.Security.RateLimit.Burst)
+	}
+	if n.levelVar != nil {
+		n.levelVar.Set(logging.Level(next.Telemetry.LogLevel))
+	}
+	n.log.Info("config_reloaded", "hot", len(d.Hot), "requires_restart", len(d.RequiresRestart))
+	if n.Audit != nil {
+		n.Audit.Log(security.AuditEvent{Event: "config_reload", Detail: fmt.Sprintf("hot=%v restart=%v", d.Hot, d.RequiresRestart)})
+	}
+	return d, nil
+}
+
+// Leave announces departure and asks the daemon to exit (ТЗ 13.1.1
+// /admin/leave). The supervisor (systemd Restart=on-failure + ExitCode=75,
+// docker restart policy) starts a fresh process; the mesh learns of the
+// departure from the announcement instead of a timeout.
+func (n *Node) Leave(ctx context.Context) {
+	if n.Membership != nil {
+		if st := n.peerState(); st != nil {
+			st.Status = "left"
+			pctx, pcancel := context.WithTimeout(ctx, 3*time.Second)
+			if err := n.Membership.PublishState(pctx, st); err != nil {
+				n.log.Warn("leave_announce_failed", "err", err.Error())
+			}
+			pcancel()
+		}
+	}
+	n.quitOnce.Do(func() { close(n.quit) })
 }
 
 // ---------- helpers ----------

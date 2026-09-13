@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
@@ -19,15 +20,18 @@ import (
 	"github.com/libp2p/go-libp2p/core/pnet"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/core/routing"
+	"github.com/libp2p/go-libp2p/p2p/host/autorelay"
 	"github.com/libp2p/go-libp2p/p2p/muxer/yamux"
+	circuitproto "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/proto"
+	relayv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
 	"github.com/libp2p/go-libp2p/p2p/security/noise"
 	quic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	ma "github.com/multiformats/go-multiaddr"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/zeptoclaw/zeptomesh/internal/config"
-	"github.com/zeptoclaw/zeptomesh/internal/version"
+	"github.com/developer3000S/zeptoclaw/internal/config"
+	"github.com/developer3000S/zeptoclaw/internal/version"
 )
 
 // Host wraps a libp2p host with the mesh's protocol wiring.
@@ -73,6 +77,10 @@ func New(ctx context.Context, opts Options) (*Host, error) {
 		logger = slog.Default()
 	}
 
+	// dhtInstance is assigned by the Routing hook below, i.e. during
+	// libp2p.New; the relay peer source captures it and resolves it on use.
+	var dhtInstance *dht.IpfsDHT
+
 	libopts := []libp2p.Option{
 		libp2p.Identity(opts.Key),
 		libp2p.ListenAddrStrings(cfg.Node.Listen...),
@@ -83,7 +91,37 @@ func New(ctx context.Context, opts Options) (*Host, error) {
 		libp2p.Transport(quic.NewTransport),
 		libp2p.Transport(tcp.NewTCPTransport),
 		libp2p.UserAgent("zeptomesh/" + version.Version),
-		libp2p.DisableRelay(),
+	}
+	// Relay (ТЗ 6.3.3.4). Disabled unless configured: a node only borrows a
+	// peer's circuit when it cannot dial or get dialed directly, and only
+	// advertises relay addresses after AutoReachability proves it is behind
+	// NAT — direct connections always win. The relay carries encrypted bytes
+	// it cannot read (Noise/TLS are end-to-end over the circuit).
+	relayOn := cfg.Node.Relay.Enabled || len(cfg.Node.Relay.StaticRelays) > 0
+	switch {
+	case !relayOn && !cfg.Node.Relay.AdvertiseAsRelay:
+		libopts = append(libopts, libp2p.DisableRelay())
+	default:
+		libopts = append(libopts, libp2p.EnableRelay())
+		if cfg.Node.Relay.AdvertiseAsRelay {
+			libopts = append(libopts, libp2p.EnableRelayService(relayServiceOptions(cfg.Node.Relay.Limit)...))
+		}
+		if relayOn {
+			static := parseStaticRelays(cfg.Node.Relay.StaticRelays, logger)
+			switch {
+			case len(static) > 0:
+				libopts = append(libopts, libp2p.EnableAutoRelayWithStaticRelays(static))
+			case cfg.Discovery.DHT:
+				// Dynamic candidates: DHT providers of the circuit hop protocol.
+				// The getter is resolved when autorelay asks, not now: the DHT
+				// instance only exists once libp2p.New has run the Routing hook.
+				libopts = append(libopts, libp2p.EnableAutoRelayWithPeerSource(
+					dhtRelaySource(func() *dht.IpfsDHT { return dhtInstance }, logger)))
+			default:
+				logger.Warn("relay_enabled_without_candidates",
+					"hint", "set node.relay.static_relays or enable discovery.dht; the node can still serve/accept relayed hops")
+			}
+		}
 	}
 	if len(cfg.Node.Announce) > 0 {
 		libopts = append(libopts, libp2p.AddrsFactory(staticAddrsFactory(cfg.Node.Announce)))
@@ -100,7 +138,6 @@ func New(ctx context.Context, opts Options) (*Host, error) {
 		logger.Info("private_network_enabled")
 	}
 
-	var dhtInstance *dht.IpfsDHT
 	if cfg.Discovery.DHT {
 		mode := dht.ModeClient
 		switch strings.ToLower(cfg.Discovery.DHTMode) {
@@ -319,4 +356,116 @@ func addrsToStrings(addrs []ma.Multiaddr) []string {
 		out = append(out, a.String())
 	}
 	return out
+}
+
+// ---------- circuit relay v2 helpers (ТЗ 6.3.3.4) ----------
+
+// relayServiceOptions bounds what this node spends serving others' circuits:
+// reservations, concurrent circuits per peer, and per-connection lifetime and
+// data volume (the relay-traffic storm guard).
+func relayServiceOptions(l config.RelayLimitConfig) []relayv2.Option {
+	res := relayv2.DefaultResources()
+	if l.MaxReservations > 0 {
+		res.MaxReservations = l.MaxReservations
+	}
+	if l.MaxCircuits > 0 {
+		res.MaxCircuits = l.MaxCircuits
+	}
+	if l.ReservationTTL > 0 {
+		res.ReservationTTL = l.ReservationTTL.D()
+	}
+	if l.ConnDuration > 0 || l.ConnDataBytes > 0 {
+		if res.Limit == nil {
+			res.Limit = relayv2.DefaultLimit()
+		}
+		if l.ConnDuration > 0 {
+			res.Limit.Duration = l.ConnDuration.D()
+		}
+		if l.ConnDataBytes > 0 {
+			res.Limit.Data = l.ConnDataBytes
+		}
+	}
+	return []relayv2.Option{relayv2.WithResources(res)}
+}
+
+func parseStaticRelays(addrs []string, log *slog.Logger) []peer.AddrInfo {
+	var out []peer.AddrInfo
+	for _, s := range addrs {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		m, err := ma.NewMultiaddr(s)
+		if err != nil {
+			log.Warn("relay_static_addr_invalid", "addr", s, "err", err.Error())
+			continue
+		}
+		ai, err := peer.AddrInfoFromP2pAddr(m)
+		if err != nil {
+			log.Warn("relay_static_addr_missing_peer_id", "addr", s, "err", err.Error())
+			continue
+		}
+		out = append(out, *ai)
+	}
+	return out
+}
+
+// dhtRelaySource feeds autorelay candidates discovered through the Kademlia
+// routing system: peers closest to the hop-protocol key that have announced
+// that protocol in their peer record. The DHT is resolved lazily because the
+// Routing option that creates it runs inside libp2p.New, after these options
+// have been assembled.
+func dhtRelaySource(get func() *dht.IpfsDHT, log *slog.Logger) autorelay.PeerSource {
+	return func(ctx context.Context, num int) <-chan peer.AddrInfo {
+		out := make(chan peer.AddrInfo)
+		go func() {
+			defer close(out)
+			d := get()
+			if d == nil {
+				return
+			}
+			qctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			defer cancel()
+			cands, err := d.GetClosestPeers(qctx, string(circuitproto.ProtoIDv2Hop))
+			if err != nil {
+				log.Debug("relay_source_lookup_failed", "err", err.Error())
+				return
+			}
+			h := d.Host()
+			sent := 0
+			for _, pid := range cands {
+				if sent >= num || ctx.Err() != nil {
+					return
+				}
+				if pid == h.ID() {
+					continue
+				}
+				protos, err := h.Peerstore().GetProtocols(pid)
+				if err != nil {
+					continue
+				}
+				isRelay := false
+				for _, p := range protos {
+					if p == circuitproto.ProtoIDv2Hop {
+						isRelay = true
+						break
+					}
+				}
+				if !isRelay {
+					continue
+				}
+				ai := peer.AddrInfo{ID: pid, Addrs: h.Peerstore().Addrs(pid)}
+				if len(ai.Addrs) == 0 {
+					continue
+				}
+				select {
+				case out <- ai:
+					sent++
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		return out
+	}
 }

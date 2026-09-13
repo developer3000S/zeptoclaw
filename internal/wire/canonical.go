@@ -12,7 +12,9 @@ import (
 	"errors"
 	"sort"
 
-	pb "github.com/zeptoclaw/zeptomesh/gen/zeptomesh/v1"
+	"google.golang.org/protobuf/proto"
+
+	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
 )
 
 // ErrNilMessage is returned for a nil input rather than encoding a zero value.
@@ -84,10 +86,27 @@ func ResultBody(r *pb.TaskResult) ([]byte, error) {
 	if r == nil {
 		return nil, ErrNilMessage
 	}
+	content, err := ResultContent(r)
+	if err != nil {
+		return nil, err
+	}
+	e := newEncoder()
+	e.raw(content)
+	e.str(r.GetSenderPeerId())
+	e.strList(r.GetRouteStack())
+	return e.out(), nil
+}
+
+// ResultContent encodes the part of a result the worker authored. Relays
+// rewrite sender and route_stack, so the worker's chain signature covers this
+// routing-independent body and keeps verifying after any number of hops.
+func ResultContent(r *pb.TaskResult) ([]byte, error) {
+	if r == nil {
+		return nil, ErrNilMessage
+	}
 	e := newEncoder()
 	e.str(r.GetTaskId())
 	e.str(r.GetWorkerPeerId())
-	e.str(r.GetSenderPeerId())
 	e.varint(int64(r.GetStatus()))
 	e.str(r.GetText())
 	e.raw(r.GetResultDigest())
@@ -101,8 +120,28 @@ func ResultBody(r *pb.TaskResult) ([]byte, error) {
 		e.varint(a.GetSize())
 		e.str(a.GetMediaType())
 	}
-	e.strList(r.GetRouteStack())
+	e.varint(int64(r.GetErrorClass()))
+	e.boolean(r.GetAggregated())
 	return e.out(), nil
+}
+
+// ResultDigest computes the content digest of a result: sha256 over the
+// worker-authored body (text, artifacts, status, timings) with the digest
+// field itself treated as empty, so the definition is unambiguous no matter
+// when it is called. It is what the signature covers and what the task journal
+// stores, so an operator can verify a stored answer against the signed one
+// without the worker's key material.
+func ResultDigest(r *pb.TaskResult) ([]byte, error) {
+	if r == nil {
+		return nil, ErrNilMessage
+	}
+	clone := proto.Clone(r).(*pb.TaskResult)
+	clone.ResultDigest = nil
+	content, err := ResultContent(clone)
+	if err != nil {
+		return nil, err
+	}
+	return Digest("result-content", content), nil
 }
 
 // CancelBody encodes the signing body of a cancel request.

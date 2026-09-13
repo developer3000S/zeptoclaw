@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/zeptoclaw/zeptomesh/internal/config"
+	"github.com/developer3000S/zeptoclaw/internal/config"
 )
 
 // New builds the adapter selected by picoclaw.mode:

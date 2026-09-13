@@ -6,7 +6,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
 
-	"github.com/zeptoclaw/zeptomesh/internal/security"
+	"github.com/developer3000S/zeptoclaw/internal/security"
 )
 
 // Gater enforces the operator's peer lists at the transport level: a blocked

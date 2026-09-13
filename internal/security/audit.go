@@ -81,6 +81,23 @@ func (l *Limiter) Size() int {
 	return len(l.perPeer)
 }
 
+// SetRate applies new limits to every existing bucket, backing the admin
+// config reload (ТЗ 13.1.1 reload). Peers learned afterwards get the new
+// defaults too; in-flight tokens are not retroactively spent.
+func (l *Limiter) SetRate(requestsPerSecond float64, burst int) {
+	if burst <= 0 {
+		burst = 1
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.rps = rate.Limit(requestsPerSecond)
+	l.burst = burst
+	for _, lim := range l.perPeer {
+		lim.SetLimit(l.rps)
+		lim.SetBurst(burst)
+	}
+}
+
 // AuditEvent is one security-relevant record.
 type AuditEvent struct {
 	Time   time.Time `json:"ts"`

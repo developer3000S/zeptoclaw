@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"testing"
 
-	pb "github.com/zeptoclaw/zeptomesh/gen/zeptomesh/v1"
+	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
 )
 
 func sampleTask() *pb.TaskEnvelope {

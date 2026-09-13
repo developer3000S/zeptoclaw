@@ -1,0 +1,135 @@
+# ZeptoClaw Agent Mesh — пример конфигурации для ОДНОЙ локальной сети (ТЗ 22.8).
+#
+# Назначение: несколько узлов на хостах в одном broadcast-домене L2. Узлы
+# находят друг друга без каких-либо точек входа: mDNS по сети + реестр
+# Unix-сокетов для соседних процессов на одном хосте.
+#
+# Запуск:  zeptomesh-node run -config configs/examples/lan.yaml
+#
+# Значения ${VAR:-default} раскрывает загрузчик (internal/config.expandEnv),
+# поэтому файл пригоден и как шаблон для нескольких экземпляров.
+
+node:
+  name: ${ZETOMESH_NAME:-zepto-${ZETOMESH_INDEX:-0}}
+  data_dir: ${ZETOMESH_DATA:-/var/lib/zeptomesh}/${ZETOMESH_INDEX:-0}
+  listen:
+    - /ip4/0.0.0.0/tcp/${ZETOMESH_MESH_PORT:-4001}
+    - /ip4/0.0.0.0/udp/${ZETOMESH_MESH_PORT:-4001}/quic-v1
+  # В LAN публичный адрес не фиксируем: libp2p сам анонсирует адреса интерфейсов,
+  # и они корректны для соседей по подсети.
+  announce: []
+  # Закрытая сеть по PSK необязательна: в доверенной LAN достаточно trust-политики.
+  private_network_psk: ${ZETOMESH_PSK:-}
+
+identity:
+  # пусто → <data_dir>/keys/peer.key
+  key_file: ""
+
+discovery:
+  local_registry: true          # реестр Unix-сокетов в local_socket_dir
+  local_socket_dir: ""          # пусто → <data_dir>/run
+  mdns: true                    # основной механизм обнаружения в LAN
+  mdns_service_name: _zeptomesh._udp
+  bootstrap: []                 # в LAN не нужен
+  dht: true                     # остаётся резервным индексом навыков
+  dht_mode: auto
+  peer_exchange: true
+  bootstrap_interval: 30s
+  gossip:
+    enabled: true
+    topic: /zeptomesh/membership/0.1.0
+    heartbeat: 3s
+    full_sync: 60s
+    failure_timeout: 15s
+
+neighbors:
+  min: 4                        # в LAN соседей много и они дешевы
+  target: 8
+  max: 32
+
+tasks:
+  default_ttl: 4                # LAN-топология плоская: глубокая рекурсия не нужна
+  max_ttl: 8
+  max_parallel_tasks: 4
+  max_parallel_tasks_per_peer: 2
+  default_timeout_seconds: 600
+  max_timeout_seconds: 3600
+  max_task_payload_bytes: 1048576
+  max_artifact_bytes: 104857600
+  max_workspace_bytes: 536870912
+  min_free_disk_bytes: 1073741824
+  max_task_memory_bytes: 1073741824
+  dedup_window: 15m
+  retention: 168h
+  forwarding:
+    max_fanout: 5
+    max_parallel_candidates: 3
+    max_retries: 2
+    attempt_timeout: 120s
+    retry_interval_seconds: 5s
+    search_relay:
+      enabled: true             # расшаривание поиска навыков по соседям
+      max_depth: 1              # в LAN хватает одного ретрансляционного хопа
+      fanout: 4                 # соседей в LAN можно спрашивать смелее
+      request_timeout: 4s       # LAN-RTT мал — ждём недолго
+      cache_ttl: 60s
+
+capabilities:
+  skills: [general]
+  models: []
+  resource_class: medium
+  accept_external_tasks: true   # в LAN узлы по умолчанию берут чужие задачи
+  allow_shell: false            # опасные операции выключены (ТЗ 11.4)
+  allow_network_tools: true
+  max_parallel_tasks: 4
+  disabled_skills: []
+
+picoclaw:
+  mode: ${ZETOMESH_PICO_MODE:-stub}
+  binary: ${ZETOMESH_PICO_BIN:-picoclaw}
+  config: ${ZETOMESH_PICO_CONFIG:-}
+  timeout_seconds: 600
+  max_concurrent_agents: 4
+  extra_args: []
+  prompt_template: ""
+  env: {}
+  http:
+    base_url: ${ZETOMESH_PICO_WS_URL:-http://127.0.0.1:18790}
+    path: /pico/ws
+    health_path: /health
+    token_env: PICOCLAW_MESH_PICO_TOKEN
+    timeout_seconds: 600
+  stub:
+    latency: 50ms
+    echo: true
+
+security:
+  # limited: подписанные задачи принимаются от известных пиров; списки пиров —
+  # по желанию оператора.
+  trust_mode: ${ZETOMESH_TRUST_MODE:-limited}
+  require_task_signature: true
+  drop_invalid_signatures: true
+  min_trust_for_tasks: known
+  allowed_peers_file: ${ZETOMESH_ALLOWED_PEERS:-}
+  blocked_peers_file: ${ZETOMESH_BLOCKED_PEERS:-}
+  max_message_bytes: 4194304
+  rate_limit:
+    requests_per_second: 50     # в LAN лимит выше: сеть быстрая, узлы свои
+    burst: 150
+
+api:
+  enabled: true
+  listen: ${ZETOMESH_API_HOST:-127.0.0.1}:${ZETOMESH_API_PORT:-8081}
+  auth_token_env: ZETOMESH_API_TOKEN
+  read_timeout: 15s
+  write_timeout: 600s
+
+telemetry:
+  prometheus_listen: ${ZETOMESH_PROM_LISTEN:-127.0.0.1:9464}
+  log_level: ${ZETOMESH_LOG_LEVEL:-info}
+  structured_logs: true
+
+storage:
+  engine: badger
+  dir: ""                       # пусто → <data_dir>/db
+  max_task_records: 100000

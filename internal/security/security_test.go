@@ -12,7 +12,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"google.golang.org/protobuf/proto"
 
-	pb "github.com/zeptoclaw/zeptomesh/gen/zeptomesh/v1"
+	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
 )
 
 func ephemeralIdentity(t *testing.T) *Identity {

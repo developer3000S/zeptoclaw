@@ -32,8 +32,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux go build \
       -trimpath \
       -ldflags "-s -w \
-        -X github.com/zeptoclaw/zeptomesh/internal/version.GitCommit=${GIT_COMMIT} \
-        -X github.com/zeptoclaw/zeptomesh/internal/version.BuildDate=${BUILD_DATE}" \
+        -X github.com/developer3000S/zeptoclaw/internal/version.GitCommit=${GIT_COMMIT} \
+        -X github.com/developer3000S/zeptoclaw/internal/version.BuildDate=${BUILD_DATE}" \
       -o /out/zeptomesh-node ./cmd/zeptomesh-node
 
 # ---------------------------------------------------------------------------
