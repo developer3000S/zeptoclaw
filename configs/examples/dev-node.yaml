@@ -1,0 +1,159 @@
+# ZeptoClaw Agent Mesh — конфигурация отладочного кластера на ОДНОЙ машине.
+#
+# Назначение: поднять несколько узлов локально, чтобы глазами проверить
+# обнаружение, роутинг задач, обмен навыками и ротацию ключей — без Docker,
+# mDNS и внешних точек входа.
+#
+# Запуск одного экземпляра:
+#   ZETOMESH_INDEX=0 ./bin/zeptomesh-node run -config configs/examples/dev-node.yaml
+# Запуск кластера из трёх узлов:
+#   make dev-cluster      (остановка: make dev-cluster-down)
+#
+# Отличия от configs/node.yaml (боевого шаблона):
+#   * порты сдвинуты в диапазон 41xx/81xx, чтобы не спорить с установленной
+#     службой (у неё 4001+i / 8081+i);
+#   * picoclaw в режиме stub — задачи «выполняются» на месте с малой задержкой,
+#     бинарник PicoClaw не нужен;
+#   * mDNS и DHT выключены: соседи задаются списком bootstrap, сеть полностью
+#     детерминирована;
+#   * gossip-интервалы укорочены, чтобы изменения были видны за секунды.
+#
+# Значения ${VAR:-default} раскрывает загрузчик (internal/config.expandEnv),
+# поэтому файл обслуживает любой экземпляр: достаточно ZETOMESH_INDEX.
+
+node:
+  name: dev-${ZETOMESH_INDEX:-0}
+  data_dir: ${ZETOMESH_DATA:-.dev/cluster}/${ZETOMESH_INDEX:-0}
+  listen:
+    # dev-cluster.sh выдаёт каждому экземпляру свой порт; без него это узел 0.
+    # Явный порт нужен и соседям: bootstrap-ссылка ссылается на номер порта.
+    - /ip4/127.0.0.1/tcp/${ZETOMESH_MESH_PORT:-4101}
+  announce: []
+  private_network_psk: ${ZETOMESH_PSK:-}
+  relay:
+    enabled: false
+    advertise_as_relay: false
+
+identity:
+  # пусто → <data_dir>/keys/peer.key
+  key_file: ""
+
+discovery:
+  # Реестр unix-сокетов — основной способ знакомства процессов на одной машине:
+  # записи содержат и peer id, и адреса, так что соединения детерминированы без
+  # multicast и без внешних точек входа.
+  local_registry: true
+  # Общая для всех экземпляров директория: каждый узел видит записи остальных.
+  local_socket_dir: ${ZETOMESH_DATA:-.dev/cluster}/shared
+  mdns: false
+  dht: false
+  peer_exchange: false
+  # Список входа — flow-style YAML, который раскрывает загрузчик: переменная
+  # содержит перечисление через запятую ("/ip4/…/tcp/…/p2p/12D3…"). Полностью
+  # пустой по умолчанию: реестр выше закрывает знакомство, а bootstrap-адрес без
+  # /p2p/<id> узел отвергает при старте — such a line can never connect.
+  bootstrap: [${ZETOMESH_BOOTSTRAP:-}]
+  bootstrap_interval: 3s
+  gossip:
+    enabled: true
+    topic: /zeptomesh/dev/0.1.0
+    heartbeat: 1s
+    full_sync: 10s
+    failure_timeout: 5s
+
+neighbors:
+  min: 1
+  target: 3
+  max: 8
+
+tasks:
+  default_ttl: 4
+  max_ttl: 8
+  max_parallel_tasks: 2
+  max_parallel_tasks_per_peer: 2
+  default_timeout_seconds: 120
+  max_timeout_seconds: 600
+  max_task_payload_bytes: 262144
+  max_artifact_bytes: 1048576
+  max_workspace_bytes: 33554432
+  min_free_disk_bytes: 33554432
+  dedup_window: 5m
+  retention: 24h
+  forwarding:
+    max_fanout: 3
+    max_parallel_candidates: 2
+    max_retries: 1
+    attempt_timeout: 60s
+    retry_interval_seconds: 2s
+    search_relay:
+      enabled: true
+      max_depth: 1
+      fanout: 2
+      request_timeout: 3s
+      cache_ttl: 15s
+
+capabilities:
+  # Навыки экземпляра различаются: иначе не проверить, что задача уехала именно
+  # к носителю нужного навыка. dev-cluster.sh передаёт ZETOMESH_SKILLS.
+  skills: [${ZETOMESH_SKILL:-general}]
+  models: []
+  resource_class: small
+  accept_external_tasks: true
+  allow_shell: false
+  # Сетевые инструменты включены, как в обоих примерах ТЗ (1320, 1972): CLI по
+  # умолчанию помечает задачу как требующую сеть, и узел с запретом такую задачу
+  # отклонит — делегирование в кластере перестанет работать из коробки.
+  allow_network_tools: true
+  max_parallel_tasks: 2
+  disabled_skills: []
+  # Описание навыков — то, что видят соседи после обмена. Версию и дайджест
+  # узел считает сам; здесь только человеческая аннотация.
+  skill_docs:
+    - name: ${ZETOMESH_SKILL:-general}
+      description: dev-cluster placeholder skill
+      models: [dev-stub]
+      attributes:
+        env: dev
+  skill_exchange:
+    enabled: true
+    disclose_to: known
+    interval: 5s
+    max_descriptors: 32
+    import_limit: 128
+    persist: true
+
+picoclaw:
+  mode: stub
+  binary: picoclaw
+  timeout_seconds: 120
+  max_concurrent_agents: 2
+  stub:
+    latency: 100ms
+    echo: true
+
+security:
+  trust_mode: limited
+  require_task_signature: true
+  drop_invalid_signatures: true
+  min_trust_for_tasks: known
+  max_message_bytes: 1048576
+  rate_limit:
+    requests_per_second: 200
+    burst: 400
+
+api:
+  enabled: true
+  listen: 127.0.0.1:${ZETOMESH_API_PORT:-8101}
+  auth_token_env: ZETOMESH_API_TOKEN
+  read_timeout: 15s
+  write_timeout: 60s
+
+telemetry:
+  prometheus_listen: 127.0.0.1:${ZETOMESH_PROM_PORT:-9564}
+  log_level: ${ZETOMESH_LOG_LEVEL:-info}
+  structured_logs: false
+
+storage:
+  engine: badger
+  dir: ""
+  max_task_records: 10000

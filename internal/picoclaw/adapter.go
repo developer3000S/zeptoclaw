@@ -98,6 +98,24 @@ type Adapter interface {
 	Close() error
 }
 
+// ModelReporter is implemented by adapters that can name the model they hand
+// to the agent. Not every integration surface can: the Pico Protocol has no
+// verified request field for model selection, so its adapter does not implement
+// this and the mesh reports nothing rather than an unfounded guess.
+type ModelReporter interface {
+	// Model returns the configured node-level model (ТЗ 10.3), "" when the
+	// adapter leaves the choice to PicoClaw itself.
+	Model() string
+}
+
+// ModelOf reports what model a node would ask its local agent to use.
+func ModelOf(a Adapter) string {
+	if mr, ok := a.(ModelReporter); ok {
+		return mr.Model()
+	}
+	return ""
+}
+
 // Info describes the adapter for the admin API.
 type Info struct {
 	Name    string    `json:"name"`
@@ -105,6 +123,7 @@ type Info struct {
 	Version string    `json:"version,omitempty"`
 	Checked time.Time `json:"checked,omitempty"`
 	Detail  string    `json:"detail,omitempty"`
+	Model   string    `json:"model,omitempty"`
 }
 
 // Describe runs Healthy and packages the result for status output.
@@ -115,6 +134,7 @@ func Describe(ctx context.Context, a Adapter) Info {
 	if err != nil {
 		info.Detail = err.Error()
 	}
+	info.Model = ModelOf(a)
 	info.Checked = time.Now().UTC()
 	return info
 }

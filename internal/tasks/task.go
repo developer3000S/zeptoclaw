@@ -264,21 +264,43 @@ func VerifyDigest(env *pb.TaskEnvelope) error {
 	return nil
 }
 
+// ValidationError reports every rule an envelope broke. It unwraps to its
+// causes so a caller can classify a rejection with errors.Is, while its message
+// names them all — an operator fixing a rejected task should not have to
+// rediscover one violation per round trip.
+type ValidationError struct {
+	Reasons []error
+}
+
+func (e *ValidationError) Error() string {
+	msgs := make([]string, 0, len(e.Reasons))
+	for _, r := range e.Reasons {
+		msgs = append(msgs, r.Error())
+	}
+	return "task: invalid: " + strings.Join(msgs, "; ")
+}
+
+// Unwrap lets errors.Is/errors.As reach each individual rule.
+func (e *ValidationError) Unwrap() []error { return e.Reasons }
+
 // Validate checks structural and policy invariants of an envelope.
 func Validate(env *pb.TaskEnvelope, maxPayload int64, now time.Time) error {
 	if env == nil {
 		return errors.New("task: nil envelope")
 	}
-	var errs []string
+	var errs []error
 	require := func(cond bool, err error) {
 		if !cond {
-			errs = append(errs, err.Error())
+			errs = append(errs, err)
 		}
 	}
 	require(env.GetTaskId() != "", ErrEmptyTaskID)
 	require(env.GetOriginPeerId() != "", ErrMissingOrigin)
 	require(env.GetSenderPeerId() != "", ErrMissingSender)
-	require(env.GetPayload().GetInstruction() != "", ErrNoInstruction)
+	// Blank in the whitespace sense is blank: the adapter refuses such a prompt,
+	// so accepting it here would spend a task slot to fail the job later instead
+	// of refusing it at the boundary with a reason.
+	require(strings.TrimSpace(env.GetPayload().GetInstruction()) != "", ErrNoInstruction)
 	require(len(env.GetPayload().GetInstruction()) <= MaxInstructionLen, ErrPayloadTooLarge)
 	require(env.GetTtl() >= 0, ErrTTLExhausted)
 	require(env.GetPriority() >= 1 && env.GetPriority() <= 9, ErrBadPriority)
@@ -294,10 +316,10 @@ func Validate(env *pb.TaskEnvelope, maxPayload int64, now time.Time) error {
 		require(age >= -int64(ClockSkewTolerance.Seconds()), ErrTooFarAhead)
 	}
 	if err := VerifyDigest(env); err != nil {
-		errs = append(errs, err.Error())
+		errs = append(errs, err)
 	}
 	if len(errs) > 0 {
-		return errors.New("task: invalid: " + strings.Join(errs, "; "))
+		return &ValidationError{Reasons: errs}
 	}
 	return nil
 }
@@ -406,7 +428,16 @@ func ErrorClass(st pb.TaskStatus, msg string) pb.TaskErrorClass {
 		return pb.TaskErrorClass_TASK_ERROR_CLASS_UNSPECIFIED
 	}
 	low := strings.ToLower(msg)
+	// The no-worker cases are checked before the keyword scan: their messages
+	// quote a remote peer's refusal verbatim, and those words could otherwise
+	// flip the class (a "no eligible peers reachable: … allow_network_tools …"
+	// would read as SECURITY, and a relay would then refuse to retry a failure
+	// that is retryable elsewhere).
 	switch {
+	case strings.Contains(low, "no eligible"), strings.Contains(low, "no candidate"),
+		strings.Contains(low, "no neighbour"), strings.Contains(low, "no capability"),
+		strings.Contains(low, "skills"):
+		return pb.TaskErrorClass_TASK_ERROR_CLASS_NO_WORKER
 	case strings.Contains(low, "signature"), strings.Contains(low, "trust"),
 		strings.Contains(low, "blocked"), strings.Contains(low, "allow"):
 		return pb.TaskErrorClass_TASK_ERROR_CLASS_SECURITY
@@ -420,12 +451,33 @@ func ErrorClass(st pb.TaskStatus, msg string) pb.TaskErrorClass {
 	case strings.Contains(low, "connect"), strings.Contains(low, "reset"),
 		strings.Contains(low, "unreachable"), strings.Contains(low, "timeout "):
 		return pb.TaskErrorClass_TASK_ERROR_CLASS_NETWORK
-	case strings.Contains(low, "no eligible"), strings.Contains(low, "no candidate"),
-		strings.Contains(low, "skills"):
-		return pb.TaskErrorClass_TASK_ERROR_CLASS_NO_WORKER
 	default:
 		return pb.TaskErrorClass_TASK_ERROR_CLASS_EXECUTION
 	}
+}
+
+// errorClassName renders a class for the journal as its short form ("TIMEOUT"
+// rather than "TASK_ERROR_CLASS_TIMEOUT"), so stored records stay readable and
+// the prefix is not repeated in every task history entry. UNSPECIFIED renders
+// as empty: a completed task has no class to record, and storing the word would
+// make every successful entry look like it carries an error.
+func errorClassName(ec pb.TaskErrorClass) string {
+	if ec == pb.TaskErrorClass_TASK_ERROR_CLASS_UNSPECIFIED {
+		return ""
+	}
+	return strings.TrimPrefix(ec.String(), "TASK_ERROR_CLASS_")
+}
+
+// errorClassByName is the inverse of errorClassName. An unknown or empty name
+// yields UNSPECIFIED, which callers treat as "not recorded" and derive again.
+func errorClassByName(s string) pb.TaskErrorClass {
+	if s == "" {
+		return pb.TaskErrorClass_TASK_ERROR_CLASS_UNSPECIFIED
+	}
+	if v, ok := pb.TaskErrorClass_value["TASK_ERROR_CLASS_"+s]; ok {
+		return pb.TaskErrorClass(v)
+	}
+	return pb.TaskErrorClass_TASK_ERROR_CLASS_UNSPECIFIED
 }
 
 // NormalizeSkills lowercases, trims, deduplicates and sorts a skill list.

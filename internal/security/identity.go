@@ -63,6 +63,21 @@ func NewEphemeral() (*Identity, error) {
 	return newIdentity(priv)
 }
 
+// Save writes the identity's private key to path in the same format
+// LoadOrGenerate reads: atomically (tmp+rename) and mode 0600. It exists so a
+// rotation can install the incoming key through the same reviewed code path
+// that created the original one.
+func (i *Identity) Save(path string) error {
+	if path == "" {
+		return errors.New("security: empty key path")
+	}
+	blob, err := ic.MarshalPrivateKey(i.priv)
+	if err != nil {
+		return fmt.Errorf("security: marshal key: %w", err)
+	}
+	return writeKeyFile(path, []byte(KeyFileMagic+hex.EncodeToString(blob)))
+}
+
 func decodeKey(raw []byte) (*Identity, error) {
 	text := strings.TrimSpace(string(raw))
 	if !strings.HasPrefix(text, strings.TrimSpace(KeyFileMagic)) {

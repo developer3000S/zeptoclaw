@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/developer3000S/zeptoclaw/internal/picoclaw"
 	"github.com/developer3000S/zeptoclaw/internal/routing"
 	"github.com/developer3000S/zeptoclaw/internal/security"
+	"github.com/developer3000S/zeptoclaw/internal/skills"
 	"github.com/developer3000S/zeptoclaw/internal/storage"
 	"github.com/developer3000S/zeptoclaw/internal/tasks"
 	"github.com/developer3000S/zeptoclaw/internal/version"
@@ -41,17 +43,23 @@ type SubmitRequest = tasks.SubmitRequest
 type Node struct {
 	Cfg *config.Config
 
-	Identity   *security.Identity
-	Store      *storage.Store
-	Policy     *security.Policy
-	Limiter    *security.Limiter
-	Audit      *security.Audit
-	Metrics    *metrics.Collector
-	Host       *p2p.Host
-	Service    *p2p.Service
-	Table      *routing.Table
-	Adapter    picoclaw.Adapter
-	Manager    *tasks.Manager
+	Identity *security.Identity
+	Store    *storage.Store
+	Policy   *security.Policy
+	Limiter  *security.Limiter
+	Audit    *security.Audit
+	// Rebinds is the ledger of identity handovers (rotation/revocation) that
+	// this node has verified; the trust policy consults it on every decision.
+	Rebinds *security.RebindStore
+	Metrics *metrics.Collector
+	Host    *p2p.Host
+	Service *p2p.Service
+	Table   *routing.Table
+	Adapter picoclaw.Adapter
+	Manager *tasks.Manager
+	// Skills is the local skill registry: this node's documented, versioned
+	// skill set plus the descriptors learned from peers (skill exchange).
+	Skills     *skills.Registry
 	Registry   *discovery.LocalRegistry
 	Probe      *discovery.Probe
 	MDNS       *discovery.MDNS
@@ -78,6 +86,12 @@ type Node struct {
 	quit     chan struct{}
 	quitOnce sync.Once
 
+	// halted is closed by a self-revocation, which is the opposite request:
+	// the identity is retired for good, so a supervisor must not bring the
+	// process back under the same (now untrustworthy) key.
+	halted     chan struct{}
+	haltedOnce sync.Once
+
 	mu      sync.Mutex
 	running bool
 	cancel  context.CancelFunc
@@ -89,6 +103,13 @@ type Node struct {
 	// the same peer do not stampede the RPC.
 	introduceMu sync.Mutex
 	introducing map[peer.ID]bool
+	// handshaked records the peers this *process* has completed a capabilities
+	// handshake with. It must not be derived from the neighbour table: that table
+	// is persisted, while the trust earned by a handshake (Policy.Observe) lives
+	// only in memory. Reusing the restored skill list as proof of a handshake
+	// made every node skip the handshake after a restart — and so never re-earn
+	// trust — which reads as "peer not trusted for tasks" from every neighbour.
+	handshaked map[peer.ID]bool
 }
 
 // Options parameterise New.
@@ -110,6 +131,12 @@ type Options struct {
 // Quit returns a channel closed when an operator asks the node to leave the
 // mesh via the admin API; the daemon exits and the supervisor starts it fresh.
 func (n *Node) Quit() <-chan struct{} { return n.quit }
+
+// Halted returns a channel closed when the node's identity has been retired for
+// good. The daemon must then exit *successfully*: a supervisor that restarted a
+// revoked node would bring back the very identity the mesh was told to refuse,
+// and the operator's act would be undone by the unit file.
+func (n *Node) Halted() <-chan struct{} { return n.halted }
 
 // New builds every component, wired but not started.
 func New(opts Options) (*Node, error) {
@@ -159,6 +186,17 @@ func New(opts Options) (*Node, error) {
 		logger.Info("block_list_loaded", "peers", n)
 	}
 
+	// The identity-handover ledger is consulted by the trust policy itself, so it
+	// must exist before any peer is judged: a node that rotated its key should be
+	// recognised as the peer it already was, not as a stranger (ТЗ 11.2 п.3–4).
+	rebindsPath := filepath.Join(cfg.Node.DataDir, "rebinds.json")
+	rebinds, err := security.NewRebindStore(rebindsPath,
+		logging.Component(logger, "rebinds"))
+	if err != nil {
+		return nil, fmt.Errorf("node: rebind ledger: %w", err)
+	}
+	policy.SetRebindStore(rebinds)
+
 	audit, err := security.OpenAudit(filepath.Join(cfg.AuditDir(), "security.jsonl"), logger)
 	if err != nil {
 		return nil, fmt.Errorf("node: audit: %w", err)
@@ -174,7 +212,7 @@ func New(opts Options) (*Node, error) {
 	}
 	adapter := opts.Adapter
 	if adapter == nil {
-		adapter, err = picoclaw.New(cfg, logger)
+		adapter, err = picoclaw.New(cfg, logging.Component(logger, "picoclaw"))
 		if err != nil {
 			_ = store.Close()
 			closePartial()
@@ -185,7 +223,36 @@ func New(opts Options) (*Node, error) {
 	mets := metrics.New("")
 	mets.BuildInfo.Set(1)
 
-	table := routing.NewTable(cfg.Neighbors, store, logger)
+	// The skill registry seeds itself from the operator config: names plus any
+	// documentation, and a persisted version clock when configured. Learning a
+	// peer's descriptors never adds a skill here — own is what this node serves.
+	skillDocs := make([]skills.Descriptor, 0, len(cfg.Capabilities.SkillDocs))
+	for _, d := range cfg.Capabilities.SkillDocs {
+		skillDocs = append(skillDocs, skills.Descriptor{
+			Name: d.Name, Version: d.Version, Description: d.Description,
+			Models: d.Models, Attributes: d.Attributes,
+		})
+	}
+	skillsPath := ""
+	if cfg.Capabilities.SkillExchange.Persist {
+		skillsPath = filepath.Join(cfg.Node.DataDir, "skills.json")
+	}
+	skillReg, err := skills.New(skills.Options{
+		Path: skillsPath, Skills: cfg.EffectiveSkills(), Docs: skillDocs,
+		ImportLimit: cfg.Capabilities.SkillExchange.ImportLimit,
+		Logger:      logging.Component(logger, "skills"),
+	})
+	if err != nil {
+		_ = store.Close()
+		closePartial()
+		return nil, fmt.Errorf("node: skill registry: %w", err)
+	}
+	mets.SkillsVersion.Set(float64(skillReg.Epoch()))
+
+	// The policy is passed to the table rather than quoted into it: peer standing
+	// is decided in one place, so a neighbour view can never disagree with the
+	// admission checks that run on the task path (ТЗ 11.4).
+	table := routing.NewTable(cfg.Neighbors, store, logging.Component(logger, "routing"), policy)
 	if n, err := table.Restore(); err != nil {
 		logger.Warn("neighbor_table_restore_failed", "err", err.Error())
 	} else if n > 0 {
@@ -195,16 +262,30 @@ func New(opts Options) (*Node, error) {
 	n := &Node{
 		Cfg: cfg, Identity: identity, Store: store, Policy: policy,
 		Limiter: security.NewLimiter(cfg.Security.RateLimit.RequestsPerSecond, cfg.Security.RateLimit.Burst),
-		Audit:   audit, Metrics: mets, Table: table, Adapter: adapter, log: logger,
+		Audit:   audit, Rebinds: rebinds, Metrics: mets, Table: table, Adapter: adapter, Skills: skillReg, log: logger,
 		configPath: opts.ConfigPath, levelVar: opts.LevelVar, quit: make(chan struct{}),
-		introducing: make(map[peer.ID]bool), skipDiscovery: opts.SkipDiscovery,
+		halted:      make(chan struct{}),
+		introducing: make(map[peer.ID]bool), handshaked: make(map[peer.ID]bool),
+		skipDiscovery: opts.SkipDiscovery,
+	}
+
+	// A revoked identity must not come back, whatever the supervisor does with
+	// exit codes. The ledger is local and survives restarts, so it is the one
+	// place this can be enforced: if this node's own id retired itself, refuse
+	// to start rather than rejoin the mesh holding a statement every peer uses
+	// to refuse it.
+	if n.Rebinds.Revoked(n.ID()) {
+		_ = store.Close()
+		closePartial()
+		return nil, fmt.Errorf("node: identity %s is revoked; install a new key (zeptomesh-node genkey) or remove this statement from %s to rejoin",
+			n.ID().String(), rebindsPath)
 	}
 
 	ph, err := p2p.New(context.Background(), p2p.Options{
 		Config:  cfg,
 		Key:     identity.PrivKey(),
 		Gater:   p2p.NewGater(policy, audit),
-		Logger:  logger,
+		Logger:  logging.Component(logger, "transport"),
 		Metrics: mets,
 	})
 	if err != nil {
@@ -220,7 +301,7 @@ func New(opts Options) (*Node, error) {
 		Task:   n.dispatchTask,
 		Result: n.dispatchResult,
 		RPC:    n.dispatchRPC,
-	}, logger)
+	}, logging.Component(logger, "transport"))
 
 	if err := n.buildDiscovery(); err != nil {
 		return nil, err
@@ -229,7 +310,9 @@ func New(opts Options) (*Node, error) {
 	mgr, err := tasks.NewManager(tasks.Options{
 		Config: cfg, Identity: identity, Policy: policy, Limiter: n.Limiter,
 		Audit: audit, Store: store, Table: table, Adapter: adapter,
-		Service: n.Service, Known: n.skillsSource(), Metrics: mets, Logger: logger,
+		Service: n.Service, Known: n.skillsSource(), SkillView: skillReg,
+		OnRebind: n.acceptRebind,
+		Metrics:  mets, Logger: logging.Component(logger, "tasks"),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("node: task manager: %w", err)
@@ -270,6 +353,10 @@ func (n *Node) dispatchRPC(ctx context.Context, remote peer.ID, req *pb.RpcReque
 // section alone still permits bootstrap/local-registry/DHT discovery.
 func (n *Node) buildDiscovery() error {
 	cfg := n.Cfg
+	// Every constructor below gets this logger: the discovery mechanisms are six
+	// separate objects, and an operator reading "peer found" wants to know it came
+	// from the registry rather than gossip (ТЗ 14.1).
+	dlog := logging.Component(n.log, "discovery")
 	if n.skipDiscovery {
 		n.log.Info("discovery_disabled_manual_peers_only")
 		return nil
@@ -281,12 +368,12 @@ func (n *Node) buildDiscovery() error {
 			Skills:   cfg.EffectiveSkills(),
 		}
 		reg, err := discovery.NewLocalRegistry(cfg.Discovery.LocalSocketDir, n.Identity.PeerID(), rec,
-			cfg.Discovery.Gossip.FailureTimeout.D()*2, n.log)
+			cfg.Discovery.Gossip.FailureTimeout.D()*2, dlog)
 		if err != nil {
 			n.log.Warn("local_registry_disabled", "err", err.Error())
 		} else {
 			n.Registry = reg
-			probe, perr := discovery.NewProbe(cfg.Discovery.LocalSocketDir, n.Identity.PeerID().String(), n.log)
+			probe, perr := discovery.NewProbe(cfg.Discovery.LocalSocketDir, n.Identity.PeerID().String(), dlog)
 			if perr != nil {
 				n.log.Warn("probe_socket_disabled", "err", perr.Error())
 			} else {
@@ -298,19 +385,19 @@ func (n *Node) buildDiscovery() error {
 	}
 
 	b, err := discovery.NewBootstrap(n.Host.Underlying(), cfg.Discovery.Bootstrap,
-		cfg.Discovery.BootstrapInterval.D(), 10*time.Second, n.log)
+		cfg.Discovery.BootstrapInterval.D(), 10*time.Second, dlog)
 	if err != nil {
 		return fmt.Errorf("node: bootstrap: %w", err)
 	}
 	n.Bootstrap = b
 
 	if cfg.Discovery.DHT && n.Host.DHT() != nil {
-		n.DHT = discovery.NewDHT(n.Host.DHT(), cfg.EffectiveSkills(), n.log)
+		n.DHT = discovery.NewDHT(n.Host.DHT(), cfg.EffectiveSkills(), dlog)
 	}
 
 	if cfg.Discovery.Gossip.Enabled {
 		m, err := discovery.NewMembership(context.Background(), n.Host.Underlying(),
-			cfg.Discovery.Gossip, n.Policy, n.Audit, n.log)
+			cfg.Discovery.Gossip, n.Policy, n.Audit, dlog)
 		if err != nil {
 			return fmt.Errorf("node: membership: %w", err)
 		}
@@ -318,6 +405,7 @@ func (n *Node) buildDiscovery() error {
 		m.SetSelfStateFunc(n.peerState)
 		m.SetOnPeer(n.onGossipPeer)
 		m.SetOnExpire(n.onPeerExpire)
+		m.SetRebindSource(n.rebindsToRepublish, func(k *pb.KeyRebind) { n.acceptRebind(k) })
 	} else {
 		// Gossip is the only mechanism that learns peers it was not told about,
 		// so disabling it makes the mesh strictly explicit: reachability comes
@@ -496,6 +584,10 @@ type Status struct {
 		Name    string `json:"name"`
 		Healthy bool   `json:"healthy"`
 		Detail  string `json:"detail,omitempty"`
+		// Model is picoclaw.model as configured on this node (ТЗ 10.3): what the
+		// node asks its local agent to use. It is not a routing attribute and
+		// peers never see it — model selection is not part of the mesh protocol.
+		Model string `json:"model,omitempty"`
 	} `json:"adapter"`
 	Security struct {
 		TrustMode        string `json:"trust_mode"`
@@ -554,6 +646,7 @@ func (n *Node) Status() Status {
 	st.Adapter.Name = inf.Name
 	st.Adapter.Healthy = inf.Healthy
 	st.Adapter.Detail = inf.Detail
+	st.Adapter.Model = inf.Model
 	// Read the live posture, not the config snapshot: a reload changes the
 	// policy before (or instead of) anything the process can restart with.
 	st.Security.TrustMode = n.Policy.Mode().String()
@@ -586,6 +679,10 @@ func (n *Node) Capabilities() *pb.Capabilities {
 		ResourceClass:       n.Cfg.Capabilities.ResourceClass,
 		ListenAddrs:         n.DiscoverableAddrs(),
 		Timestamp:           time.Now().UTC().Unix(),
+		SkillsVersion:       n.Skills.Epoch(),
+	}
+	if n.Cfg.Capabilities.SkillExchange.Enabled {
+		caps.SkillDocs = n.Skills.Descriptors()
 	}
 	if err := security.NewSigner(n.Identity).SignCaps(caps); err != nil {
 		n.log.Error("caps_sign_failed", "err", err.Error())
@@ -603,6 +700,7 @@ func (n *Node) peerState() *pb.PeerState {
 		Version:          version.Version,
 		Status:           "active",
 		Addrs:            n.DiscoverableAddrs(),
+		SkillsVersion:    n.Skills.Epoch(),
 	}
 }
 
@@ -748,6 +846,10 @@ func (n *Node) onGossipPeer(ai peer.AddrInfo, st *pb.PeerState) {
 		PeerID: ai.ID, Addrs: addrsOf(ai), Skills: append([]string(nil), st.GetSkills()...),
 		Category: routing.CatWAN, Version: st.GetVersion(), Load: st.GetLoad(),
 		MaxPar: st.GetMaxParallelTasks(), Connected: n.Host.IsConnected(ai.ID),
+		// Gossip is the cheap channel for "my skills changed": the epoch rides
+		// on every PeerState, so a documented-skill update is noticed without a
+		// capabilities round trip per peer.
+		SkillsVersion: st.GetSkillsVersion(),
 	})
 	if n.Host.IsConnected(ai.ID) || n.Table.ConnectedCount() >= n.Cfg.Neighbors.Max {
 		return
@@ -762,6 +864,10 @@ func (n *Node) onGossipPeer(ai peer.AddrInfo, st *pb.PeerState) {
 
 func (n *Node) onPeerExpire(pid peer.ID) {
 	n.Table.SetConnected(pid, false)
+	// A peer we can no longer see cannot be the source of a live skill claim;
+	// dropping its descriptors frees the import budget and stops a departed
+	// node from lingering in the routing view as an executor.
+	n.Skills.DropPeer(pid.String())
 	n.log.Debug("peer_expired", "peer", pid.String())
 }
 
@@ -786,12 +892,540 @@ func (n *Node) refreshCapabilities(ctx context.Context, pid peer.ID) {
 		return
 	}
 	n.Policy.Observe(pid, security.TrustKnown)
+	// Only a verified answer counts as a completed handshake: a fetch that
+	// failed or did not verify leaves the peer to be introduced again.
+	n.introduceMu.Lock()
+	if n.handshaked == nil {
+		n.handshaked = make(map[peer.ID]bool)
+	}
+	n.handshaked[pid] = true
+	n.introduceMu.Unlock()
 	n.Table.Upsert(&routing.Neighbor{
 		PeerID: pid, Skills: append([]string(nil), caps.GetSkills()...),
 		MaxPar: caps.GetMaxParallelTasks(), Running: caps.GetRunningTasks(),
 		Load: caps.GetLoad(), Version: caps.GetVersion(),
-		Trust: n.Policy.TrustOf(pid), Connected: n.Host.IsConnected(pid),
+		Connected:     n.Host.IsConnected(pid),
+		SkillsVersion: caps.GetSkillsVersion(),
 	})
+	// The capabilities signature now covers the epoch and the descriptors
+	// (wire.CapsBody), so a verified answer is authoritative on its own: import
+	// it directly instead of asking again.
+	if len(caps.GetSkillDocs()) > 0 {
+		if updated, names := n.Skills.ImportPeer(pid.String(), caps.GetSkillDocs()); updated > 0 {
+			n.Metrics.SkillsImported.Add(float64(updated))
+			n.Table.Upsert(&routing.Neighbor{PeerID: pid, Skills: names, Connected: n.Host.IsConnected(pid)})
+			n.log.Debug("skills_imported", "peer", pid.String(), "descriptors", updated)
+		}
+		return
+	}
+	// Documented skills were not in the advertisement: fetch just the delta we
+	// do not have, if the peer claims to be newer than our view.
+	if n.Cfg.Capabilities.SkillExchange.Enabled &&
+		n.Skills.PeerEpoch(pid.String(), caps.GetSkillsVersion()) {
+		n.syncSkills(pid)
+	}
+}
+
+// syncSkills asks one peer for the skill descriptors we do not hold (or hold
+// older) and folds the signed answer into the local view. An empty or refused
+// answer is not an error: disclosure is the peer's policy decision.
+func (n *Node) syncSkills(pid peer.ID) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := n.Service.RPC(ctx, pid, &pb.RpcRequest{Kind: &pb.RpcRequest_SkillsSync{
+		SkillsSync: &pb.SkillsSyncRequest{Known: n.Skills.KnownVersions(pid.String())},
+	}})
+	if err != nil {
+		n.log.Debug("skills_sync_failed", "peer", pid.String(), "err", err.Error())
+		return
+	}
+	got := resp.GetSkillsSync()
+	if got == nil {
+		return
+	}
+	if err := security.VerifySkillsSync(got, pid, n.keyLookup()); err != nil {
+		n.Audit.Log(security.AuditEvent{Event: "skills_sync_bad_signature", PeerID: pid.String(), Reason: err.Error()})
+		n.Metrics.Security("skills_sync_bad_signature")
+		n.Table.RecordProtocolError(pid)
+		return
+	}
+	if updated, names := n.Skills.ImportPeer(pid.String(), got.GetSkills()); updated > 0 {
+		n.Metrics.SkillsSynced.Inc()
+		n.Metrics.SkillsImported.Add(float64(updated))
+		n.Table.Upsert(&routing.Neighbor{PeerID: pid, Skills: names, Connected: n.Host.IsConnected(pid)})
+		n.log.Info("skills_refreshed", "peer", pid.String(), "descriptors", updated, "epoch", got.GetSkillsVersion())
+	}
+}
+
+// reconcileSkills walks the neighbours whose advertised epoch outruns our view
+// of them and refreshes those, so a node that changes its documented skills is
+// followed without waiting for a task to expose the gap.
+func (n *Node) reconcileSkills(ctx context.Context) {
+	if !n.Cfg.Capabilities.SkillExchange.Enabled {
+		return
+	}
+	for _, nb := range n.Table.List() {
+		if nb.PeerID == n.ID() || !nb.Connected || nb.Left || nb.SkillsVersion <= 0 {
+			continue
+		}
+		if !n.Skills.PeerEpoch(nb.PeerID.String(), nb.SkillsVersion) {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		n.syncSkills(nb.PeerID)
+	}
+}
+
+// ---------- skill administration (ТЗ 6.3, 13.1.1) ----------
+
+// SetSkillDoc adds or updates the documentation of one skill this node
+// advertises and announces the new epoch, so neighbours pull the revision
+// instead of waiting for a task to expose the gap.
+//
+// It deliberately does not change what this node can execute: skills come from
+// the operator config plus the adapter's real capability, and an API call that
+// made the mesh believe a new skill appeared here would route work to a node
+// that cannot do it. Documenting a skill is metadata, and metadata is bounded by
+// the advertised set.
+func (n *Node) SetSkillDoc(d skills.Descriptor) (skills.Descriptor, error) {
+	if !slices.ContainsFunc(n.Cfg.EffectiveSkills(), func(s string) bool {
+		return strings.EqualFold(strings.TrimSpace(s), strings.TrimSpace(d.Name))
+	}) {
+		return skills.Descriptor{}, fmt.Errorf("node: skill %q is not advertised by this node", d.Name)
+	}
+	stored, changed := n.Skills.Set(d)
+	if !changed {
+		return stored, nil
+	}
+	n.Metrics.SkillsVersion.Set(float64(n.Skills.Epoch()))
+	n.announceSkills()
+	n.log.Info("skill_documented", "skill", stored.Name, "version", stored.Version, "epoch", n.Skills.Epoch())
+	return stored, nil
+}
+
+// RemoveSkillDoc drops documentation (not the capability): the skill stays
+// advertised by name, only its descriptor is retired and the epoch bumped.
+func (n *Node) RemoveSkillDoc(name string) bool {
+	n.Skills.DropDoc(name)
+	n.Metrics.SkillsVersion.Set(float64(n.Skills.Epoch()))
+	n.announceSkills()
+	return true
+}
+
+// announceSkills republishes this node's state on every channel a skill change
+// is visible on: gossip membership and the co-located registry.
+func (n *Node) announceSkills() {
+	if n.Membership != nil {
+		if st := n.peerState(); st != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := n.Membership.PublishState(ctx, st); err != nil {
+				n.log.Debug("skill_announce_failed", "err", err.Error())
+			}
+		}
+	}
+	if n.Registry != nil {
+		_ = n.Registry.UpdateSkills(n.Cfg.EffectiveSkills(), nil)
+	}
+}
+
+// SyncSkillsNow forces descriptor reconciliation against connected neighbours,
+// ignoring the periodic schedule, and returns how many were queried.
+func (n *Node) SyncSkillsNow(ctx context.Context) int {
+	queried := 0
+	for _, nb := range n.Table.List() {
+		if nb.PeerID == n.ID() || !nb.Connected || nb.Left {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return queried
+		default:
+		}
+		n.syncSkills(nb.PeerID)
+		queried++
+	}
+	return queried
+}
+
+// PeerSkillView is the operator-facing answer to "what do I believe my peers
+// can do, and how fresh is that belief" — the two questions a mis-routed task
+// usually comes down to.
+type PeerSkillView struct {
+	PeerID      string              `json:"peer_id"`
+	Connected   bool                `json:"connected"`
+	Left        bool                `json:"left"`
+	Advertised  []string            `json:"advertised_skills,omitempty"`
+	Epoch       int64               `json:"skills_version"`
+	Descriptors []skills.Descriptor `json:"descriptors,omitempty"`
+}
+
+// PeerSkillViews reports the learned skill view of every known peer.
+func (n *Node) PeerSkillViews() []PeerSkillView {
+	out := make([]PeerSkillView, 0, n.Table.Len())
+	for _, nb := range n.Table.List() {
+		out = append(out, PeerSkillView{
+			PeerID: nb.PeerID.String(), Connected: nb.Connected, Left: nb.Left,
+			Advertised: append([]string(nil), nb.Skills...), Epoch: nb.SkillsVersion,
+			Descriptors: n.Skills.PeerSkills(nb.PeerID.String()),
+		})
+	}
+	slices.SortFunc(out, func(a, b PeerSkillView) int { return strings.Compare(a.PeerID, b.PeerID) })
+	return out
+}
+
+// rebindMaxHeld bounds the local handover ledger so a hostile gossip source
+// cannot grow our state by flooding statements — each must verify, but the set
+// of distinct old ids is unbounded in principle.
+const rebindMaxHeld = 4096
+
+// rebindsToRepublish is the gossip source for handover statements. Only recent
+// statements are republished: an older one is still true and still resolved
+// locally, but pushing it forever would have every recipient log it as too old
+// to adopt, and the propagation window that matters is the live one.
+func (n *Node) rebindsToRepublish() []*pb.KeyRebind {
+	return n.Rebinds.StatementsFresh(rebindRepublishWindow)
+}
+
+// rebindRepublishWindow bounds how long a statement keeps being piggybacked on
+// heartbeats. It is a transport horizon, not a validity rule.
+const rebindRepublishWindow = 12 * time.Hour
+
+// acceptRebind applies one verified identity-handover statement and reports
+// whether it took effect, plus why not. It returns a status rather than just
+// logging because the same entry point serves gossip (fire-and-forget) and the
+// control RPC, whose peer legitimately asks "did you accept this?".
+//
+// A rotation carries the retiring id's standing over to the successor: the
+// neighbour-table entry (metrics, skills, category) moves so a planned key
+// change does not reset the relationship the node earned, and the trust policy
+// resolves the old id through the ledger on every decision. A revocation
+// removes the peer from the view and drops its learned skills — an id retired
+// by its own key must stop being trusted everywhere without anyone editing
+// files (ТЗ 11.2 п.4).
+func (n *Node) acceptRebind(k *pb.KeyRebind) (bool, string) {
+	old, err := peer.Decode(k.GetOldPeerId())
+	if err != nil {
+		return false, "unparsable old peer id"
+	}
+	if old == n.ID() {
+		// Our own handover statement echoed back from a peer: nothing to adopt.
+		// The exception worth acting on is a revocation of this very id that we
+		// did not issue ourselves — a retired key being reused (the stolen-key
+		// case). The mesh already gates that identity everywhere, so the honest
+		// outcome is to stop this process rather than let it run as a zombie
+		// whose local API still looks healthy. It cannot be forged: only this
+		// node's own key signs its revocation, and the key in hand just did.
+		if k.GetNewPeerId() == "" {
+			// Recorded locally so the restart guard covers this identity even if
+			// the key file is put back in place by hand.
+			if _, err := n.Rebinds.Apply(k); err != nil {
+				n.log.Warn("self_revocation_ledger", "err", err.Error())
+			}
+			n.log.Error("own_identity_revoked_stopping", "peer", old.String(), "reason", k.GetReason())
+			n.Audit.Log(security.AuditEvent{Event: "self_revoked_learned", PeerID: old.String(),
+				Reason: k.GetReason()})
+			if err := n.retireKeyFile(); err != nil {
+				n.log.Error("revocation_key_retirement_failed", "err", err.Error())
+			}
+			n.haltedOnce.Do(func() { close(n.halted) })
+		}
+		return true, ""
+	}
+	if n.Rebinds.Len() >= rebindMaxHeld && !n.Rebinds.HoldsStatement(old) {
+		n.log.Warn("rebind_ledger_full", "old", old.String())
+		return false, "ledger full"
+	}
+	applied, err := n.Rebinds.Apply(k)
+	if err != nil {
+		n.Audit.Log(security.AuditEvent{Event: "rebind_rejected", PeerID: old.String(),
+			Reason: err.Error()})
+		n.Metrics.Security("rebind_rejected")
+		return false, err.Error()
+	}
+	if !applied {
+		return false, "older sequence already held" // stale replay
+	}
+	n.Metrics.RebindsApplied.Inc()
+	if k.GetNewPeerId() == "" {
+		n.revokePeer(old)
+		n.log.Info("peer_revoked", "peer", old.String(), "reason", k.GetReason())
+		return true, ""
+	}
+	n.rotatePeer(old, k)
+	return true, ""
+}
+
+// rotatePeer migrates state from the retired id to its successor and announces
+// the successor under this node's own observation, so the handover spreads.
+func (n *Node) rotatePeer(old peer.ID, k *pb.KeyRebind) {
+	nid, err := peer.Decode(k.GetNewPeerId())
+	if err != nil {
+		return
+	}
+	// Inherit the neighbour record wholesale — scores, skills, capacity — then
+	// keep the connection truth: the new id has not been dialled yet.
+	if prev, ok := n.Table.Get(old); ok {
+		prev.PeerID = nid
+		prev.Connected = n.Host.IsConnected(nid)
+		prev.LastSeen = time.Now().UTC()
+		n.Table.Upsert(&prev)
+		// The retired identity no longer exists as far as routing is concerned;
+		// leaving it behind would let Select keep preferring a dead id.
+		n.Table.Remove(old)
+	}
+	// Carry the learned skill view across the rotation and credit the successor
+	// with the predecessor's trust: the same operator, a new key.
+	if docs := n.Skills.PeerSkills(old.String()); len(docs) > 0 {
+		if updated, names := n.Skills.ImportPeer(nid.String(), descriptorsToProto(docs)); updated > 0 {
+			if nb, ok := n.Table.Get(nid); ok {
+				n.Table.Upsert(&routing.Neighbor{PeerID: nid, Skills: names, Connected: nb.Connected})
+			}
+		}
+		n.Skills.DropPeer(old.String())
+	}
+	n.Policy.Observe(nid, n.Policy.TrustOf(old))
+	// A bootstrap entry is addressed by identity ("/…/p2p/<old>"), so after the
+	// handover it would dial an address whose peer fails the Noise handshake.
+	// The address is still correct — only the id part went stale.
+	if n.Bootstrap != nil && n.Bootstrap.Rename(old, nid) {
+		n.log.Info("bootstrap_entry_renamed", "old", old.String(), "new", nid.String(),
+			"hint", "update discovery.bootstrap in the config file when convenient")
+	}
+	n.Audit.Log(security.AuditEvent{Event: "peer_rebound", PeerID: old.String(),
+		Reason: fmt.Sprintf("-> %s (%s)", nid.String(), k.GetReason())})
+	n.Metrics.Security("peer_rebound")
+	n.log.Info("peer_rebound", "old", old.String(), "new", nid.String(), "reason", k.GetReason())
+}
+
+// revokePeer removes a retired identity from every local view.
+func (n *Node) revokePeer(old peer.ID) {
+	// Tasks that were waiting on this peer must not linger until their timeout:
+	// the identity is gone by declaration, which is stronger information than a
+	// dropped connection.
+	n.Manager.OnPeerDisconnected(old)
+	n.Table.Remove(old)
+	n.Skills.DropPeer(old.String())
+	n.Policy.SetListed(old, false) // operator-grade block, survives restarts in-memory
+	n.Audit.Log(security.AuditEvent{Event: "peer_revoked", PeerID: old.String(), Reason: "revoked by own key"})
+	n.Metrics.Security("peer_revoked")
+}
+
+// descriptorsToProto re-renders learned descriptors for an import under a new
+// peer key (import re-verifies digests, so this is a format conversion only).
+func descriptorsToProto(in []skills.Descriptor) []*pb.SkillDescriptor {
+	out := make([]*pb.SkillDescriptor, 0, len(in))
+	for _, d := range in {
+		out = append(out, d.ToProto())
+	}
+	return out
+}
+
+// PublishRebind records a locally produced handover statement and announces it
+// immediately on every channel, so the mesh learns of a rotation before the
+// next heartbeat would have carried it.
+func (n *Node) PublishRebind(k *pb.KeyRebind) error {
+	applied, err := n.Rebinds.Apply(k)
+	if err != nil {
+		return err
+	}
+	if applied {
+		n.Metrics.RebindsApplied.Inc()
+	}
+	if n.Membership != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// Publishing our own state piggybacks the whole held ledger (the
+		// rebindSource callback), which is also how the statement propagates.
+		if st := n.peerState(); st != nil {
+			if err := n.Membership.PublishState(ctx, st); err != nil {
+				n.log.Debug("rebind_announce_failed", "err", err.Error())
+			}
+		}
+	}
+	return nil
+}
+
+// RotateKeyResult describes a completed identity rotation.
+type RotateKeyResult struct {
+	OldPeerID peer.ID       `json:"old_peer_id"`
+	NewPeerID peer.ID       `json:"new_peer_id"`
+	Rebind    *pb.KeyRebind `json:"-"`
+	// AnnouncedTo lists the peers the statement was pushed to directly (the
+	// gossip carrier is best-effort, so the operator wants to know who heard it
+	// synchronously).
+	AnnouncedTo []string `json:"announced_to,omitempty"`
+	Restart     bool     `json:"restart_required"`
+}
+
+// RotateKey replaces this node's identity key with a freshly generated one and
+// announces the handover to the mesh (ТЗ 11.2 п.3).
+//
+// The rotation is self-certifying: the statement is signed by the old key and
+// the new key over the same canonical body, so a peer that never met the new
+// key can still accept it, and no operator has to edit an allow list on every
+// node. Ordering matters for exactly that reason — the handover must be spread
+// while the old key is still the live one. If the process died after writing
+// the new key but before the announcement, peers would see a stranger rather
+// than the successor of a node they trusted. So: build and verify the
+// statement, publish it (ledger + gossip + direct RPC), and only then install
+// the new key file. The caller restarts the process; the config file still
+// points at the same path, so no YAML edit is needed.
+//
+// In-flight work is the operator's decision, not this function's: tasks this
+// node executes finish under the old identity (the signed result is already
+// bound to it), and originators see the new id on subsequent hops.
+func (n *Node) RotateKey(ctx context.Context, reason string) (*RotateKeyResult, error) {
+	if reason == "" {
+		reason = "rotation"
+	}
+	old := n.Identity
+	fresh, err := security.NewEphemeral()
+	if err != nil {
+		return nil, fmt.Errorf("node: generate new identity: %w", err)
+	}
+	k, err := security.IssueRebind(old, fresh, reason, n.Rebinds.NextSequence(old.PeerID()))
+	if err != nil {
+		return nil, fmt.Errorf("node: build rebind statement: %w", err)
+	}
+
+	// Announce first, from the old identity — see the ordering note above.
+	res := &RotateKeyResult{OldPeerID: old.PeerID(), NewPeerID: fresh.PeerID(), Rebind: k, Restart: true}
+	if err := n.PublishRebind(k); err != nil {
+		return nil, fmt.Errorf("node: record rebind statement: %w", err)
+	}
+	res.AnnouncedTo = n.pushRebind(ctx, k)
+
+	// Now move the identity on disk. Our own ledger already holds the
+	// statement, so after the restart the node recognises its predecessor and
+	// keeps the trust it had earned rather than relearning from zero.
+	if err := fresh.Save(n.Cfg.Identity.KeyFile); err != nil {
+		return nil, fmt.Errorf("node: install new key: %w", err)
+	}
+	n.log.Info("identity_rotated", "old", res.OldPeerID.String(), "new", res.NewPeerID.String(),
+		"reason", reason, "announced", len(res.AnnouncedTo))
+	return res, nil
+}
+
+// pushRebind sends the statement directly to every connected peer. Gossip
+// carries it epidemically, but a direct push guarantees the neighbours that
+// already route work here — the ones whose in-flight delegation would otherwise
+// break — hear about the handover immediately, and it is the only channel in a
+// mesh running with gossip disabled.
+func (n *Node) pushRebind(ctx context.Context, k *pb.KeyRebind) []string {
+	var sent []string
+	for _, nb := range n.Table.List() {
+		if nb.PeerID == n.ID() || !nb.Connected || nb.Left {
+			continue
+		}
+		dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		resp, err := n.Service.RPC(dctx, nb.PeerID, &pb.RpcRequest{Kind: &pb.RpcRequest_Rebind{
+			Rebind: &pb.RebindRequest{Rebind: k},
+		}})
+		cancel()
+		if err != nil {
+			n.log.Debug("rebind_push_failed", "peer", nb.PeerID.String(), "err", err.Error())
+			continue
+		}
+		if r := resp.GetRebind(); r != nil && r.GetAccepted() {
+			sent = append(sent, nb.PeerID.String())
+		}
+	}
+	return sent
+}
+
+// RevokeSelf retires this node's identity for good (ТЗ 11.2 п.4): it signs the
+// revocation with the key being retired — the only authority that has — spreads
+// it, and then asks the process to stop and stay stopped.
+//
+// Unlike a rotation this is not a handover, so there is no successor to keep
+// routing to: the point is that every other node starts refusing this
+// identifier, which is what an operator needs after a key leak. The ledger on
+// this node keeps the statement too, so the retired id cannot be revived by a
+// restart with the same key file.
+func (n *Node) RevokeSelf(ctx context.Context, reason string) error {
+	if reason == "" {
+		reason = "retire"
+	}
+	k, err := security.IssueRevocation(n.Identity, reason, n.Rebinds.NextSequence(n.ID()))
+	if err != nil {
+		return fmt.Errorf("node: build revocation: %w", err)
+	}
+	if err := n.PublishRebind(k); err != nil {
+		return fmt.Errorf("node: record revocation: %w", err)
+	}
+	pushed := n.pushRebind(ctx, k)
+	n.log.Warn("identity_revoked", "peer", n.ID().String(), "reason", reason, "announced", len(pushed))
+	// A revocation that the supervisor can undo is not a revocation. Restart
+	// policies ignore exit codes (`restart: unless-stopped` in particular), so
+	// signalling "stay down" is not enough — the key material has to leave the
+	// path the config points at. It is moved aside rather than destroyed: after
+	// a leak the private key is still evidence, and the operator may legitimately
+	// un-revoke a node they retired by mistake. The suffix is random because the
+	// destination sits in a directory the node user can write, and a predictable
+	// name there is a file-clobber primitive.
+	if err := n.retireKeyFile(); err != nil {
+		n.log.Error("revocation_key_retirement_failed", "err", err.Error(),
+			"hint", "remove "+n.Cfg.Identity.KeyFile+" manually before the next start")
+	}
+	n.haltedOnce.Do(func() { close(n.halted) })
+	return nil
+}
+
+// retireKeyFile moves the retired node's key file out of the way and reports the
+// new location.
+func (n *Node) retireKeyFile() error {
+	path := n.Cfg.Identity.KeyFile
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("node: stat key file: %w", err)
+	}
+	// CreateTemp picks a unique name (O_EXCL, unpredictable), so the destination
+	// cannot be raced or pre-planted by another writer in the key directory.
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".revoked-*")
+	if err != nil {
+		return fmt.Errorf("node: name key archive: %w", err)
+	}
+	dest := f.Name()
+	_ = f.Close()
+	if err := os.Rename(path, dest); err != nil {
+		_ = os.Remove(dest)
+		return fmt.Errorf("node: retire key file: %w", err)
+	}
+	n.log.Warn("key_file_retired", "from", path, "to", dest,
+		"hint", "the node cannot start again until identity.key_file points at a live key")
+	return nil
+}
+
+// ShareRebinds pushes held handover statements directly to a peer over the
+// control RPC. Gossip is the primary carrier, but a mesh that runs with
+// discovery.gossip.enabled=false still needs a way to spread rotations, and a
+// freshly joined node should be told what the network already retired.
+func (n *Node) ShareRebinds(ctx context.Context, pid peer.ID) int {
+	sent := 0
+	for _, k := range n.Rebinds.Statements() {
+		resp, err := n.Service.RPC(ctx, pid, &pb.RpcRequest{Kind: &pb.RpcRequest_Rebind{
+			Rebind: &pb.RebindRequest{Rebind: k},
+		}})
+		if err != nil {
+			n.log.Debug("rebind_share_failed", "peer", pid.String(), "err", err.Error())
+			return sent
+		}
+		if r := resp.GetRebind(); r != nil && r.GetAccepted() {
+			sent++
+		}
+	}
+	return sent
 }
 
 func (n *Node) keyLookup() security.KeyLookup {
@@ -813,9 +1447,11 @@ func (n *Node) installConnNotifier() {
 	bundle := &network.NotifyBundle{
 		ConnectedF: func(_ network.Network, conn network.Conn) {
 			pid := conn.RemotePeer()
+			// A socket opening is not a judgement: the table holds no trust, and the
+			// peer's standing comes from the policy when something asks for it.
 			n.Table.Upsert(&routing.Neighbor{
 				PeerID: pid, Addrs: []string{conn.RemoteMultiaddr().String()},
-				Connected: true, Category: n.classify(conn), Trust: n.Policy.TrustOf(pid),
+				Connected: true, Category: n.classify(conn),
 			})
 			n.Metrics.PeersConnected.Set(float64(n.Table.ConnectedCount()))
 			n.Metrics.PeersTotal.Set(float64(n.Table.Len()))
@@ -838,15 +1474,19 @@ func (n *Node) installConnNotifier() {
 // it has no signed skill list and, under the limited posture, no trust
 // elevation for the peer — so it can never delegate work back the way the
 // task arrived. One fetch per peer is enough; gossip keeps it refreshed.
+//
+// "Enough" is measured per process, not per neighbour table entry: the table is
+// persisted and the trust a handshake earns is not. Skipping the handshake
+// because a *restored* record already lists skills left the policy with nothing
+// observed for that peer, so every neighbour's tasks were refused as
+// "peer not trusted for tasks" after a restart while the peer list still read
+// "trusted" — the two views disagreed and only the wrong one was visible.
 func (n *Node) introduce(pid peer.ID) {
 	if pid == "" || pid == n.Identity.PeerID() {
 		return
 	}
-	if nb, ok := n.Table.Get(pid); ok && len(nb.Skills) > 0 {
-		return
-	}
 	n.introduceMu.Lock()
-	if n.introducing[pid] {
+	if n.handshaked[pid] || n.introducing[pid] {
 		n.introduceMu.Unlock()
 		return
 	}
@@ -864,6 +1504,27 @@ func (n *Node) introduce(pid peer.ID) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	n.refreshCapabilities(ctx, pid)
+
+	// Handover statements ride along once the peer is known. Gossip carries them
+	// too, but a mesh with discovery.gossip.enabled=false has no epidemic
+	// channel at all: without this a node that joins after a rotation would keep
+	// treating the successor as a stranger (and, worse, would happily accept a
+	// key the rest of the network retired more than a republication window ago).
+	if n.completedHandshake(pid) {
+		sctx, scancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer scancel()
+		if sent := n.ShareRebinds(sctx, pid); sent > 0 {
+			n.log.Debug("rebinds_shared", "peer", pid.String(), "statements", sent)
+		}
+	}
+}
+
+// completedHandshake reports whether this process has verified a peer's
+// capabilities (the condition that also earns it observed trust).
+func (n *Node) completedHandshake(pid peer.ID) bool {
+	n.introduceMu.Lock()
+	defer n.introduceMu.Unlock()
+	return n.handshaked[pid]
 }
 
 // classify labels a connection's locality: same host, same LAN, or WAN.
@@ -950,10 +1611,16 @@ func (n *Node) maintenance(ctx context.Context) {
 	full := time.NewTicker(n.Cfg.Discovery.Gossip.FullSync.D())
 	local := time.NewTicker(5 * time.Second)
 	rtt := time.NewTicker(15 * time.Second)
+	skillEvery := n.Cfg.Capabilities.SkillExchange.Interval.D()
+	if skillEvery <= 0 {
+		skillEvery = 30 * time.Second
+	}
+	skillTick := time.NewTicker(skillEvery)
 	defer t.Stop()
 	defer full.Stop()
 	defer local.Stop()
 	defer rtt.Stop()
+	defer skillTick.Stop()
 
 	for {
 		select {
@@ -964,6 +1631,9 @@ func (n *Node) maintenance(ctx context.Context) {
 			n.syncDHT(ctx)
 		case <-rtt.C:
 			n.measureRTT(ctx)
+		case <-skillTick.C:
+			n.reconcileSkills(ctx)
+			n.Metrics.SkillsVersion.Set(float64(n.Skills.Epoch()))
 		case <-t.C:
 			if n.Table.ConnectedCount() < n.Cfg.Neighbors.Min && n.Cfg.Discovery.PeerExchange {
 				n.requestPeerExchange(ctx)
@@ -972,6 +1642,7 @@ func (n *Node) maintenance(ctx context.Context) {
 				if n.Membership != nil {
 					n.Membership.MarkLeft(gone)
 				}
+				n.Skills.DropPeer(gone.String())
 				n.log.Debug("neighbor_dropped", "peer", gone.String())
 			}
 			n.Metrics.PeersTotal.Set(float64(n.Table.Len()))

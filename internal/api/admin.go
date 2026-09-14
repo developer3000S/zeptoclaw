@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"github.com/developer3000S/zeptoclaw/internal/config"
 	"github.com/developer3000S/zeptoclaw/internal/metrics"
 	"github.com/developer3000S/zeptoclaw/internal/node"
+	"github.com/developer3000S/zeptoclaw/internal/skills"
 	"github.com/developer3000S/zeptoclaw/internal/tasks"
 
 	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
@@ -54,6 +56,10 @@ func New(n *node.Node, cfg *config.Config, mets *metrics.Collector, logger *slog
 	s.authed(mux, "GET /api/v1/status", s.handleStatus)
 	s.authed(mux, "GET /api/v1/peers", s.handlePeers)
 	s.authed(mux, "GET /api/v1/capabilities", s.handleCapabilities)
+	s.authed(mux, "GET /api/v1/skills", s.handleSkills)
+	s.authed(mux, "POST /api/v1/skills", s.handleUpsertSkill)
+	s.authed(mux, "DELETE /api/v1/skills/{name}", s.handleDropSkillDoc)
+	s.authed(mux, "POST /api/v1/skills/sync", s.handleSyncSkills)
 	s.authed(mux, "POST /api/v1/tasks", s.handleSubmit)
 	s.authed(mux, "GET /api/v1/tasks", s.handleList)
 	s.authed(mux, "GET /api/v1/tasks/{id}", s.handleGetTask)
@@ -61,7 +67,10 @@ func New(n *node.Node, cfg *config.Config, mets *metrics.Collector, logger *slog
 	s.authed(mux, "DELETE /api/v1/tasks/{id}", s.handleCancel)
 	s.authed(mux, "POST /api/v1/tasks/{id}/resubmit", s.handleResubmit)
 	s.authed(mux, "GET /api/v1/config", s.handleConfigView)
+	s.authed(mux, "GET /api/v1/rebinds", s.handleRebinds)
 	s.authed(mux, "POST /api/v1/admin/reload-config", s.handleReloadConfig)
+	s.authed(mux, "POST /api/v1/admin/rotate-key", s.handleRotateKey)
+	s.authed(mux, "POST /api/v1/admin/revoke", s.handleRevoke)
 	s.authed(mux, "POST /api/v1/admin/leave", s.handleLeave)
 	if mets != nil {
 		mux.Handle("GET /metrics", promhttp.HandlerFor(mets.Registry(), promhttp.HandlerOpts{}))
@@ -183,10 +192,17 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 	var out []peerView
 	for _, n := range s.node.Table.List() {
 		v := peerView{
-			PeerID: n.PeerID.String(), Addrs: n.Addrs, Trust: n.Trust.String(),
-			Category: n.Category, Connected: n.Connected, Left: n.Left,
-			Successes: n.Successes, Failures: n.Failures,
-			LastSeenUnix: n.LastSeen.Unix(), RTTMillis: n.RTT.Milliseconds(),
+			PeerID: n.PeerID.String(), Addrs: n.Addrs,
+			// Answered from the policy, not from the table: what the operator sees
+			// must be the standing that admission decisions actually apply.
+			Trust:        s.node.Table.TrustOf(n.PeerID).String(),
+			Category:     n.Category,
+			Connected:    n.Connected,
+			Left:         n.Left,
+			Successes:    n.Successes,
+			Failures:     n.Failures,
+			LastSeenUnix: n.LastSeen.Unix(),
+			RTTMillis:    n.RTT.Milliseconds(),
 		}
 		if !minimal {
 			v.Skills = n.Skills
@@ -370,6 +386,37 @@ func (s *Server) handleConfigView(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"config": cfg, "data_dir": s.cfg.Node.DataDir})
 }
 
+// handleRebinds reports the identity-handover ledger: which peer ids this node
+// considers rotated or revoked. That is the record an operator consults when a
+// peer that "should" be trusted is refused (ТЗ 11.2).
+func (s *Server) handleRebinds(w http.ResponseWriter, r *http.Request) {
+	type stmt struct {
+		OldPeerID string `json:"old_peer_id"`
+		NewPeerID string `json:"new_peer_id,omitempty"`
+		Sequence  int64  `json:"sequence"`
+		IssuedAt  int64  `json:"issued_at"`
+		Reason    string `json:"reason,omitempty"`
+		Kind      string `json:"kind"`
+	}
+	var out []stmt
+	for _, k := range s.node.Rebinds.Statements() {
+		kind := "rotate"
+		if k.GetNewPeerId() == "" {
+			kind = "revoke"
+		}
+		out = append(out, stmt{
+			OldPeerID: k.GetOldPeerId(), NewPeerID: k.GetNewPeerId(), Sequence: k.GetSequence(),
+			IssuedAt: k.GetIssuedAt(), Reason: k.GetReason(), Kind: kind,
+		})
+	}
+	// Signatures are intentionally omitted: the ledger is verified on load and on
+	// ingest, and the statements only matter as signed — a copy pasted into a log
+	// or a file loses that, so echoing them adds exposure without adding value.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"statements": out, "count": len(out), "self_revoked": s.node.Rebinds.Revoked(s.node.ID()),
+	})
+}
+
 // handleReloadConfig re-reads the node's config file and applies the
 // hot-reloadable sections, reporting honestly which changes need a restart
 // (ТЗ 13.1.1).
@@ -398,7 +445,134 @@ func (s *Server) handleLeave(w http.ResponseWriter, r *http.Request) {
 	s.node.Leave(r.Context())
 }
 
+// handleRotateKey replaces the node identity key and announces the handover
+// (ТЗ 11.2 п.3). The announcement is spread before the new key is installed, so
+// peers see a successor of a trusted node rather than a stranger.
+func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Reason string `json:"reason,omitempty"`
+	}
+	if r.Body != nil {
+		// An empty or absent body is fine: the reason is operator annotation.
+		_ = json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&in)
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	res, err := s.node.RotateKey(ctx, in.Reason)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"old_peer_id":      res.OldPeerID.String(),
+		"new_peer_id":      res.NewPeerID.String(),
+		"announced_to":     res.AnnouncedTo,
+		"restart_required": res.Restart,
+		"hint":             "restart the service (POST /api/v1/admin/leave or systemctl restart) to run under the new key",
+	})
+}
+
+// handleRevoke retires this node's identity for good (ТЗ 11.2 п.4). Unlike a
+// rotation there is no successor: the process stops and the supervisor must not
+// start it again, which is what node.Halted() signals.
+func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Reason string `json:"reason,omitempty"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&in)
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := s.node.RevokeSelf(ctx, in.Reason); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"revoked": s.node.ID().String(),
+		"status":  "halting",
+	})
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	// The statement is already spread; only the local shutdown is left.
+	s.node.Leave(r.Context())
+}
+
 // ---------- helpers ----------
+
+// handleSkills reports this node's advertised skills with their documentation
+// and epoch, plus the learned view of every peer. That is the operator's entry
+// point for "why was this task not routed to that node".
+func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
+	ex := s.cfg.Capabilities.SkillExchange
+	writeJSON(w, http.StatusOK, map[string]any{
+		"skills_version": s.node.Skills.Epoch(),
+		"advertised":     s.cfg.EffectiveSkills(),
+		"descriptors":    s.node.Skills.Descriptors(),
+		"exchange": map[string]any{
+			"enabled":     ex.Enabled,
+			"disclose_to": ex.DiscloseTo,
+			"interval":    ex.Interval.String(),
+		},
+		"peers": s.node.PeerSkillViews(),
+	})
+}
+
+// skillDocRequest is the operator-supplied documentation for one skill.
+type skillDocRequest struct {
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Models      []string          `json:"models,omitempty"`
+	Attributes  map[string]string `json:"attributes,omitempty"`
+}
+
+// handleUpsertSkill documents (or re-documents) one advertised skill. Bumping
+// its version is what makes peers re-pull it; the ability to execute is not
+// granted here, so a name this node does not advertise is refused.
+func (s *Server) handleUpsertSkill(w http.ResponseWriter, r *http.Request) {
+	var in skillDocRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(in.Name) == "" {
+		writeErr(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	stored, err := s.node.SetSkillDoc(skills.Descriptor{
+		Name: in.Name, Description: in.Description, Models: in.Models, Attributes: in.Attributes,
+	})
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"skill": stored, "skills_version": s.node.Skills.Epoch(),
+	})
+}
+
+// handleDropSkillDoc retires a skill's documentation (the name stays advertised).
+func (s *Server) handleDropSkillDoc(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		writeErr(w, http.StatusBadRequest, "skill name is required")
+		return
+	}
+	dropped := s.node.RemoveSkillDoc(name)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"dropped": dropped, "name": name, "skills_version": s.node.Skills.Epoch(),
+	})
+}
+
+// handleSyncSkills reconciles peer skill descriptors on demand instead of
+// waiting for the periodic pass.
+func (s *Server) handleSyncSkills(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	peers := s.node.SyncSkillsNow(ctx)
+	writeJSON(w, http.StatusOK, map[string]any{"peers_queried": peers})
+}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

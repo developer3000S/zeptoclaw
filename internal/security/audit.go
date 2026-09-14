@@ -53,7 +53,7 @@ func (l *Limiter) Allow(key string) bool {
 	return lim.Allow()
 }
 
-// Wait blocks until a token is available or the deadline passes.
+// Wait blocks until a token is available for the peer or ctx is done.
 func (l *Limiter) Wait(ctx context.Context, key string) error {
 	l.mu.Lock()
 	lim, ok := l.perPeer[key]
@@ -62,10 +62,15 @@ func (l *Limiter) Wait(ctx context.Context, key string) error {
 		l.perPeer[key] = lim
 	}
 	l.mu.Unlock()
-	if !lim.Allow() {
-		return fmt.Errorf("security: rate limit exceeded for %s", key)
+	// The bucket's own Wait: it parks until the earliest token and cancels the
+	// reservation when the context expires. Probing with Allow and returning
+	// ctx.Err() afterwards did neither — it refused callers a token they were
+	// entitled to wait for, and admitted them the instant a refill happened to
+	// land, making the outcome a race against machine speed.
+	if err := lim.Wait(ctx); err != nil {
+		return fmt.Errorf("security: rate limit exceeded for %s: %w", key, err)
 	}
-	return ctx.Err()
+	return nil
 }
 
 func (l *Limiter) gcLocked() {
@@ -145,8 +150,15 @@ func (a *Audit) Log(ev AuditEvent) {
 		ev.Time = time.Now().UTC()
 	}
 	if a.logger != nil {
-		a.logger.Warn("security_event",
-			"event", ev.Event, "peer_id", ev.PeerID, "task_id", ev.TaskID, "reason", ev.Reason)
+		// The event name is the record's own text, which is where the logger puts
+		// the `event` field: naming it again as an attribute would give a record
+		// with the key twice.
+		name := ev.Event
+		if name == "" {
+			name = "security_event"
+		}
+		a.logger.Warn(name,
+			"peer_id", ev.PeerID, "task_id", ev.TaskID, "reason", ev.Reason)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()

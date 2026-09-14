@@ -33,7 +33,6 @@ type Neighbor struct {
 	Addrs     []string
 	Skills    []string
 	Category  string
-	Trust     security.Trust
 	Version   string
 	Load      float64
 	MaxPar    int32
@@ -44,9 +43,25 @@ type Neighbor struct {
 	RTT       time.Duration
 	LastSeen  time.Time
 	Connected bool
+	// SkillsVersion mirrors the peer's advertised skill epoch: a strictly
+	// larger value means the peer changed its skills or their documentation and
+	// descriptors must be re-fetched (skill exchange, ТЗ 6.3).
+	SkillsVersion int64
 	// Left marks a peer that announced a graceful departure.
 	Left bool
 }
+
+// Neighbor deliberately has no trust field. Trust is a judgement this node
+// makes about a peer, and security.Policy is the only thing that computes it;
+// a copy here was a standing invitation to two views of the same fact
+// disagreeing. Before it was removed, an observation-shaped Upsert ("these are
+// the peer's skills") left the zero value in place, and the zero value of
+// security.Trust is TrustTrusted — the most privileged level. Since peer ids
+// are self-certifying Ed25519 keys, whichever bookkeeping write touched a
+// gossiped stranger last was promoting that stranger to trusted, and the
+// promotion was persisted, so the Restore rule "trust is re-earned per
+// process" was undone by the first partial upsert after a restart. Use
+// Table.TrustOf.
 
 // availableCapacity is the fraction of the peer's slots still free.
 func (n *Neighbor) availableCapacity() float64 {
@@ -109,20 +124,42 @@ type Table struct {
 	log  *slog.Logger
 	st   *storage.Store
 	rng  *rand.Rand
+	// policy is the authority on peer trust. The table reads it and never
+	// derives trust itself, because an observation such as "this peer's skills
+	// are [coding]" says nothing about the relationship.
+	policy *security.Policy
 }
 
-// NewTable builds an empty table.
-func NewTable(cfg config.NeighborsConfig, st *storage.Store, logger *slog.Logger) *Table {
+// NewTable builds an empty table. policy may be nil (unit tests, read-only
+// views), in which case every peer scores as untrusted.
+func NewTable(cfg config.NeighborsConfig, st *storage.Store, logger *slog.Logger, policy *security.Policy) *Table {
 	return &Table{
-		neis: make(map[peer.ID]*Neighbor),
-		cfg:  cfg,
-		log:  logger,
-		st:   st,
-		rng:  rand.New(rand.NewSource(time.Now().UnixNano())),
+		neis:   make(map[peer.ID]*Neighbor),
+		cfg:    cfg,
+		log:    logger,
+		st:     st,
+		rng:    rand.New(rand.NewSource(time.Now().UnixNano())),
+		policy: policy,
 	}
 }
 
+// TrustOf reports what this node currently believes about a peer. It is a pass-
+// through to the security policy rather than a lookup, so a view of a peer can
+// never go stale relative to an operator's allow/block list or a handshake that
+// has not touched this table.
+//
+// The lock order in this package is always table → policy, which is the only
+// order that can arise: security.Policy never calls back into the table, so no
+// path exists that would hold the policy lock and then want this one.
+func (t *Table) TrustOf(p peer.ID) security.Trust {
+	if t.policy == nil {
+		return security.TrustUntrusted
+	}
+	return t.policy.TrustOf(p)
+}
+
 // Upsert merges an observation into the table, preserving accumulated metrics.
+// The neighbour has no trust to merge: see the note on Neighbor.
 func (t *Table) Upsert(n *Neighbor) *Neighbor {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -149,15 +186,17 @@ func (t *Table) Upsert(n *Neighbor) *Neighbor {
 	if n.MaxPar > 0 {
 		cur.MaxPar = n.MaxPar
 	}
+	// The skill epoch is monotonic: a peer that restarted with an older number
+	// is lying or misconfigured, and rewinding our view would silently stop us
+	// from re-syncing descriptors we already have.
+	if n.SkillsVersion > cur.SkillsVersion {
+		cur.SkillsVersion = n.SkillsVersion
+	}
 	cur.Running = n.Running
 	cur.Load = n.Load
 	cur.Connected = n.Connected
 	cur.Left = n.Left
 	cur.LastSeen = time.Now().UTC()
-	// Trust only moves up through observation; operator lists win in TrustOf.
-	if n.Trust < cur.Trust {
-		cur.Trust = n.Trust
-	}
 	t.persistLocked(cur)
 	return cur
 }
@@ -168,7 +207,7 @@ func (t *Table) SetConnected(p peer.ID, connected bool) {
 	defer t.mu.Unlock()
 	n, ok := t.neis[p]
 	if !ok {
-		n = &Neighbor{PeerID: p, Trust: security.TrustUntrusted}
+		n = &Neighbor{PeerID: p}
 		t.neis[p] = n
 	}
 	n.Connected = connected
@@ -244,7 +283,7 @@ func (t *Table) GetOrNew(p peer.ID) *Neighbor {
 	defer t.mu.Unlock()
 	n, ok := t.neis[p]
 	if !ok {
-		n = &Neighbor{PeerID: p, Trust: security.TrustUntrusted}
+		n = &Neighbor{PeerID: p}
 		t.neis[p] = n
 	}
 	return n
@@ -331,10 +370,12 @@ func (t *Table) persistLocked(n *Neighbor) {
 		return
 	}
 	rec := &storage.PeerRecord{
-		PeerID:         n.PeerID.String(),
-		Addrs:          append([]string(nil), n.Addrs...),
-		Skills:         append([]string(nil), n.Skills...),
-		Trust:          n.Trust.String(),
+		PeerID: n.PeerID.String(),
+		Addrs:  append([]string(nil), n.Addrs...),
+		Skills: append([]string(nil), n.Skills...),
+		// Diagnostic only: the peer's standing is never read back from here (see
+		// Restore), so this records what the policy believed at write time.
+		Trust:          t.TrustOf(n.PeerID).String(),
 		Category:       n.Category,
 		Version:        n.Version,
 		Load:           n.Load,
@@ -346,6 +387,7 @@ func (t *Table) persistLocked(n *Neighbor) {
 		AvgRTTMillis:   n.RTT.Milliseconds(),
 		Connected:      n.Connected,
 		LastStatus:     statusLabel(n),
+		SkillsVersion:  n.SkillsVersion,
 	}
 	if err := t.st.PutPeer(rec); err != nil && t.log != nil {
 		t.log.Debug("peer_persist_failed", "peer", n.PeerID.String(), "err", err.Error())
@@ -379,16 +421,11 @@ func (t *Table) Restore() (int, error) {
 		if err != nil {
 			continue
 		}
-		trust, err := security.ParseTrust(r.Trust)
-		if err != nil {
-			trust = security.TrustUntrusted
-		}
 		t.neis[pid] = &Neighbor{
 			PeerID:    pid,
 			Addrs:     append([]string(nil), r.Addrs...),
 			Skills:    append([]string(nil), r.Skills...),
 			Category:  r.Category,
-			Trust:     trust,
 			Version:   r.Version,
 			Load:      r.Load,
 			MaxPar:    r.MaxParallel,
@@ -398,7 +435,19 @@ func (t *Table) Restore() (int, error) {
 			ProtoErrs: r.ProtocolErrors,
 			RTT:       time.Duration(r.AvgRTTMillis) * time.Millisecond,
 			LastSeen:  time.Unix(r.SeenAt, 0).UTC(),
-			Connected: false, // connections never survive a restart
+			// The epoch survives a restart: the node must not re-announce a
+			// "stale" view of a peer whose descriptors it already imported.
+			SkillsVersion: r.SkillsVersion,
+			Connected:     false, // connections never survive a restart
+			// Trust is not restored either, for the same reason: it is re-earned per
+			// process by the security policy through a verified capabilities
+			// handshake. Restoring the old label made the peer list read "trusted"
+			// while the policy still treated the peer as a stranger, so after a
+			// restart the mesh refused every task from a healthy neighbour and the
+			// two views disagreed — only the wrong one was visible to an operator.
+			// With the field gone from Neighbor there is nothing left to disagree:
+			// Table.TrustOf answers from the policy, where only an explicit operator
+			// allow-list entry can come back already trusted.
 		}
 	}
 	return len(t.neis), nil
@@ -430,15 +479,18 @@ func (t *Table) Select(
 	fanout int,
 	exclude map[peer.ID]bool,
 ) []Candidate {
+	// Values, not pointers: the entries are mutated by Upsert, so a snapshot of
+	// pointers would leave every field read below racing with a concurrent write.
 	t.mu.RLock()
-	snap := make([]*Neighbor, 0, len(t.neis))
+	snap := make([]Neighbor, 0, len(t.neis))
 	for _, n := range t.neis {
-		snap = append(snap, n)
+		snap = append(snap, *n)
 	}
 	t.mu.RUnlock()
 
 	cands := make([]Candidate, 0, len(snap))
-	for _, n := range snap {
+	for i := range snap {
+		n := &snap[i]
 		if n.PeerID == self || n.Left {
 			continue
 		}
@@ -458,8 +510,15 @@ func (t *Table) Select(
 		} else {
 			skillScore = 1
 		}
+		// Score with the policy's current verdict, not a cached copy: an operator
+		// may have changed the peer's standing since the last write, and this is
+		// the place where that decides where work goes.
+		trust := t.TrustOf(n.PeerID)
+		if policy != nil {
+			trust = policy.TrustOf(n.PeerID)
+		}
 		score := skillScore*wSkill +
-			trustScore(n.Trust)*wTrust +
+			trustScore(trust)*wTrust +
 			n.availableCapacity()*wCapacity +
 			latencyScore(n.RTT)*wLatency +
 			n.successRate()*wSuccess
@@ -472,7 +531,7 @@ func (t *Table) Select(
 			SkillMatch: skillScore,
 			Reasons: []string{
 				fmt.Sprintf("skill=%.2f", skillScore),
-				fmt.Sprintf("trust=%s", n.Trust),
+				fmt.Sprintf("trust=%s", trust),
 				fmt.Sprintf("cap=%.2f", n.availableCapacity()),
 				fmt.Sprintf("rtt=%s", n.RTT.Round(time.Millisecond)),
 			},

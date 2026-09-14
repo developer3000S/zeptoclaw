@@ -106,3 +106,100 @@ func TestDefaultTemplateExpands(t *testing.T) {
 		}
 	}
 }
+
+// Every config we ship is documentation an operator is meant to copy, so a
+// typo in a key or a value Normalize rejects is a real defect. Validate also
+// normalises skill_exchange, so this is where those defaults get pinned.
+func TestShippedConfigsLoadAndValidate(t *testing.T) {
+	for _, v := range []string{"ZETOMESH_DATA", "ZETOMESH_INDEX", "ZETOMESH_NAME", "ZETOMESH_MESH_PORT",
+		"ZETOMESH_API_PORT", "ZETOMESH_PROM_PORT", "ZETOMESH_PROM_LISTEN", "ZETOMESH_BOOTSTRAP",
+		"ZETOMESH_PSK", "ZETOMESH_PICO_MODE", "ZETOMESH_PICO_BIN", "ZETOMESH_PICO_CONFIG",
+		"ZETOMESH_PICO_WS_URL", "ZETOMESH_PICO_MODEL", "ZETOMESH_PICO_WORKSPACE", "ZETOMESH_NODES"} {
+		t.Setenv(v, "")
+	}
+	dir := t.TempDir()
+	t.Setenv("ZETOMESH_DATA", filepath.Join(dir, "data"))
+
+	for _, name := range []string{"node.yaml", "examples/lan.yaml", "examples/wan.yaml", "examples/dev-node.yaml"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join("..", "..", "configs", name)
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load(%s): %v", name, err)
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate(%s): %v", name, err)
+			}
+			// Skill descriptors are only shareable if the exchange block parsed;
+			// a silently dropped section would leave every node unable to sync.
+			if !cfg.Capabilities.SkillExchange.Enabled {
+				t.Fatalf("%s: skill_exchange.enabled must be on in the shipped config", name)
+			}
+			if got := cfg.Capabilities.SkillExchange.DiscloseTo; got != "trusted" && got != "known" && got != "any" {
+				t.Fatalf("%s: disclose_to = %q", name, got)
+			}
+			if cfg.Capabilities.SkillExchange.MaxDescriptors <= 0 || cfg.Capabilities.SkillExchange.ImportLimit <= 0 {
+				t.Fatalf("%s: descriptor budgets = %d/%d", name,
+					cfg.Capabilities.SkillExchange.MaxDescriptors, cfg.Capabilities.SkillExchange.ImportLimit)
+			}
+			// Documenting a skill the node cannot serve would be a lie on the wire,
+			// so the templates must keep skill_docs inside the advertisement.
+			for _, d := range cfg.Capabilities.SkillDocs {
+				if !containsFold(cfg.Capabilities.Skills, d.Name) {
+					t.Fatalf("%s: skill_docs %q is not in capabilities.skills %v", name, d.Name, cfg.Capabilities.Skills)
+				}
+			}
+		})
+	}
+}
+
+// ТЗ 10.3: the model is a node property, so it has to survive both a literal
+// yaml value and the ${VAR:-} form the shipped templates use.
+func TestPicoClawModelConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "node.yaml")
+	body := "node:\n  name: t\n  data_dir: " + filepath.Join(dir, "d") +
+		"\npicoclaw:\n  mode: binary\n  model: llm-a\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PicoClaw.Model != "llm-a" {
+		t.Fatalf("model = %q", cfg.PicoClaw.Model)
+	}
+
+	t.Setenv("ZETOMESH_PICO_MODEL", "llm-env")
+	body = "node:\n  name: t\n  data_dir: " + filepath.Join(dir, "d2") +
+		"\npicoclaw:\n  model: ${ZETOMESH_PICO_MODEL:-}\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load with env: %v", err)
+	}
+	if cfg.PicoClaw.Model != "llm-env" {
+		t.Fatalf("expanded model = %q", cfg.PicoClaw.Model)
+	}
+	// An unset variable must collapse to "no opinion", not the literal text.
+	t.Setenv("ZETOMESH_PICO_MODEL", "")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load with empty env: %v", err)
+	}
+	if cfg.PicoClaw.Model != "" {
+		t.Fatalf("model with empty env = %q, want \"\"", cfg.PicoClaw.Model)
+	}
+}
+
+func containsFold(hay []string, needle string) bool {
+	for _, h := range hay {
+		if strings.EqualFold(h, needle) {
+			return true
+		}
+	}
+	return false
+}

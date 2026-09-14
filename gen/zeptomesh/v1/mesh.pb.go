@@ -528,6 +528,11 @@ type TaskEnvelope struct {
 	RouteStack      []string               `protobuf:"bytes,12,rep,name=route_stack,json=routeStack,proto3" json:"route_stack,omitempty"`                // peers the envelope already visited
 	Signature       []byte                 `protobuf:"bytes,13,opt,name=signature,proto3" json:"signature,omitempty"`                                    // ed25519 over SigningTaskBytes
 	SignatureScheme string                 `protobuf:"bytes,14,opt,name=signature_scheme,json=signatureScheme,proto3" json:"signature_scheme,omitempty"` // "zeptomesh-task-v1"
+	// origin_signature is produced by origin_peer_id over the authoring body
+	// (wire.TaskContent) and is never rewritten by relays. `signature` proves
+	// who forwarded the envelope; this proves who authored it, so the origin's
+	// own constraints and payload stay verifiable end-to-end (ТЗ 6.6.4, 11.5).
+	OriginSignature []byte `protobuf:"bytes,15,opt,name=origin_signature,json=originSignature,proto3" json:"origin_signature,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -658,6 +663,13 @@ func (x *TaskEnvelope) GetSignatureScheme() string {
 		return x.SignatureScheme
 	}
 	return ""
+}
+
+func (x *TaskEnvelope) GetOriginSignature() []byte {
+	if x != nil {
+		return x.OriginSignature
+	}
+	return nil
 }
 
 // TaskAck is the synchronous answer to a forwarded TaskEnvelope.
@@ -995,8 +1007,17 @@ type Capabilities struct {
 	ListenAddrs         []string               `protobuf:"bytes,13,rep,name=listen_addrs,json=listenAddrs,proto3" json:"listen_addrs,omitempty"`       // multiaddrs
 	Timestamp           int64                  `protobuf:"varint,14,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	Signature           []byte                 `protobuf:"bytes,15,opt,name=signature,proto3" json:"signature,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// skills_version is this node's monotonic skill-epoch: it increases whenever
+	// the advertised skill set or the documentation of any skill changes. Peers
+	// compare it to decide whether their view of this node is stale (ТЗ 6.3,
+	// 6.4) — a strictly newer version means "fetch the descriptors again".
+	SkillsVersion int64 `protobuf:"varint,16,opt,name=skills_version,json=skillsVersion,proto3" json:"skills_version,omitempty"`
+	// skill_docs carries the canonical descriptors behind `skills`: name,
+	// version, digest and description. It is optional (older builds send only
+	// names) but is what makes skill exchange possible.
+	SkillDocs     []*SkillDescriptor `protobuf:"bytes,17,rep,name=skill_docs,json=skillDocs,proto3" json:"skill_docs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Capabilities) Reset() {
@@ -1134,6 +1155,431 @@ func (x *Capabilities) GetSignature() []byte {
 	return nil
 }
 
+func (x *Capabilities) GetSkillsVersion() int64 {
+	if x != nil {
+		return x.SkillsVersion
+	}
+	return 0
+}
+
+func (x *Capabilities) GetSkillDocs() []*SkillDescriptor {
+	if x != nil {
+		return x.SkillDocs
+	}
+	return nil
+}
+
+// SkillDescriptor documents one skill a node can serve. The metadata is
+// shareable; the ability to execute it is not — receiving a descriptor from a
+// peer never grants the receiver that skill, it only describes the peer.
+type SkillDescriptor struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Version       int64                  `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`                      // monotonic per (peer, name)
+	UpdatedAt     int64                  `protobuf:"varint,3,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // unix seconds
+	Digest        string                 `protobuf:"bytes,4,opt,name=digest,proto3" json:"digest,omitempty"`                         // "sha256:<hex>" over canonical descriptor
+	Description   string                 `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`
+	Models        []string               `protobuf:"bytes,6,rep,name=models,proto3" json:"models,omitempty"`                                                                                   // models this skill may use on this node
+	Attributes    map[string]string      `protobuf:"bytes,7,rep,name=attributes,proto3" json:"attributes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // free-form (tool, limits, owner, …)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SkillDescriptor) Reset() {
+	*x = SkillDescriptor{}
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SkillDescriptor) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SkillDescriptor) ProtoMessage() {}
+
+func (x *SkillDescriptor) ProtoReflect() protoreflect.Message {
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SkillDescriptor.ProtoReflect.Descriptor instead.
+func (*SkillDescriptor) Descriptor() ([]byte, []int) {
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *SkillDescriptor) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *SkillDescriptor) GetVersion() int64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *SkillDescriptor) GetUpdatedAt() int64 {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return 0
+}
+
+func (x *SkillDescriptor) GetDigest() string {
+	if x != nil {
+		return x.Digest
+	}
+	return ""
+}
+
+func (x *SkillDescriptor) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *SkillDescriptor) GetModels() []string {
+	if x != nil {
+		return x.Models
+	}
+	return nil
+}
+
+func (x *SkillDescriptor) GetAttributes() map[string]string {
+	if x != nil {
+		return x.Attributes
+	}
+	return nil
+}
+
+// SkillVersion is a compact "what I already have" entry for a sync request.
+type SkillVersion struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Version       int64                  `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	Digest        string                 `protobuf:"bytes,3,opt,name=digest,proto3" json:"digest,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SkillVersion) Reset() {
+	*x = SkillVersion{}
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SkillVersion) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SkillVersion) ProtoMessage() {}
+
+func (x *SkillVersion) ProtoReflect() protoreflect.Message {
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SkillVersion.ProtoReflect.Descriptor instead.
+func (*SkillVersion) Descriptor() ([]byte, []int) {
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *SkillVersion) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *SkillVersion) GetVersion() int64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *SkillVersion) GetDigest() string {
+	if x != nil {
+		return x.Digest
+	}
+	return ""
+}
+
+// SkillsSyncRequest asks a peer for skill descriptors newer than `known`.
+type SkillsSyncRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Known []*SkillVersion        `protobuf:"bytes,1,rep,name=known,proto3" json:"known,omitempty"`
+	// full asks for every descriptor regardless of `known` (initial import).
+	Full          bool `protobuf:"varint,2,opt,name=full,proto3" json:"full,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SkillsSyncRequest) Reset() {
+	*x = SkillsSyncRequest{}
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SkillsSyncRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SkillsSyncRequest) ProtoMessage() {}
+
+func (x *SkillsSyncRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SkillsSyncRequest.ProtoReflect.Descriptor instead.
+func (*SkillsSyncRequest) Descriptor() ([]byte, []int) {
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *SkillsSyncRequest) GetKnown() []*SkillVersion {
+	if x != nil {
+		return x.Known
+	}
+	return nil
+}
+
+func (x *SkillsSyncRequest) GetFull() bool {
+	if x != nil {
+		return x.Full
+	}
+	return false
+}
+
+// SkillsSyncResponse returns the descriptors the peer is willing to disclose.
+type SkillsSyncResponse struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Skills          []*SkillDescriptor     `protobuf:"bytes,1,rep,name=skills,proto3" json:"skills,omitempty"`
+	SkillsVersion   int64                  `protobuf:"varint,2,opt,name=skills_version,json=skillsVersion,proto3" json:"skills_version,omitempty"`      // the peer's current epoch
+	PeerId          string                 `protobuf:"bytes,3,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`                            // must equal the authenticated sender
+	Signature       []byte                 `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`                                    // ed25519 by peer_id over wire.SkillsSyncBody
+	SignatureScheme string                 `protobuf:"bytes,5,opt,name=signature_scheme,json=signatureScheme,proto3" json:"signature_scheme,omitempty"` // "zeptomesh-skills-sync-v1"
+	// reason explains an empty answer ("disclosure_policy", "exchange_disabled")
+	// so an operator can tell "nothing newer" apart from "not telling you".
+	Reason        string `protobuf:"bytes,6,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SkillsSyncResponse) Reset() {
+	*x = SkillsSyncResponse{}
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SkillsSyncResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SkillsSyncResponse) ProtoMessage() {}
+
+func (x *SkillsSyncResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SkillsSyncResponse.ProtoReflect.Descriptor instead.
+func (*SkillsSyncResponse) Descriptor() ([]byte, []int) {
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *SkillsSyncResponse) GetSkills() []*SkillDescriptor {
+	if x != nil {
+		return x.Skills
+	}
+	return nil
+}
+
+func (x *SkillsSyncResponse) GetSkillsVersion() int64 {
+	if x != nil {
+		return x.SkillsVersion
+	}
+	return 0
+}
+
+func (x *SkillsSyncResponse) GetPeerId() string {
+	if x != nil {
+		return x.PeerId
+	}
+	return ""
+}
+
+func (x *SkillsSyncResponse) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
+func (x *SkillsSyncResponse) GetSignatureScheme() string {
+	if x != nil {
+		return x.SignatureScheme
+	}
+	return ""
+}
+
+func (x *SkillsSyncResponse) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// KeyRebind is the double-signed statement that one node identity replaced
+// another (ТЗ 11.2.3–4). It is signed by the outgoing key AND the incoming
+// key, so neither side can forge the handover alone, and any third node can
+// verify both halves from the public keys embedded in the peer ids.
+// A revocation is a KeyRebind with an empty new_peer_id / new_pubkey: the old
+// identity is retired deliberately and must no longer be trusted.
+type KeyRebind struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	OldPeerId       string                 `protobuf:"bytes,1,opt,name=old_peer_id,json=oldPeerId,proto3" json:"old_peer_id,omitempty"`
+	NewPeerId       string                 `protobuf:"bytes,2,opt,name=new_peer_id,json=newPeerId,proto3" json:"new_peer_id,omitempty"` // empty for a pure revocation
+	NewPubkey       []byte                 `protobuf:"bytes,3,opt,name=new_pubkey,json=newPubkey,proto3" json:"new_pubkey,omitempty"`   // libp2p protobuf-marshaled public key
+	Sequence        int64                  `protobuf:"varint,4,opt,name=sequence,proto3" json:"sequence,omitempty"`                     // strictly increasing per old_peer_id
+	IssuedAt        int64                  `protobuf:"varint,5,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
+	Reason          string                 `protobuf:"bytes,6,opt,name=reason,proto3" json:"reason,omitempty"`                                          // "rotation" | "compromise" | "planned" | "retire"
+	OldSignature    []byte                 `protobuf:"bytes,7,opt,name=old_signature,json=oldSignature,proto3" json:"old_signature,omitempty"`          // by the retiring key over wire.RebindBody
+	NewSignature    []byte                 `protobuf:"bytes,8,opt,name=new_signature,json=newSignature,proto3" json:"new_signature,omitempty"`          // by the new key over the same body
+	SignatureScheme string                 `protobuf:"bytes,9,opt,name=signature_scheme,json=signatureScheme,proto3" json:"signature_scheme,omitempty"` // "zeptomesh-rebind-v1"
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *KeyRebind) Reset() {
+	*x = KeyRebind{}
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *KeyRebind) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*KeyRebind) ProtoMessage() {}
+
+func (x *KeyRebind) ProtoReflect() protoreflect.Message {
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use KeyRebind.ProtoReflect.Descriptor instead.
+func (*KeyRebind) Descriptor() ([]byte, []int) {
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *KeyRebind) GetOldPeerId() string {
+	if x != nil {
+		return x.OldPeerId
+	}
+	return ""
+}
+
+func (x *KeyRebind) GetNewPeerId() string {
+	if x != nil {
+		return x.NewPeerId
+	}
+	return ""
+}
+
+func (x *KeyRebind) GetNewPubkey() []byte {
+	if x != nil {
+		return x.NewPubkey
+	}
+	return nil
+}
+
+func (x *KeyRebind) GetSequence() int64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *KeyRebind) GetIssuedAt() int64 {
+	if x != nil {
+		return x.IssuedAt
+	}
+	return 0
+}
+
+func (x *KeyRebind) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *KeyRebind) GetOldSignature() []byte {
+	if x != nil {
+		return x.OldSignature
+	}
+	return nil
+}
+
+func (x *KeyRebind) GetNewSignature() []byte {
+	if x != nil {
+		return x.NewSignature
+	}
+	return nil
+}
+
+func (x *KeyRebind) GetSignatureScheme() string {
+	if x != nil {
+		return x.SignatureScheme
+	}
+	return ""
+}
+
 // PeerState is the gossip-visible projection of a node.
 type PeerState struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
@@ -1145,13 +1591,14 @@ type PeerState struct {
 	Version          string                 `protobuf:"bytes,6,opt,name=version,proto3" json:"version,omitempty"`
 	Status           string                 `protobuf:"bytes,7,opt,name=status,proto3" json:"status,omitempty"` // "active" | "draining" | "left"
 	Addrs            []string               `protobuf:"bytes,8,rep,name=addrs,proto3" json:"addrs,omitempty"`
+	SkillsVersion    int64                  `protobuf:"varint,9,opt,name=skills_version,json=skillsVersion,proto3" json:"skills_version,omitempty"` // mirrors Capabilities.skills_version
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
 
 func (x *PeerState) Reset() {
 	*x = PeerState{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[8]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1163,7 +1610,7 @@ func (x *PeerState) String() string {
 func (*PeerState) ProtoMessage() {}
 
 func (x *PeerState) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[8]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1176,7 +1623,7 @@ func (x *PeerState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PeerState.ProtoReflect.Descriptor instead.
 func (*PeerState) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{8}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *PeerState) GetPeerId() string {
@@ -1235,18 +1682,31 @@ func (x *PeerState) GetAddrs() []string {
 	return nil
 }
 
+func (x *PeerState) GetSkillsVersion() int64 {
+	if x != nil {
+		return x.SkillsVersion
+	}
+	return 0
+}
+
 // MembershipGossip is published on the membership topic.
 type MembershipGossip struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	States        []*PeerState           `protobuf:"bytes,1,rep,name=states,proto3" json:"states,omitempty"`
-	FromPeerId    string                 `protobuf:"bytes,2,opt,name=from_peer_id,json=fromPeerId,proto3" json:"from_peer_id,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	States     []*PeerState           `protobuf:"bytes,1,rep,name=states,proto3" json:"states,omitempty"`
+	FromPeerId string                 `protobuf:"bytes,2,opt,name=from_peer_id,json=fromPeerId,proto3" json:"from_peer_id,omitempty"`
+	// rebinds carries key-rotation statements; revocations carries retirements
+	// (KeyRebind without a new identity). Both are gossiped so a rotated node is
+	// reachable under its new id without operator intervention, and a revoked id
+	// is refused everywhere at once (ТЗ 11.2.4).
+	Rebinds       []*KeyRebind `protobuf:"bytes,3,rep,name=rebinds,proto3" json:"rebinds,omitempty"`
+	Revocations   []*KeyRebind `protobuf:"bytes,4,rep,name=revocations,proto3" json:"revocations,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *MembershipGossip) Reset() {
 	*x = MembershipGossip{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[9]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1258,7 +1718,7 @@ func (x *MembershipGossip) String() string {
 func (*MembershipGossip) ProtoMessage() {}
 
 func (x *MembershipGossip) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[9]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1271,7 +1731,7 @@ func (x *MembershipGossip) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MembershipGossip.ProtoReflect.Descriptor instead.
 func (*MembershipGossip) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{9}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *MembershipGossip) GetStates() []*PeerState {
@@ -1288,6 +1748,20 @@ func (x *MembershipGossip) GetFromPeerId() string {
 	return ""
 }
 
+func (x *MembershipGossip) GetRebinds() []*KeyRebind {
+	if x != nil {
+		return x.Rebinds
+	}
+	return nil
+}
+
+func (x *MembershipGossip) GetRevocations() []*KeyRebind {
+	if x != nil {
+		return x.Revocations
+	}
+	return nil
+}
+
 // SubtaskPlan asks a peer to split a task and delegate parts further.
 type SubtaskSpec struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
@@ -1302,7 +1776,7 @@ type SubtaskSpec struct {
 
 func (x *SubtaskSpec) Reset() {
 	*x = SubtaskSpec{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[10]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1314,7 +1788,7 @@ func (x *SubtaskSpec) String() string {
 func (*SubtaskSpec) ProtoMessage() {}
 
 func (x *SubtaskSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[10]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1327,7 +1801,7 @@ func (x *SubtaskSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubtaskSpec.ProtoReflect.Descriptor instead.
 func (*SubtaskSpec) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{10}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *SubtaskSpec) GetTaskId() string {
@@ -1375,6 +1849,8 @@ type RpcRequest struct {
 	//	*RpcRequest_PeerExchange
 	//	*RpcRequest_Cancel
 	//	*RpcRequest_SkillLookup
+	//	*RpcRequest_SkillsSync
+	//	*RpcRequest_Rebind
 	Kind          isRpcRequest_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1382,7 +1858,7 @@ type RpcRequest struct {
 
 func (x *RpcRequest) Reset() {
 	*x = RpcRequest{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[11]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1394,7 +1870,7 @@ func (x *RpcRequest) String() string {
 func (*RpcRequest) ProtoMessage() {}
 
 func (x *RpcRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[11]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1407,7 +1883,7 @@ func (x *RpcRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RpcRequest.ProtoReflect.Descriptor instead.
 func (*RpcRequest) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{11}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *RpcRequest) GetKind() isRpcRequest_Kind {
@@ -1462,6 +1938,24 @@ func (x *RpcRequest) GetSkillLookup() *SkillLookupRequest {
 	return nil
 }
 
+func (x *RpcRequest) GetSkillsSync() *SkillsSyncRequest {
+	if x != nil {
+		if x, ok := x.Kind.(*RpcRequest_SkillsSync); ok {
+			return x.SkillsSync
+		}
+	}
+	return nil
+}
+
+func (x *RpcRequest) GetRebind() *RebindRequest {
+	if x != nil {
+		if x, ok := x.Kind.(*RpcRequest_Rebind); ok {
+			return x.Rebind
+		}
+	}
+	return nil
+}
+
 type isRpcRequest_Kind interface {
 	isRpcRequest_Kind()
 }
@@ -1486,6 +1980,18 @@ type RpcRequest_SkillLookup struct {
 	SkillLookup *SkillLookupRequest `protobuf:"bytes,5,opt,name=skill_lookup,json=skillLookup,proto3,oneof"`
 }
 
+type RpcRequest_SkillsSync struct {
+	// skills_sync asks a peer for skill descriptors newer than the ones we
+	// already hold (ТЗ 6.3 skill exchange, request 2 of the feature brief).
+	SkillsSync *SkillsSyncRequest `protobuf:"bytes,6,opt,name=skills_sync,json=skillsSync,proto3,oneof"`
+}
+
+type RpcRequest_Rebind struct {
+	// rebind carries a key-rotation/revocation statement to a peer that has
+	// never met the new identity, so the handover is accepted from the source.
+	Rebind *RebindRequest `protobuf:"bytes,7,opt,name=rebind,proto3,oneof"`
+}
+
 func (*RpcRequest_Ping) isRpcRequest_Kind() {}
 
 func (*RpcRequest_Capabilities) isRpcRequest_Kind() {}
@@ -1495,6 +2001,10 @@ func (*RpcRequest_PeerExchange) isRpcRequest_Kind() {}
 func (*RpcRequest_Cancel) isRpcRequest_Kind() {}
 
 func (*RpcRequest_SkillLookup) isRpcRequest_Kind() {}
+
+func (*RpcRequest_SkillsSync) isRpcRequest_Kind() {}
+
+func (*RpcRequest_Rebind) isRpcRequest_Kind() {}
 
 // RpcResponse is the multiplexed control-plane response.
 type RpcResponse struct {
@@ -1506,6 +2016,8 @@ type RpcResponse struct {
 	//	*RpcResponse_PeerExchange
 	//	*RpcResponse_Cancel
 	//	*RpcResponse_SkillLookup
+	//	*RpcResponse_SkillsSync
+	//	*RpcResponse_Rebind
 	Kind          isRpcResponse_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1513,7 +2025,7 @@ type RpcResponse struct {
 
 func (x *RpcResponse) Reset() {
 	*x = RpcResponse{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[12]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1525,7 +2037,7 @@ func (x *RpcResponse) String() string {
 func (*RpcResponse) ProtoMessage() {}
 
 func (x *RpcResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[12]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1538,7 +2050,7 @@ func (x *RpcResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RpcResponse.ProtoReflect.Descriptor instead.
 func (*RpcResponse) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{12}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *RpcResponse) GetKind() isRpcResponse_Kind {
@@ -1593,6 +2105,24 @@ func (x *RpcResponse) GetSkillLookup() *SkillLookupResponse {
 	return nil
 }
 
+func (x *RpcResponse) GetSkillsSync() *SkillsSyncResponse {
+	if x != nil {
+		if x, ok := x.Kind.(*RpcResponse_SkillsSync); ok {
+			return x.SkillsSync
+		}
+	}
+	return nil
+}
+
+func (x *RpcResponse) GetRebind() *RebindResponse {
+	if x != nil {
+		if x, ok := x.Kind.(*RpcResponse_Rebind); ok {
+			return x.Rebind
+		}
+	}
+	return nil
+}
+
 type isRpcResponse_Kind interface {
 	isRpcResponse_Kind()
 }
@@ -1617,6 +2147,14 @@ type RpcResponse_SkillLookup struct {
 	SkillLookup *SkillLookupResponse `protobuf:"bytes,5,opt,name=skill_lookup,json=skillLookup,proto3,oneof"`
 }
 
+type RpcResponse_SkillsSync struct {
+	SkillsSync *SkillsSyncResponse `protobuf:"bytes,6,opt,name=skills_sync,json=skillsSync,proto3,oneof"`
+}
+
+type RpcResponse_Rebind struct {
+	Rebind *RebindResponse `protobuf:"bytes,7,opt,name=rebind,proto3,oneof"`
+}
+
 func (*RpcResponse_Ping) isRpcResponse_Kind() {}
 
 func (*RpcResponse_Capabilities) isRpcResponse_Kind() {}
@@ -1627,6 +2165,106 @@ func (*RpcResponse_Cancel) isRpcResponse_Kind() {}
 
 func (*RpcResponse_SkillLookup) isRpcResponse_Kind() {}
 
+func (*RpcResponse_SkillsSync) isRpcResponse_Kind() {}
+
+func (*RpcResponse_Rebind) isRpcResponse_Kind() {}
+
+type RebindRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Rebind        *KeyRebind             `protobuf:"bytes,1,opt,name=rebind,proto3" json:"rebind,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RebindRequest) Reset() {
+	*x = RebindRequest{}
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RebindRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RebindRequest) ProtoMessage() {}
+
+func (x *RebindRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RebindRequest.ProtoReflect.Descriptor instead.
+func (*RebindRequest) Descriptor() ([]byte, []int) {
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *RebindRequest) GetRebind() *KeyRebind {
+	if x != nil {
+		return x.Rebind
+	}
+	return nil
+}
+
+type RebindResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RebindResponse) Reset() {
+	*x = RebindResponse{}
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RebindResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RebindResponse) ProtoMessage() {}
+
+func (x *RebindResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RebindResponse.ProtoReflect.Descriptor instead.
+func (*RebindResponse) Descriptor() ([]byte, []int) {
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *RebindResponse) GetAccepted() bool {
+	if x != nil {
+		return x.Accepted
+	}
+	return false
+}
+
+func (x *RebindResponse) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 type PingRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Nonce         int64                  `protobuf:"varint,1,opt,name=nonce,proto3" json:"nonce,omitempty"`
@@ -1636,7 +2274,7 @@ type PingRequest struct {
 
 func (x *PingRequest) Reset() {
 	*x = PingRequest{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[13]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1648,7 +2286,7 @@ func (x *PingRequest) String() string {
 func (*PingRequest) ProtoMessage() {}
 
 func (x *PingRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[13]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1661,7 +2299,7 @@ func (x *PingRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PingRequest.ProtoReflect.Descriptor instead.
 func (*PingRequest) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{13}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *PingRequest) GetNonce() int64 {
@@ -1681,7 +2319,7 @@ type PingResponse struct {
 
 func (x *PingResponse) Reset() {
 	*x = PingResponse{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[14]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1693,7 +2331,7 @@ func (x *PingResponse) String() string {
 func (*PingResponse) ProtoMessage() {}
 
 func (x *PingResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[14]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1706,7 +2344,7 @@ func (x *PingResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PingResponse.ProtoReflect.Descriptor instead.
 func (*PingResponse) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{14}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *PingResponse) GetNonce() int64 {
@@ -1731,7 +2369,7 @@ type CapabilitiesRequest struct {
 
 func (x *CapabilitiesRequest) Reset() {
 	*x = CapabilitiesRequest{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[15]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1743,7 +2381,7 @@ func (x *CapabilitiesRequest) String() string {
 func (*CapabilitiesRequest) ProtoMessage() {}
 
 func (x *CapabilitiesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[15]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1756,7 +2394,7 @@ func (x *CapabilitiesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CapabilitiesRequest.ProtoReflect.Descriptor instead.
 func (*CapabilitiesRequest) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{15}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{22}
 }
 
 type CapabilitiesResponse struct {
@@ -1768,7 +2406,7 @@ type CapabilitiesResponse struct {
 
 func (x *CapabilitiesResponse) Reset() {
 	*x = CapabilitiesResponse{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[16]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1780,7 +2418,7 @@ func (x *CapabilitiesResponse) String() string {
 func (*CapabilitiesResponse) ProtoMessage() {}
 
 func (x *CapabilitiesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[16]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1793,7 +2431,7 @@ func (x *CapabilitiesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CapabilitiesResponse.ProtoReflect.Descriptor instead.
 func (*CapabilitiesResponse) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{16}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *CapabilitiesResponse) GetCapabilities() *Capabilities {
@@ -1815,7 +2453,7 @@ type PeerRecord struct {
 
 func (x *PeerRecord) Reset() {
 	*x = PeerRecord{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[17]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1827,7 +2465,7 @@ func (x *PeerRecord) String() string {
 func (*PeerRecord) ProtoMessage() {}
 
 func (x *PeerRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[17]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1840,7 +2478,7 @@ func (x *PeerRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PeerRecord.ProtoReflect.Descriptor instead.
 func (*PeerRecord) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{17}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *PeerRecord) GetPeerId() string {
@@ -1880,7 +2518,7 @@ type PeerExchangeRequest struct {
 
 func (x *PeerExchangeRequest) Reset() {
 	*x = PeerExchangeRequest{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[18]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1892,7 +2530,7 @@ func (x *PeerExchangeRequest) String() string {
 func (*PeerExchangeRequest) ProtoMessage() {}
 
 func (x *PeerExchangeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[18]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1905,7 +2543,7 @@ func (x *PeerExchangeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PeerExchangeRequest.ProtoReflect.Descriptor instead.
 func (*PeerExchangeRequest) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{18}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *PeerExchangeRequest) GetCount() uint32 {
@@ -1924,7 +2562,7 @@ type PeerExchangeResponse struct {
 
 func (x *PeerExchangeResponse) Reset() {
 	*x = PeerExchangeResponse{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[19]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1936,7 +2574,7 @@ func (x *PeerExchangeResponse) String() string {
 func (*PeerExchangeResponse) ProtoMessage() {}
 
 func (x *PeerExchangeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[19]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1949,7 +2587,7 @@ func (x *PeerExchangeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PeerExchangeResponse.ProtoReflect.Descriptor instead.
 func (*PeerExchangeResponse) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{19}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *PeerExchangeResponse) GetPeers() []*PeerRecord {
@@ -1972,7 +2610,7 @@ type CancelRequest struct {
 
 func (x *CancelRequest) Reset() {
 	*x = CancelRequest{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[20]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1984,7 +2622,7 @@ func (x *CancelRequest) String() string {
 func (*CancelRequest) ProtoMessage() {}
 
 func (x *CancelRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[20]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1997,7 +2635,7 @@ func (x *CancelRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelRequest.ProtoReflect.Descriptor instead.
 func (*CancelRequest) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{20}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *CancelRequest) GetTaskId() string {
@@ -2045,7 +2683,7 @@ type CancelResponse struct {
 
 func (x *CancelResponse) Reset() {
 	*x = CancelResponse{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[21]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2057,7 +2695,7 @@ func (x *CancelResponse) String() string {
 func (*CancelResponse) ProtoMessage() {}
 
 func (x *CancelResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[21]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2070,7 +2708,7 @@ func (x *CancelResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelResponse.ProtoReflect.Descriptor instead.
 func (*CancelResponse) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{21}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *CancelResponse) GetAccepted() bool {
@@ -2107,7 +2745,7 @@ type SkillLookupRequest struct {
 
 func (x *SkillLookupRequest) Reset() {
 	*x = SkillLookupRequest{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[22]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2119,7 +2757,7 @@ func (x *SkillLookupRequest) String() string {
 func (*SkillLookupRequest) ProtoMessage() {}
 
 func (x *SkillLookupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[22]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2132,7 +2770,7 @@ func (x *SkillLookupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillLookupRequest.ProtoReflect.Descriptor instead.
 func (*SkillLookupRequest) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{22}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *SkillLookupRequest) GetSkills() []string {
@@ -2178,7 +2816,7 @@ type SkillLookupResponse struct {
 
 func (x *SkillLookupResponse) Reset() {
 	*x = SkillLookupResponse{}
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[23]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2190,7 +2828,7 @@ func (x *SkillLookupResponse) String() string {
 func (*SkillLookupResponse) ProtoMessage() {}
 
 func (x *SkillLookupResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[23]
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2203,7 +2841,7 @@ func (x *SkillLookupResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillLookupResponse.ProtoReflect.Descriptor instead.
 func (*SkillLookupResponse) Descriptor() ([]byte, []int) {
-	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{23}
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *SkillLookupResponse) GetPeers() []*PeerRecord {
@@ -2252,7 +2890,7 @@ const file_zeptomesh_v1_mesh_proto_rawDesc = "" +
 	"\x04hash\x18\x02 \x01(\tR\x04hash\x12\x12\n" +
 	"\x04size\x18\x03 \x01(\x03R\x04size\x12\x1d\n" +
 	"\n" +
-	"media_type\x18\x04 \x01(\tR\tmediaType\"\x96\x04\n" +
+	"media_type\x18\x04 \x01(\tR\tmediaType\"\xc1\x04\n" +
 	"\fTaskEnvelope\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12$\n" +
 	"\x0eparent_task_id\x18\x02 \x01(\tR\fparentTaskId\x12$\n" +
@@ -2270,7 +2908,8 @@ const file_zeptomesh_v1_mesh_proto_rawDesc = "" +
 	"\vroute_stack\x18\f \x03(\tR\n" +
 	"routeStack\x12\x1c\n" +
 	"\tsignature\x18\r \x01(\fR\tsignature\x12)\n" +
-	"\x10signature_scheme\x18\x0e \x01(\tR\x0fsignatureScheme\"\xc8\x01\n" +
+	"\x10signature_scheme\x18\x0e \x01(\tR\x0fsignatureScheme\x12)\n" +
+	"\x10origin_signature\x18\x0f \x01(\fR\x0foriginSignature\"\xc8\x01\n" +
 	"\aTaskAck\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12/\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x17.zeptomesh.v1.AckStatusR\x06status\x12\x16\n" +
@@ -2307,7 +2946,7 @@ const file_zeptomesh_v1_mesh_proto_rawDesc = "" +
 	"\tResultAck\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1a\n" +
 	"\baccepted\x18\x02 \x01(\bR\baccepted\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xf5\x03\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xda\x04\n" +
 	"\fCapabilities\x12\x17\n" +
 	"\apeer_id\x18\x01 \x01(\tR\x06peerId\x12\x1b\n" +
 	"\tnode_name\x18\x02 \x01(\tR\bnodeName\x12\x18\n" +
@@ -2325,7 +2964,49 @@ const file_zeptomesh_v1_mesh_proto_rawDesc = "" +
 	"\x0eresource_class\x18\f \x01(\tR\rresourceClass\x12!\n" +
 	"\flisten_addrs\x18\r \x03(\tR\vlistenAddrs\x12\x1c\n" +
 	"\ttimestamp\x18\x0e \x01(\x03R\ttimestamp\x12\x1c\n" +
-	"\tsignature\x18\x0f \x01(\fR\tsignature\"\xe4\x01\n" +
+	"\tsignature\x18\x0f \x01(\fR\tsignature\x12%\n" +
+	"\x0eskills_version\x18\x10 \x01(\x03R\rskillsVersion\x12<\n" +
+	"\n" +
+	"skill_docs\x18\x11 \x03(\v2\x1d.zeptomesh.v1.SkillDescriptorR\tskillDocs\"\xbe\x02\n" +
+	"\x0fSkillDescriptor\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\x03R\aversion\x12\x1d\n" +
+	"\n" +
+	"updated_at\x18\x03 \x01(\x03R\tupdatedAt\x12\x16\n" +
+	"\x06digest\x18\x04 \x01(\tR\x06digest\x12 \n" +
+	"\vdescription\x18\x05 \x01(\tR\vdescription\x12\x16\n" +
+	"\x06models\x18\x06 \x03(\tR\x06models\x12M\n" +
+	"\n" +
+	"attributes\x18\a \x03(\v2-.zeptomesh.v1.SkillDescriptor.AttributesEntryR\n" +
+	"attributes\x1a=\n" +
+	"\x0fAttributesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"T\n" +
+	"\fSkillVersion\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\x03R\aversion\x12\x16\n" +
+	"\x06digest\x18\x03 \x01(\tR\x06digest\"Y\n" +
+	"\x11SkillsSyncRequest\x120\n" +
+	"\x05known\x18\x01 \x03(\v2\x1a.zeptomesh.v1.SkillVersionR\x05known\x12\x12\n" +
+	"\x04full\x18\x02 \x01(\bR\x04full\"\xec\x01\n" +
+	"\x12SkillsSyncResponse\x125\n" +
+	"\x06skills\x18\x01 \x03(\v2\x1d.zeptomesh.v1.SkillDescriptorR\x06skills\x12%\n" +
+	"\x0eskills_version\x18\x02 \x01(\x03R\rskillsVersion\x12\x17\n" +
+	"\apeer_id\x18\x03 \x01(\tR\x06peerId\x12\x1c\n" +
+	"\tsignature\x18\x04 \x01(\fR\tsignature\x12)\n" +
+	"\x10signature_scheme\x18\x05 \x01(\tR\x0fsignatureScheme\x12\x16\n" +
+	"\x06reason\x18\x06 \x01(\tR\x06reason\"\xb0\x02\n" +
+	"\tKeyRebind\x12\x1e\n" +
+	"\vold_peer_id\x18\x01 \x01(\tR\toldPeerId\x12\x1e\n" +
+	"\vnew_peer_id\x18\x02 \x01(\tR\tnewPeerId\x12\x1d\n" +
+	"\n" +
+	"new_pubkey\x18\x03 \x01(\fR\tnewPubkey\x12\x1a\n" +
+	"\bsequence\x18\x04 \x01(\x03R\bsequence\x12\x1b\n" +
+	"\tissued_at\x18\x05 \x01(\x03R\bissuedAt\x12\x16\n" +
+	"\x06reason\x18\x06 \x01(\tR\x06reason\x12#\n" +
+	"\rold_signature\x18\a \x01(\fR\foldSignature\x12#\n" +
+	"\rnew_signature\x18\b \x01(\fR\fnewSignature\x12)\n" +
+	"\x10signature_scheme\x18\t \x01(\tR\x0fsignatureScheme\"\x8b\x02\n" +
 	"\tPeerState\x12\x17\n" +
 	"\apeer_id\x18\x01 \x01(\tR\x06peerId\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12\x16\n" +
@@ -2334,32 +3015,46 @@ const file_zeptomesh_v1_mesh_proto_rawDesc = "" +
 	"\x12max_parallel_tasks\x18\x05 \x01(\x05R\x10maxParallelTasks\x12\x18\n" +
 	"\aversion\x18\x06 \x01(\tR\aversion\x12\x16\n" +
 	"\x06status\x18\a \x01(\tR\x06status\x12\x14\n" +
-	"\x05addrs\x18\b \x03(\tR\x05addrs\"e\n" +
+	"\x05addrs\x18\b \x03(\tR\x05addrs\x12%\n" +
+	"\x0eskills_version\x18\t \x01(\x03R\rskillsVersion\"\xd3\x01\n" +
 	"\x10MembershipGossip\x12/\n" +
 	"\x06states\x18\x01 \x03(\v2\x17.zeptomesh.v1.PeerStateR\x06states\x12 \n" +
 	"\ffrom_peer_id\x18\x02 \x01(\tR\n" +
-	"fromPeerId\"\x9f\x01\n" +
+	"fromPeerId\x121\n" +
+	"\arebinds\x18\x03 \x03(\v2\x17.zeptomesh.v1.KeyRebindR\arebinds\x129\n" +
+	"\vrevocations\x18\x04 \x03(\v2\x17.zeptomesh.v1.KeyRebindR\vrevocations\"\x9f\x01\n" +
 	"\vSubtaskSpec\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12'\n" +
 	"\x0frequired_skills\x18\x02 \x03(\tR\x0erequiredSkills\x12 \n" +
 	"\vinstruction\x18\x03 \x01(\tR\vinstruction\x12\x10\n" +
 	"\x03ttl\x18\x04 \x01(\x05R\x03ttl\x12\x1a\n" +
-	"\bpriority\x18\x05 \x01(\x05R\bpriority\"\xd6\x02\n" +
+	"\bpriority\x18\x05 \x01(\x05R\bpriority\"\xd1\x03\n" +
 	"\n" +
 	"RpcRequest\x12/\n" +
 	"\x04ping\x18\x01 \x01(\v2\x19.zeptomesh.v1.PingRequestH\x00R\x04ping\x12G\n" +
 	"\fcapabilities\x18\x02 \x01(\v2!.zeptomesh.v1.CapabilitiesRequestH\x00R\fcapabilities\x12H\n" +
 	"\rpeer_exchange\x18\x03 \x01(\v2!.zeptomesh.v1.PeerExchangeRequestH\x00R\fpeerExchange\x125\n" +
 	"\x06cancel\x18\x04 \x01(\v2\x1b.zeptomesh.v1.CancelRequestH\x00R\x06cancel\x12E\n" +
-	"\fskill_lookup\x18\x05 \x01(\v2 .zeptomesh.v1.SkillLookupRequestH\x00R\vskillLookupB\x06\n" +
-	"\x04kind\"\xdc\x02\n" +
+	"\fskill_lookup\x18\x05 \x01(\v2 .zeptomesh.v1.SkillLookupRequestH\x00R\vskillLookup\x12B\n" +
+	"\vskills_sync\x18\x06 \x01(\v2\x1f.zeptomesh.v1.SkillsSyncRequestH\x00R\n" +
+	"skillsSync\x125\n" +
+	"\x06rebind\x18\a \x01(\v2\x1b.zeptomesh.v1.RebindRequestH\x00R\x06rebindB\x06\n" +
+	"\x04kind\"\xd9\x03\n" +
 	"\vRpcResponse\x120\n" +
 	"\x04ping\x18\x01 \x01(\v2\x1a.zeptomesh.v1.PingResponseH\x00R\x04ping\x12H\n" +
 	"\fcapabilities\x18\x02 \x01(\v2\".zeptomesh.v1.CapabilitiesResponseH\x00R\fcapabilities\x12I\n" +
 	"\rpeer_exchange\x18\x03 \x01(\v2\".zeptomesh.v1.PeerExchangeResponseH\x00R\fpeerExchange\x126\n" +
 	"\x06cancel\x18\x04 \x01(\v2\x1c.zeptomesh.v1.CancelResponseH\x00R\x06cancel\x12F\n" +
-	"\fskill_lookup\x18\x05 \x01(\v2!.zeptomesh.v1.SkillLookupResponseH\x00R\vskillLookupB\x06\n" +
-	"\x04kind\"#\n" +
+	"\fskill_lookup\x18\x05 \x01(\v2!.zeptomesh.v1.SkillLookupResponseH\x00R\vskillLookup\x12C\n" +
+	"\vskills_sync\x18\x06 \x01(\v2 .zeptomesh.v1.SkillsSyncResponseH\x00R\n" +
+	"skillsSync\x126\n" +
+	"\x06rebind\x18\a \x01(\v2\x1c.zeptomesh.v1.RebindResponseH\x00R\x06rebindB\x06\n" +
+	"\x04kind\"@\n" +
+	"\rRebindRequest\x12/\n" +
+	"\x06rebind\x18\x01 \x01(\v2\x17.zeptomesh.v1.KeyRebindR\x06rebind\"D\n" +
+	"\x0eRebindResponse\x12\x1a\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"#\n" +
 	"\vPingRequest\x12\x14\n" +
 	"\x05nonce\x18\x01 \x01(\x03R\x05nonce\"A\n" +
 	"\fPingResponse\x12\x14\n" +
@@ -2451,7 +3146,7 @@ func file_zeptomesh_v1_mesh_proto_rawDescGZIP() []byte {
 }
 
 var file_zeptomesh_v1_mesh_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_zeptomesh_v1_mesh_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_zeptomesh_v1_mesh_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
 var file_zeptomesh_v1_mesh_proto_goTypes = []any{
 	(TaskStatus)(0),              // 0: zeptomesh.v1.TaskStatus
 	(AckStatus)(0),               // 1: zeptomesh.v1.AckStatus
@@ -2465,52 +3160,71 @@ var file_zeptomesh_v1_mesh_proto_goTypes = []any{
 	(*TaskResult)(nil),           // 9: zeptomesh.v1.TaskResult
 	(*ResultAck)(nil),            // 10: zeptomesh.v1.ResultAck
 	(*Capabilities)(nil),         // 11: zeptomesh.v1.Capabilities
-	(*PeerState)(nil),            // 12: zeptomesh.v1.PeerState
-	(*MembershipGossip)(nil),     // 13: zeptomesh.v1.MembershipGossip
-	(*SubtaskSpec)(nil),          // 14: zeptomesh.v1.SubtaskSpec
-	(*RpcRequest)(nil),           // 15: zeptomesh.v1.RpcRequest
-	(*RpcResponse)(nil),          // 16: zeptomesh.v1.RpcResponse
-	(*PingRequest)(nil),          // 17: zeptomesh.v1.PingRequest
-	(*PingResponse)(nil),         // 18: zeptomesh.v1.PingResponse
-	(*CapabilitiesRequest)(nil),  // 19: zeptomesh.v1.CapabilitiesRequest
-	(*CapabilitiesResponse)(nil), // 20: zeptomesh.v1.CapabilitiesResponse
-	(*PeerRecord)(nil),           // 21: zeptomesh.v1.PeerRecord
-	(*PeerExchangeRequest)(nil),  // 22: zeptomesh.v1.PeerExchangeRequest
-	(*PeerExchangeResponse)(nil), // 23: zeptomesh.v1.PeerExchangeResponse
-	(*CancelRequest)(nil),        // 24: zeptomesh.v1.CancelRequest
-	(*CancelResponse)(nil),       // 25: zeptomesh.v1.CancelResponse
-	(*SkillLookupRequest)(nil),   // 26: zeptomesh.v1.SkillLookupRequest
-	(*SkillLookupResponse)(nil),  // 27: zeptomesh.v1.SkillLookupResponse
-	nil,                          // 28: zeptomesh.v1.TaskPayload.LabelsEntry
+	(*SkillDescriptor)(nil),      // 12: zeptomesh.v1.SkillDescriptor
+	(*SkillVersion)(nil),         // 13: zeptomesh.v1.SkillVersion
+	(*SkillsSyncRequest)(nil),    // 14: zeptomesh.v1.SkillsSyncRequest
+	(*SkillsSyncResponse)(nil),   // 15: zeptomesh.v1.SkillsSyncResponse
+	(*KeyRebind)(nil),            // 16: zeptomesh.v1.KeyRebind
+	(*PeerState)(nil),            // 17: zeptomesh.v1.PeerState
+	(*MembershipGossip)(nil),     // 18: zeptomesh.v1.MembershipGossip
+	(*SubtaskSpec)(nil),          // 19: zeptomesh.v1.SubtaskSpec
+	(*RpcRequest)(nil),           // 20: zeptomesh.v1.RpcRequest
+	(*RpcResponse)(nil),          // 21: zeptomesh.v1.RpcResponse
+	(*RebindRequest)(nil),        // 22: zeptomesh.v1.RebindRequest
+	(*RebindResponse)(nil),       // 23: zeptomesh.v1.RebindResponse
+	(*PingRequest)(nil),          // 24: zeptomesh.v1.PingRequest
+	(*PingResponse)(nil),         // 25: zeptomesh.v1.PingResponse
+	(*CapabilitiesRequest)(nil),  // 26: zeptomesh.v1.CapabilitiesRequest
+	(*CapabilitiesResponse)(nil), // 27: zeptomesh.v1.CapabilitiesResponse
+	(*PeerRecord)(nil),           // 28: zeptomesh.v1.PeerRecord
+	(*PeerExchangeRequest)(nil),  // 29: zeptomesh.v1.PeerExchangeRequest
+	(*PeerExchangeResponse)(nil), // 30: zeptomesh.v1.PeerExchangeResponse
+	(*CancelRequest)(nil),        // 31: zeptomesh.v1.CancelRequest
+	(*CancelResponse)(nil),       // 32: zeptomesh.v1.CancelResponse
+	(*SkillLookupRequest)(nil),   // 33: zeptomesh.v1.SkillLookupRequest
+	(*SkillLookupResponse)(nil),  // 34: zeptomesh.v1.SkillLookupResponse
+	nil,                          // 35: zeptomesh.v1.TaskPayload.LabelsEntry
+	nil,                          // 36: zeptomesh.v1.SkillDescriptor.AttributesEntry
 }
 var file_zeptomesh_v1_mesh_proto_depIdxs = []int32{
 	6,  // 0: zeptomesh.v1.TaskPayload.attachments:type_name -> zeptomesh.v1.ArtifactRef
-	28, // 1: zeptomesh.v1.TaskPayload.labels:type_name -> zeptomesh.v1.TaskPayload.LabelsEntry
+	35, // 1: zeptomesh.v1.TaskPayload.labels:type_name -> zeptomesh.v1.TaskPayload.LabelsEntry
 	5,  // 2: zeptomesh.v1.TaskEnvelope.payload:type_name -> zeptomesh.v1.TaskPayload
 	4,  // 3: zeptomesh.v1.TaskEnvelope.constraints:type_name -> zeptomesh.v1.TaskConstraints
 	1,  // 4: zeptomesh.v1.TaskAck.status:type_name -> zeptomesh.v1.AckStatus
 	0,  // 5: zeptomesh.v1.TaskResult.status:type_name -> zeptomesh.v1.TaskStatus
 	6,  // 6: zeptomesh.v1.TaskResult.artifacts:type_name -> zeptomesh.v1.ArtifactRef
 	3,  // 7: zeptomesh.v1.TaskResult.error_class:type_name -> zeptomesh.v1.TaskErrorClass
-	12, // 8: zeptomesh.v1.MembershipGossip.states:type_name -> zeptomesh.v1.PeerState
-	17, // 9: zeptomesh.v1.RpcRequest.ping:type_name -> zeptomesh.v1.PingRequest
-	19, // 10: zeptomesh.v1.RpcRequest.capabilities:type_name -> zeptomesh.v1.CapabilitiesRequest
-	22, // 11: zeptomesh.v1.RpcRequest.peer_exchange:type_name -> zeptomesh.v1.PeerExchangeRequest
-	24, // 12: zeptomesh.v1.RpcRequest.cancel:type_name -> zeptomesh.v1.CancelRequest
-	26, // 13: zeptomesh.v1.RpcRequest.skill_lookup:type_name -> zeptomesh.v1.SkillLookupRequest
-	18, // 14: zeptomesh.v1.RpcResponse.ping:type_name -> zeptomesh.v1.PingResponse
-	20, // 15: zeptomesh.v1.RpcResponse.capabilities:type_name -> zeptomesh.v1.CapabilitiesResponse
-	23, // 16: zeptomesh.v1.RpcResponse.peer_exchange:type_name -> zeptomesh.v1.PeerExchangeResponse
-	25, // 17: zeptomesh.v1.RpcResponse.cancel:type_name -> zeptomesh.v1.CancelResponse
-	27, // 18: zeptomesh.v1.RpcResponse.skill_lookup:type_name -> zeptomesh.v1.SkillLookupResponse
-	11, // 19: zeptomesh.v1.CapabilitiesResponse.capabilities:type_name -> zeptomesh.v1.Capabilities
-	21, // 20: zeptomesh.v1.PeerExchangeResponse.peers:type_name -> zeptomesh.v1.PeerRecord
-	21, // 21: zeptomesh.v1.SkillLookupResponse.peers:type_name -> zeptomesh.v1.PeerRecord
-	22, // [22:22] is the sub-list for method output_type
-	22, // [22:22] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	12, // 8: zeptomesh.v1.Capabilities.skill_docs:type_name -> zeptomesh.v1.SkillDescriptor
+	36, // 9: zeptomesh.v1.SkillDescriptor.attributes:type_name -> zeptomesh.v1.SkillDescriptor.AttributesEntry
+	13, // 10: zeptomesh.v1.SkillsSyncRequest.known:type_name -> zeptomesh.v1.SkillVersion
+	12, // 11: zeptomesh.v1.SkillsSyncResponse.skills:type_name -> zeptomesh.v1.SkillDescriptor
+	17, // 12: zeptomesh.v1.MembershipGossip.states:type_name -> zeptomesh.v1.PeerState
+	16, // 13: zeptomesh.v1.MembershipGossip.rebinds:type_name -> zeptomesh.v1.KeyRebind
+	16, // 14: zeptomesh.v1.MembershipGossip.revocations:type_name -> zeptomesh.v1.KeyRebind
+	24, // 15: zeptomesh.v1.RpcRequest.ping:type_name -> zeptomesh.v1.PingRequest
+	26, // 16: zeptomesh.v1.RpcRequest.capabilities:type_name -> zeptomesh.v1.CapabilitiesRequest
+	29, // 17: zeptomesh.v1.RpcRequest.peer_exchange:type_name -> zeptomesh.v1.PeerExchangeRequest
+	31, // 18: zeptomesh.v1.RpcRequest.cancel:type_name -> zeptomesh.v1.CancelRequest
+	33, // 19: zeptomesh.v1.RpcRequest.skill_lookup:type_name -> zeptomesh.v1.SkillLookupRequest
+	14, // 20: zeptomesh.v1.RpcRequest.skills_sync:type_name -> zeptomesh.v1.SkillsSyncRequest
+	22, // 21: zeptomesh.v1.RpcRequest.rebind:type_name -> zeptomesh.v1.RebindRequest
+	25, // 22: zeptomesh.v1.RpcResponse.ping:type_name -> zeptomesh.v1.PingResponse
+	27, // 23: zeptomesh.v1.RpcResponse.capabilities:type_name -> zeptomesh.v1.CapabilitiesResponse
+	30, // 24: zeptomesh.v1.RpcResponse.peer_exchange:type_name -> zeptomesh.v1.PeerExchangeResponse
+	32, // 25: zeptomesh.v1.RpcResponse.cancel:type_name -> zeptomesh.v1.CancelResponse
+	34, // 26: zeptomesh.v1.RpcResponse.skill_lookup:type_name -> zeptomesh.v1.SkillLookupResponse
+	15, // 27: zeptomesh.v1.RpcResponse.skills_sync:type_name -> zeptomesh.v1.SkillsSyncResponse
+	23, // 28: zeptomesh.v1.RpcResponse.rebind:type_name -> zeptomesh.v1.RebindResponse
+	16, // 29: zeptomesh.v1.RebindRequest.rebind:type_name -> zeptomesh.v1.KeyRebind
+	11, // 30: zeptomesh.v1.CapabilitiesResponse.capabilities:type_name -> zeptomesh.v1.Capabilities
+	28, // 31: zeptomesh.v1.PeerExchangeResponse.peers:type_name -> zeptomesh.v1.PeerRecord
+	28, // 32: zeptomesh.v1.SkillLookupResponse.peers:type_name -> zeptomesh.v1.PeerRecord
+	33, // [33:33] is the sub-list for method output_type
+	33, // [33:33] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_zeptomesh_v1_mesh_proto_init() }
@@ -2518,19 +3232,23 @@ func file_zeptomesh_v1_mesh_proto_init() {
 	if File_zeptomesh_v1_mesh_proto != nil {
 		return
 	}
-	file_zeptomesh_v1_mesh_proto_msgTypes[11].OneofWrappers = []any{
+	file_zeptomesh_v1_mesh_proto_msgTypes[16].OneofWrappers = []any{
 		(*RpcRequest_Ping)(nil),
 		(*RpcRequest_Capabilities)(nil),
 		(*RpcRequest_PeerExchange)(nil),
 		(*RpcRequest_Cancel)(nil),
 		(*RpcRequest_SkillLookup)(nil),
+		(*RpcRequest_SkillsSync)(nil),
+		(*RpcRequest_Rebind)(nil),
 	}
-	file_zeptomesh_v1_mesh_proto_msgTypes[12].OneofWrappers = []any{
+	file_zeptomesh_v1_mesh_proto_msgTypes[17].OneofWrappers = []any{
 		(*RpcResponse_Ping)(nil),
 		(*RpcResponse_Capabilities)(nil),
 		(*RpcResponse_PeerExchange)(nil),
 		(*RpcResponse_Cancel)(nil),
 		(*RpcResponse_SkillLookup)(nil),
+		(*RpcResponse_SkillsSync)(nil),
+		(*RpcResponse_Rebind)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -2538,7 +3256,7 @@ func file_zeptomesh_v1_mesh_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_zeptomesh_v1_mesh_proto_rawDesc), len(file_zeptomesh_v1_mesh_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   25,
+			NumMessages:   33,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

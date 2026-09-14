@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,10 +253,49 @@ func TestLimiter(t *testing.T) {
 	if !l.Allow("peer-b") {
 		t.Fatal("different peer must have its own bucket")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+}
+
+// Wait — это «подожди токен», а не «откажи сейчас»: вызывающий код вправе
+// рассчитывать, что исчерпанный бакет не отбивает заявку, а задерживает её.
+func TestLimiterWaitsForAToken(t *testing.T) {
+	// Один токен и пополнение раз в 50 мс.
+	l := NewLimiter(20, 1)
+	if !l.Allow("peer-a") {
+		t.Fatal("the first request must take the only token")
+	}
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := l.Wait(ctx, "peer-a"); err == nil {
-		t.Fatal("Wait must fail for an exhausted bucket")
+	if err := l.Wait(ctx, "peer-a"); err != nil {
+		t.Fatalf("Wait refused a caller it should have delayed: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 10*time.Millisecond {
+		t.Fatalf("Wait returned after %v: it did not wait for the refill", elapsed)
+	}
+}
+
+// Просьба, у которой нет шансов уложиться в срок, обязана вернуться ошибкой — и
+// не съесть токен, который потом понадобится другому.
+func TestLimiterWaitHonoursDeadline(t *testing.T) {
+	l := NewLimiter(1, 1) // один токен в секунду
+	if !l.Allow("peer-a") {
+		t.Fatal("the first request must take the only token")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := l.Wait(ctx, "peer-a")
+	if err == nil {
+		t.Fatal("Wait succeeded on an exhausted bucket that refills in a second")
+	}
+	// Причина обязана называть и ограничитель, и срок: по этому тексту оператор
+	// отличает «нас лимитируют» от «мы сами тянули время».
+	msg := err.Error()
+	if !strings.Contains(msg, "rate limit") || !strings.Contains(msg, "deadline") {
+		t.Fatalf("the error does not name its cause: %v", err)
+	}
+	// Отменённая бронь не тратит токен: бакет всё ещё пуст.
+	if l.Allow("peer-a") {
+		t.Fatal("the timed-out Wait consumed a token it never received")
 	}
 }
 

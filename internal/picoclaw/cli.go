@@ -31,9 +31,14 @@ type CLIAdapter struct {
 	cfgFile  string
 	env      []string
 	template string
-	extra    []string
-	timeout  time.Duration
-	log      *slog.Logger
+	// model is the node-level default of ТЗ 10.3. The other model knobs are not
+	// passed here: `picoclaw agent` declares only -d/-m/-s/--model and rejects an
+	// unknown flag, so they belong to PICOCLAW_AGENTS_DEFAULTS_* in `env` or to
+	// the PicoClaw config file.
+	model   string
+	extra   []string
+	timeout time.Duration
+	log     *slog.Logger
 
 	mu       sync.Mutex
 	inFlight int
@@ -69,6 +74,7 @@ func NewCLI(cfg config.PicoClawConfig, logger *slog.Logger) (*CLIAdapter, error)
 		cfgFile:  cfg.ConfigFile,
 		env:      env,
 		template: cfg.PromptTemplate,
+		model:    strings.TrimSpace(cfg.Model),
 		timeout:  timeout,
 		extra:    append([]string(nil), cfg.ExtraArgs...),
 		log:      logger,
@@ -78,6 +84,10 @@ func NewCLI(cfg config.PicoClawConfig, logger *slog.Logger) (*CLIAdapter, error)
 
 // Name implements Adapter.
 func (a *CLIAdapter) Name() string { return "picoclaw-cli" }
+
+// Model implements ModelReporter: the CLI is the one surface where the mesh can
+// actually name the model it asks PicoClaw to use.
+func (a *CLIAdapter) Model() string { return a.model }
 
 // Healthy verifies the binary is present and answers `version`.
 func (a *CLIAdapter) Healthy(ctx context.Context) error {
@@ -126,9 +136,7 @@ func (a *CLIAdapter) Execute(ctx context.Context, req Request) (*Response, error
 	if req.SessionKey != "" {
 		args = append(args, "-s", req.SessionKey)
 	}
-	if req.Model != "" {
-		args = append(args, "--model", req.Model)
-	}
+	args = append(args, a.modelFlag(req)...)
 	args = append(args, a.extra...)
 
 	bin, argv := limitedCommand(req.MaxMemoryBytes, a.binary, args)
@@ -189,6 +197,22 @@ func (a *CLIAdapter) track(delta int) {
 	a.mu.Lock()
 	a.inFlight += delta
 	a.mu.Unlock()
+}
+
+// modelFlag renders the model selection of ТЗ 10.3. A task may override the node
+// default only in-process (Request.Model never arrives over the wire), and the
+// override replaces the default rather than joining with it: `picoclaw agent`
+// takes one --model. Everything else the agent's model needs (temperature,
+// max tokens) is PicoClaw's own configuration — the CLI rejects unknown flags.
+func (a *CLIAdapter) modelFlag(req Request) []string {
+	model := a.model
+	if req.Model != "" {
+		model = req.Model
+	}
+	if model == "" {
+		return nil
+	}
+	return []string{"--model", model}
 }
 
 func (a *CLIAdapter) renderPrompt(req Request) string {

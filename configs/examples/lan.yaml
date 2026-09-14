@@ -83,6 +83,24 @@ capabilities:
   allow_network_tools: true
   max_parallel_tasks: 4
   disabled_skills: []
+  # Документация объявленных навыков: что узел рассказывает о них соседям.
+  # Права на исполнение она не даёт — право даёт только список skills выше.
+  skill_docs:
+    - name: general
+      version: 1
+      description: "Универсальные задачи агента в LAN без внешних интеграций."
+      models: []
+      attributes: {zone: lan}
+  # Обмен описаниями с соседями (дельта-синхронизация skills_sync).
+  skill_exchange:
+    enabled: true
+    # trusted | known | any — в доверенной LAN можно any, по умолчанию known:
+    # незнакомый узел слышит только имена из capabilities.skills.
+    disclose_to: known
+    interval: 30s
+    max_descriptors: 64   # потолок одного ответа
+    import_limit: 512     # потолок выученных описаний одного соседа
+    persist: true         # <data_dir>/skills.json, часы версий переживают рестарт
 
 picoclaw:
   mode: ${ZETOMESH_PICO_MODE:-stub}

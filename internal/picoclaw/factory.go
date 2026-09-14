@@ -27,7 +27,7 @@ func New(cfg *config.Config, logger *slog.Logger) (Adapter, error) {
 		if err != nil {
 			return nil, err
 		}
-		logger.Info("picoclaw_adapter", "mode", "binary", "binary", a.binary)
+		logger.Info("picoclaw_adapter", "mode", "binary", "binary", a.binary, "model", a.model)
 		return a, nil
 	case "http":
 		a, err := NewWS(cfg.PicoClaw, logger)

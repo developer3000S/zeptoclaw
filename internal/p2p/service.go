@@ -81,18 +81,21 @@ func (s *Service) handleTask(st network.Stream) {
 
 	ack, err := s.h.Task(ctx, remote, &env)
 	if err != nil {
-		s.log.Warn("inbound_task_handler", "remote", remote.String(), "err", err.Error())
+		s.log.Warn("inbound_task_handler", "task_id", env.GetTaskId(),
+			"remote", remote.String(), "err", err.Error())
 		return
 	}
 	if ack == nil {
 		return
 	}
 	if err := s.host.WriteMsg(st, ack); err != nil {
-		s.log.Warn("inbound_task_write", "remote", remote.String(), "err", err.Error())
+		s.log.Warn("inbound_task_write", "task_id", env.GetTaskId(),
+			"remote", remote.String(), "err", err.Error())
 		return
 	}
 	if err := st.CloseWrite(); err != nil {
-		s.log.Warn("inbound_task_close", "remote", remote.String(), "err", err.Error())
+		s.log.Warn("inbound_task_close", "task_id", env.GetTaskId(),
+			"remote", remote.String(), "err", err.Error())
 		return
 	}
 	ok = true
@@ -118,18 +121,21 @@ func (s *Service) handleResult(st network.Stream) {
 
 	ack, err := s.h.Result(ctx, remote, &res)
 	if err != nil {
-		s.log.Warn("inbound_result_handler", "remote", remote.String(), "err", err.Error())
+		s.log.Warn("inbound_result_handler", "task_id", res.GetTaskId(),
+			"remote", remote.String(), "err", err.Error())
 		return
 	}
 	if ack == nil {
 		return
 	}
 	if err := s.host.WriteMsg(st, ack); err != nil {
-		s.log.Warn("inbound_result_write", "remote", remote.String(), "err", err.Error())
+		s.log.Warn("inbound_result_write", "task_id", res.GetTaskId(),
+			"remote", remote.String(), "err", err.Error())
 		return
 	}
 	if err := st.CloseWrite(); err != nil {
-		s.log.Warn("inbound_result_close", "remote", remote.String(), "err", err.Error())
+		s.log.Warn("inbound_result_close", "task_id", res.GetTaskId(),
+			"remote", remote.String(), "err", err.Error())
 		return
 	}
 	ok = true

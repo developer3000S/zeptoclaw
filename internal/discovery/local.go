@@ -95,6 +95,19 @@ func (r *LocalRegistry) Publish() error {
 	return os.Rename(tmp, r.path)
 }
 
+// UpdateSkills republishes the record with a fresh skill set (and, when given,
+// fresh addresses). Co-located nodes read the registry on their maintenance
+// tick, so a skill change on this host becomes visible without a restart.
+func (r *LocalRegistry) UpdateSkills(skills []string, addrs []string) error {
+	r.mu.Lock()
+	r.rec.Skills = append([]string(nil), skills...)
+	if len(addrs) > 0 {
+		r.rec.Addrs = append([]string(nil), addrs...)
+	}
+	r.mu.Unlock()
+	return r.Publish()
+}
+
 // Start publishes immediately and refreshes on a heartbeat.
 func (r *LocalRegistry) Start(ctx context.Context) error {
 	r.mu.Lock()

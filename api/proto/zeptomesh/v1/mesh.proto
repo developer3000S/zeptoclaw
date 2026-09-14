@@ -97,6 +97,11 @@ message TaskEnvelope {
   repeated string route_stack = 12;   // peers the envelope already visited
   bytes signature = 13;               // ed25519 over SigningTaskBytes
   string signature_scheme = 14;       // "zeptomesh-task-v1"
+  // origin_signature is produced by origin_peer_id over the authoring body
+  // (wire.TaskContent) and is never rewritten by relays. `signature` proves
+  // who forwarded the envelope; this proves who authored it, so the origin's
+  // own constraints and payload stay verifiable end-to-end (ТЗ 6.6.4, 11.5).
+  bytes origin_signature = 15;
 }
 
 // TaskAck is the synchronous answer to a forwarded TaskEnvelope.
@@ -174,6 +179,72 @@ message Capabilities {
   repeated string listen_addrs = 13;  // multiaddrs
   int64 timestamp = 14;
   bytes signature = 15;
+  // skills_version is this node's monotonic skill-epoch: it increases whenever
+  // the advertised skill set or the documentation of any skill changes. Peers
+  // compare it to decide whether their view of this node is stale (ТЗ 6.3,
+  // 6.4) — a strictly newer version means "fetch the descriptors again".
+  int64 skills_version = 16;
+  // skill_docs carries the canonical descriptors behind `skills`: name,
+  // version, digest and description. It is optional (older builds send only
+  // names) but is what makes skill exchange possible.
+  repeated SkillDescriptor skill_docs = 17;
+}
+
+// SkillDescriptor documents one skill a node can serve. The metadata is
+// shareable; the ability to execute it is not — receiving a descriptor from a
+// peer never grants the receiver that skill, it only describes the peer.
+message SkillDescriptor {
+  string name = 1;
+  int64 version = 2;                  // monotonic per (peer, name)
+  int64 updated_at = 3;               // unix seconds
+  string digest = 4;                  // "sha256:<hex>" over canonical descriptor
+  string description = 5;
+  repeated string models = 6;         // models this skill may use on this node
+  map<string, string> attributes = 7; // free-form (tool, limits, owner, …)
+}
+
+// SkillVersion is a compact "what I already have" entry for a sync request.
+message SkillVersion {
+  string name = 1;
+  int64 version = 2;
+  string digest = 3;
+}
+
+// SkillsSyncRequest asks a peer for skill descriptors newer than `known`.
+message SkillsSyncRequest {
+  repeated SkillVersion known = 1;
+  // full asks for every descriptor regardless of `known` (initial import).
+  bool full = 2;
+}
+
+// SkillsSyncResponse returns the descriptors the peer is willing to disclose.
+message SkillsSyncResponse {
+  repeated SkillDescriptor skills = 1;
+  int64 skills_version = 2;           // the peer's current epoch
+  string peer_id = 3;                 // must equal the authenticated sender
+  bytes signature = 4;                // ed25519 by peer_id over wire.SkillsSyncBody
+  string signature_scheme = 5;        // "zeptomesh-skills-sync-v1"
+  // reason explains an empty answer ("disclosure_policy", "exchange_disabled")
+  // so an operator can tell "nothing newer" apart from "not telling you".
+  string reason = 6;
+}
+
+// KeyRebind is the double-signed statement that one node identity replaced
+// another (ТЗ 11.2.3–4). It is signed by the outgoing key AND the incoming
+// key, so neither side can forge the handover alone, and any third node can
+// verify both halves from the public keys embedded in the peer ids.
+// A revocation is a KeyRebind with an empty new_peer_id / new_pubkey: the old
+// identity is retired deliberately and must no longer be trusted.
+message KeyRebind {
+  string old_peer_id = 1;
+  string new_peer_id = 2;             // empty for a pure revocation
+  bytes new_pubkey = 3;              // libp2p protobuf-marshaled public key
+  int64 sequence = 4;                 // strictly increasing per old_peer_id
+  int64 issued_at = 5;
+  string reason = 6;                  // "rotation" | "compromise" | "planned" | "retire"
+  bytes old_signature = 7;            // by the retiring key over wire.RebindBody
+  bytes new_signature = 8;            // by the new key over the same body
+  string signature_scheme = 9;        // "zeptomesh-rebind-v1"
 }
 
 // PeerState is the gossip-visible projection of a node.
@@ -186,12 +257,19 @@ message PeerState {
   string version = 6;
   string status = 7;                  // "active" | "draining" | "left"
   repeated string addrs = 8;
+  int64 skills_version = 9;           // mirrors Capabilities.skills_version
 }
 
 // MembershipGossip is published on the membership topic.
 message MembershipGossip {
   repeated PeerState states = 1;
   string from_peer_id = 2;
+  // rebinds carries key-rotation statements; revocations carries retirements
+  // (KeyRebind without a new identity). Both are gossiped so a rotated node is
+  // reachable under its new id without operator intervention, and a revoked id
+  // is refused everywhere at once (ТЗ 11.2.4).
+  repeated KeyRebind rebinds = 3;
+  repeated KeyRebind revocations = 4;
 }
 
 // SubtaskPlan asks a peer to split a task and delegate parts further.
@@ -211,6 +289,12 @@ message RpcRequest {
     PeerExchangeRequest peer_exchange = 3;
     CancelRequest cancel = 4;
     SkillLookupRequest skill_lookup = 5;
+    // skills_sync asks a peer for skill descriptors newer than the ones we
+    // already hold (ТЗ 6.3 skill exchange, request 2 of the feature brief).
+    SkillsSyncRequest skills_sync = 6;
+    // rebind carries a key-rotation/revocation statement to a peer that has
+    // never met the new identity, so the handover is accepted from the source.
+    RebindRequest rebind = 7;
   }
 }
 
@@ -222,7 +306,18 @@ message RpcResponse {
     PeerExchangeResponse peer_exchange = 3;
     CancelResponse cancel = 4;
     SkillLookupResponse skill_lookup = 5;
+    SkillsSyncResponse skills_sync = 6;
+    RebindResponse rebind = 7;
   }
+}
+
+message RebindRequest {
+  KeyRebind rebind = 1;
+}
+
+message RebindResponse {
+  bool accepted = 1;
+  string reason = 2;
 }
 
 message PingRequest {

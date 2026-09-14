@@ -50,6 +50,15 @@ type Membership struct {
 	selfState func() *pb.PeerState
 	onPeer    func(peer.AddrInfo, *pb.PeerState)
 	onExpire  func(peer.ID)
+	// rebindSource supplies the identity-handover statements this node holds, so
+	// they ride along with heartbeats and reach peers that never met the new key
+	// (ТЗ 11.2 п.3–4).
+	rebindSource func() []*pb.KeyRebind
+	// onRebind is fired for every statement that verified. A rebind is signed by
+	// both identities it names, so verification needs no trust in the relay and
+	// no prior contact with either key — which is exactly why gossip can carry
+	// it at all.
+	onRebind func(*pb.KeyRebind)
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -124,6 +133,15 @@ func (m *Membership) SetOnExpire(fn func(peer.ID)) {
 	m.mu.Unlock()
 }
 
+// SetRebindSource installs the provider of held handover statements and the
+// callback for statements learned from others.
+func (m *Membership) SetRebindSource(src func() []*pb.KeyRebind, fn func(*pb.KeyRebind)) {
+	m.mu.Lock()
+	m.rebindSource = src
+	m.onRebind = fn
+	m.mu.Unlock()
+}
+
 // Start launches the publish and receive loops.
 func (m *Membership) Start(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
@@ -186,6 +204,15 @@ func (m *Membership) PublishState(ctx context.Context, state *pb.PeerState) erro
 
 func (m *Membership) publishState(ctx context.Context, state *pb.PeerState) error {
 	msg := &pb.MembershipGossip{States: []*pb.PeerState{state}, FromPeerId: state.PeerId}
+	// Handover statements ride every publication, which makes their spread
+	// epidemic. The local ledger is deduplicated and bounded by (old id,
+	// sequence), so piggybacking cannot grow without limit.
+	m.mu.RLock()
+	src := m.rebindSource
+	m.mu.RUnlock()
+	if src != nil {
+		msg.Rebinds = src()
+	}
 	b, err := proto.Marshal(msg)
 	if err != nil {
 		return err
@@ -195,28 +222,68 @@ func (m *Membership) publishState(ctx context.Context, state *pb.PeerState) erro
 
 // PublishFull shares the states of peers we know about, which is how a new node
 // learns a wide view quickly instead of waiting for heartbeats to trickle in.
+//
+// The view is sent in batches rather than truncated: with a cap-and-drop the
+// nodes that happen to sort last are never shared at all, so a 100+ mesh would
+// keep a structurally blind spot. Batching bounds one message while still
+// eventually disclosing everything, and the inter-batch pause keeps a full-sync
+// from becoming a traffic spike.
 func (m *Membership) PublishFull(ctx context.Context) error {
 	m.mu.RLock()
 	states := make([]*pb.PeerState, 0, len(m.states))
 	for _, s := range m.states {
 		states = append(states, s)
 	}
+	rebinds := m.rebindSourceSnapshotLocked()
 	m.mu.RUnlock()
-	if len(states) == 0 {
+	if len(states) == 0 && len(rebinds) == 0 {
 		return nil
 	}
-	// Cap the batch so a large mesh cannot be flooded by one node.
-	const maxBatch = 64
-	if len(states) > maxBatch {
-		sort.Slice(states, func(i, j int) bool { return states[i].Timestamp > states[j].Timestamp })
-		states = states[:maxBatch]
+	sort.Slice(states, func(i, j int) bool {
+		if states[i].Timestamp == states[j].Timestamp {
+			return states[i].PeerId < states[j].PeerId
+		}
+		return states[i].Timestamp > states[j].Timestamp
+	})
+
+	const batchSize = 32
+	for off := 0; off*batchSize < len(states); off++ {
+		lo := off * batchSize
+		hi := lo + batchSize
+		if hi > len(states) {
+			hi = len(states)
+		}
+		msg := &pb.MembershipGossip{States: states[lo:hi], FromPeerId: m.h.ID().String()}
+		// Handover statements go with the first batch only: they are small, and
+		// every peer that receives any part of the sync gets them.
+		if off == 0 {
+			msg.Rebinds = rebinds
+		}
+		b, err := proto.Marshal(msg)
+		if err != nil {
+			return err
+		}
+		if err := m.topic.Publish(ctx, b); err != nil {
+			return err
+		}
+		if hi < len(states) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(m.cfg.Heartbeat.D() / 8):
+			}
+		}
 	}
-	msg := &pb.MembershipGossip{States: states, FromPeerId: m.h.ID().String()}
-	b, err := proto.Marshal(msg)
-	if err != nil {
-		return err
+	return nil
+}
+
+// rebindSourceSnapshotLocked reads the held handover statements; callers hold
+// m.mu, so the source itself must not take it.
+func (m *Membership) rebindSourceSnapshotLocked() []*pb.KeyRebind {
+	if m.rebindSource == nil {
+		return nil
 	}
-	return m.topic.Publish(ctx, b)
+	return m.rebindSource()
 }
 
 func (m *Membership) receiveLoop(ctx context.Context) {
@@ -236,6 +303,14 @@ func (m *Membership) receiveLoop(ctx context.Context) {
 }
 
 func (m *Membership) ingest(from peer.ID, data []byte) {
+	// Gossipsub delivers our own publications back to our own subscription.
+	// Our own view of the mesh cannot teach us anything, and accepting it meant
+	// every PublishFull batch audited itself as "gossip_third_party_state" (the
+	// relay — ourselves — holds no routing-trust observation of its own id),
+	// burying real rejections under self-echo noise.
+	if from == m.h.ID() {
+		return
+	}
 	msg := &pb.MembershipGossip{}
 	if err := proto.Unmarshal(data, msg); err != nil {
 		m.security(from, "gossip_unparseable", err.Error())
@@ -269,6 +344,14 @@ func (m *Membership) ingest(from peer.ID, data []byte) {
 		}
 		accepted = append(accepted, st)
 	}
+	// Handover statements are applied before the state gate below. A PeerState
+	// about a third party is a claim that needs routing trust in its relay, but a
+	// KeyRebind proves its own authorship — so a message whose states were all
+	// rejected must still be allowed to carry a rotation. Returning early here
+	// would mean an untrusted (or merely stale-state) relay could never pass a
+	// handover along, and a mesh that prunes states would prune revocations with
+	// them.
+	m.ingestRebinds(from, append(append([]*pb.KeyRebind(nil), msg.GetRebinds()...), msg.GetRevocations()...))
 	if len(accepted) == 0 {
 		return
 	}
@@ -297,6 +380,52 @@ func (m *Membership) ingest(from peer.ID, data []byte) {
 		cb(p.ai, p.st)
 	}
 }
+
+// ingestRebinds validates and applies identity-handover statements carried by a
+// gossip message.
+//
+// The trust rule here differs from PeerState on purpose: a PeerState about a
+// third party is accepted only from a peer we trust to route, because it is an
+// unverifiable claim. A KeyRebind is signed by both identities it names — the
+// retiring key and the incoming key — and both public keys are recoverable from
+// the peer ids themselves, so the statement proves its own authorship. That is
+// why it can be adopted from any gossip source, including one that never met
+// either identity, and why rotation needs no operator intervention (ТЗ 11.2).
+func (m *Membership) ingestRebinds(from peer.ID, all []*pb.KeyRebind) {
+	if len(all) == 0 {
+		return
+	}
+	m.mu.RLock()
+	cb := m.onRebind
+	m.mu.RUnlock()
+	if cb == nil {
+		return
+	}
+	now := time.Now().UTC()
+	for _, k := range all {
+		if k == nil || k.GetOldPeerId() == "" {
+			continue
+		}
+		age := now.Unix() - k.GetIssuedAt()
+		if age < -int64(clockSkewSeconds) || age > rebindMaxAgeSeconds {
+			m.security(from, "rebind_bad_timestamp", fmt.Sprint(k.GetIssuedAt()))
+			continue
+		}
+		if err := security.VerifyRebind(k, nil); err != nil {
+			// Only the two named identities could produce a valid statement, so a
+			// failure here is a forgery attempt or a corrupted relay — worth an
+			// audit entry, not a silent drop.
+			m.security(from, "rebind_bad_signature", err.Error())
+			continue
+		}
+		cb(k)
+	}
+}
+
+// rebindMaxAgeSeconds bounds how old a handover statement may be to still be
+// adopted: an arbitrarily old one is history rather than a live rotation, and
+// accepting it would let a captured message re-open a long-retired identity.
+const rebindMaxAgeSeconds = 86400
 
 // addrInfoFrom converts a gossip state into a dialable address info.
 func addrInfoFrom(st *pb.PeerState) peer.AddrInfo {

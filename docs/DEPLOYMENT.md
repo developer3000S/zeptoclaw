@@ -140,6 +140,8 @@ ssh -L 8081:127.0.0.1:8081 host '…'
 | `ZETOMESH_PSK` | закрытая сеть (одинакова на всех узлах сети!) |
 | `ZETOMESH_BOOTSTRAP` | через запятую — дописывается в `discovery.bootstrap` |
 | `ZETOMESH_TRUST_MODE` / `ZETOMESH_PICO_MODE` / `ZETOMESH_LOG_LEVEL` | политики/агент/логи |
+| `ZETOMESH_PICO_MODEL` | модель по умолчанию локального агента (`picoclaw.model`, ТЗ 10.3; передаётся как `--model` только в режиме `binary`) |
+| `ZETOMESH_PICO_WORKSPACE` | корень рабочих каталогов задач (`picoclaw.workspace_root`; пусто → `<data_dir>/picoclaw/workspaces`) |
 | `ZETOMESH_PUB_IP` | публичный адрес для `announce` (WAN-профиль) |
 | `ZETOMESH_API_TOKEN` | bearer-токен API (если задан `api.auth_token_env`) |
 | `PICOCLAW_MESH_PICO_TOKEN` | токен Pico Protocol для `picoclaw.mode: http` |

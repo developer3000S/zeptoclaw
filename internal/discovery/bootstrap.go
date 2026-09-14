@@ -31,6 +31,11 @@ type Bootstrap struct {
 // NewBootstrap parses the configured addresses. An entry that cannot be parsed
 // is reported immediately rather than silently ignored, because a typo in a
 // bootstrap list is otherwise invisible until the network fails to form.
+//
+// An entry without an embedded peer id is rejected for the same reason: libp2p
+// dials a peer, not a socket, so such a line can never connect. Left in the
+// list it would fail on every retry and read like an unreachable host rather
+// than the malformed entry it is.
 func NewBootstrap(h host.Host, addrs []string, interval, dialTimeout time.Duration, logger *slog.Logger) (*Bootstrap, error) {
 	b := &Bootstrap{
 		raw:      append([]string(nil), addrs...),
@@ -45,6 +50,10 @@ func NewBootstrap(h host.Host, addrs []string, interval, dialTimeout time.Durati
 		ai, err := ParseAddrInfo(raw)
 		if err != nil {
 			bad = append(bad, err.Error())
+			continue
+		}
+		if ai.ID == "" {
+			bad = append(bad, fmt.Sprintf("%q has no /p2p/<peer id> part and cannot be dialed", raw))
 			continue
 		}
 		b.addrs = append(b.addrs, *ai)
@@ -78,7 +87,73 @@ func ParseAddrInfo(s string) (*peer.AddrInfo, error) {
 }
 
 // Count is the number of configured bootstrap peers.
-func (b *Bootstrap) Count() int { return len(b.addrs) }
+func (b *Bootstrap) Count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.addrs)
+}
+
+// targets snapshots the configured peers. Rename can retarget an entry while a
+// dial loop is walking the list, so every reader takes a copy under the lock
+// instead of iterating the shared slice.
+func (b *Bootstrap) targets() []peer.AddrInfo {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]peer.AddrInfo(nil), b.addrs...)
+}
+
+// Rename retargets a bootstrap entry whose embedded peer id was rotated into
+// newID, keeping the network address.
+//
+// A bootstrap multiaddr carries an identity ("…/p2p/12D3…"), so the moment that
+// key is retired the entry dials an address that will fail the Noise handshake —
+// the address is still right, the id is not. Renaming in memory is what keeps a
+// planned rotation from quietly breaking the entry point of the mesh; the
+// operator still has to edit the YAML eventually, but the network does not
+// depend on that happening before the next restart. Reports whether an entry
+// was changed.
+func (b *Bootstrap) Rename(oldID, newID peer.ID) bool {
+	if oldID == "" || newID == "" || oldID == newID {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	changed := false
+	for i, ai := range b.addrs {
+		if ai.ID != oldID {
+			continue
+		}
+		ai.ID = newID
+		b.addrs[i] = ai
+		if full, err := peer.AddrInfoToP2pAddrs(&ai); err == nil && len(full) > 0 {
+			b.retainAddr(oldID.String(), full[0].String())
+		}
+		changed = true
+	}
+	if _, ok := b.healthy[oldID]; ok {
+		delete(b.healthy, oldID)
+		b.healthy[newID] = time.Now().UTC()
+	}
+	return changed
+}
+
+// retainAddr rewrites the string form kept for diagnostics, matching on the
+// embedded peer id rather than on the whole address (a peer may be listed with
+// several transports).
+func (b *Bootstrap) retainAddr(oldIDStr, newAddr string) {
+	for j, raw := range b.raw {
+		if strings.HasSuffix(raw, "/p2p/"+oldIDStr) || strings.Contains(raw, "/p2p/"+oldIDStr+"/") {
+			b.raw[j] = newAddr
+		}
+	}
+}
+
+// Raw returns the configured entries as strings (diagnostics, rotation notice).
+func (b *Bootstrap) Raw() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.raw...)
+}
 
 // Dial connects to one bootstrap peer.
 func (b *Bootstrap) Dial(ctx context.Context, ai peer.AddrInfo) error {
@@ -100,7 +175,7 @@ func (b *Bootstrap) Dial(ctx context.Context, ai peer.AddrInfo) error {
 // the number of peers reached.
 func (b *Bootstrap) DialAll(ctx context.Context) int {
 	ok := 0
-	for _, ai := range b.addrs {
+	for _, ai := range b.targets() {
 		if ctx.Err() != nil {
 			return ok
 		}
@@ -121,7 +196,7 @@ func (b *Bootstrap) DialAll(ctx context.Context) int {
 // Run dials on start and keeps retrying until the mesh is wide enough.
 // needMore reports whether the caller still wants connections.
 func (b *Bootstrap) Run(ctx context.Context, needMore func() bool) {
-	if len(b.addrs) == 0 {
+	if b.Count() == 0 {
 		return
 	}
 	b.DialAll(ctx)

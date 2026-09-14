@@ -49,7 +49,14 @@ Commands:
   resubmit    re-inject a failed/timed-out task
   reload      re-read the node config file     (POST /admin/reload-config)
   leave       announce departure and restart   (POST /admin/leave)
+  skills      show advertised skills and the versioned peer skill view
+  skill-set   document one advertised skill    (POST /api/v1/skills)
+  skill-rm    retire a skill's documentation   (DELETE /api/v1/skills/<name>)
+  skills-sync reconcile peer skill descriptors now (POST /api/v1/skills/sync)
+  rebinds     show retired and rotated peer identities (GET /api/v1/rebinds)
   genkey      create an Ed25519 identity key file
+  rotate      replace the node key, announcing the handover to the mesh
+  revoke      retire a peer id with a self-signed revocation
   psk         print a private-network PSK
   version     print build information
 
@@ -98,6 +105,20 @@ func main() {
 		err = clientReload(args)
 	case "leave":
 		err = clientLeave(args)
+	case "rotate":
+		err = clientRotate(args)
+	case "revoke":
+		err = clientRevoke(args)
+	case "skills":
+		err = clientSkills(args)
+	case "skill-set":
+		err = clientSkillSet(args)
+	case "skill-rm":
+		err = clientSkillRm(args)
+	case "skills-sync":
+		err = clientSkillsSync(args)
+	case "rebinds":
+		err = clientRebinds(args)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -176,7 +197,7 @@ func runNode(args []string) error {
 	}
 
 	if cfg.API.Enabled {
-		srv := api.New(n, cfg, n.Metrics, logger.With("component", "api"))
+		srv := api.New(n, cfg, n.Metrics, logging.Component(logger, "api"))
 		go func() {
 			if err := srv.Serve(ctx); err != nil {
 				logger.Error("admin_api", "err", err.Error())
@@ -199,6 +220,12 @@ func runNode(args []string) error {
 	select {
 	case <-ctx.Done():
 		logger.Info("shutdown_signal_received")
+	case <-n.Halted():
+		// The identity was revoked. Exiting non-zero is a request for a restart
+		// under most supervisors, which is precisely what must not happen here,
+		// so this path returns normally; node.RevokeSelf also moved the key file
+		// aside, so even `restart: always` cannot resurrect the retired id.
+		logger.Error("identity_revoked_not_restarting")
 	case <-n.Quit():
 		// /admin/leave: a supervisor-managed restart (systemd ExitCode=75,
 		// docker restart policy) applies the on-disk configuration cleanly.

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -316,6 +317,175 @@ func clientLeave(args []string) error {
 	}
 	var v any
 	if err := c.do(context.Background(), http.MethodPost, "/api/v1/admin/leave", map[string]any{}, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+// clientRotate announces a key handover and installs the new key, then leaves
+// the restart to the caller: in-flight work belongs to the operator.
+func clientRotate(args []string) error {
+	fs := flag.NewFlagSet("rotate", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	reason := fs.String("reason", "rotation", "why the identity is being replaced")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodPost, "/api/v1/admin/rotate-key",
+		map[string]any{"reason": *reason}, &v); err != nil {
+		return err
+	}
+	if err := printJSON(v); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "zeptomesh-node: restart the service to run under the new key (leave or systemctl restart)")
+	return nil
+}
+
+// clientRevoke retires this node's identity; the peer id is unusable afterwards.
+func clientRevoke(args []string) error {
+	fs := flag.NewFlagSet("revoke", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	reason := fs.String("reason", "retire", "why the identity is being retired")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodPost, "/api/v1/admin/revoke",
+		map[string]any{"reason": *reason}, &v); err != nil {
+		return err
+	}
+	if err := printJSON(v); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "zeptomesh-node: the service must not be started again under this key")
+	return nil
+}
+
+// clientSkills shows this node's advertised skills with documentation and the
+// learned, versioned view of peers' skills.
+func clientSkills(args []string) error {
+	fs := flag.NewFlagSet("skills", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodGet, "/api/v1/skills", nil, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+// clientSkillSet documents (or re-documents) one advertised skill; the version
+// bump is announced so peers re-pull it.
+func clientSkillSet(args []string) error {
+	fs := flag.NewFlagSet("skill-set", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	name := fs.String("name", "", "skill to document (must be advertised by this node)")
+	desc := fs.String("desc", "", "human-readable description of the skill")
+	var models stringList
+	fs.Var(&models, "model", "model this skill may use (repeatable)")
+	attrs := fs.String("attr", "", "key=value attribute pairs, comma separated")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*name) == "" {
+		return fmt.Errorf("skill-set: -name is required")
+	}
+	body := map[string]any{"name": *name, "description": *desc}
+	if len(models) > 0 {
+		body["models"] = []string(models)
+	}
+	if *attrs != "" {
+		m := map[string]string{}
+		for _, kv := range strings.Split(*attrs, ",") {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok {
+				return fmt.Errorf("skill-set: bad -attr %q, want key=value", kv)
+			}
+			m[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+		body["attributes"] = m
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodPost, "/api/v1/skills", body, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+// clientSkillRm retires a skill's documentation (the name stays advertised).
+func clientSkillRm(args []string) error {
+	fs := flag.NewFlagSet("skill-rm", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.Arg(0) == "" {
+		return fmt.Errorf("usage: zeptomesh-node skill-rm <skill>")
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	path := "/api/v1/skills/" + url.PathEscape(fs.Arg(0))
+	if err := c.do(context.Background(), http.MethodDelete, path, nil, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+// clientSkillsSync asks neighbours for skill descriptors newer than ours now,
+// instead of waiting for the periodic reconciliation.
+func clientSkillsSync(args []string) error {
+	fs := flag.NewFlagSet("skills-sync", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodPost, "/api/v1/skills/sync", map[string]any{}, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+// clientRebinds shows which identities this node has retired or rotated into.
+func clientRebinds(args []string) error {
+	fs := flag.NewFlagSet("rebinds", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodGet, "/api/v1/rebinds", nil, &v); err != nil {
 		return err
 	}
 	return printJSON(v)

@@ -32,6 +32,8 @@ onboard
 # Test
 coverage.txt
 coverage.html
+load-test-output.txt
+.dev/
 
 # OS
 .DS_Store

@@ -83,7 +83,9 @@ bin/zeptomesh-node submit -addr http://127.0.0.1:8081 -i "hello" -w
 | Декомпозиция | план подзадач (`subtasks` / `--subtask`) → дочерние конверты → один подписанный итог: секции в порядке плана, дедуп артефактов по hash, ретрай retryable-ребёна |
 | Ограничения исполнителя | `max_parallel_tasks_per_peer`, порог свободного места (`statfs`), квота workspace при сборе артефактов, `RLIMIT_AS` + отдельная группа процессов для дочернего PicoClaw |
 | Управление на ходу | hot-reload (`SIGHUP` / `POST /api/v1/admin/reload-config`) trust-режима и порога, allow/blocked-файлов, rate limit и уровня лога; `leave` — штатный уход с публикацией `status: "left"` |
-| Подписи | `TaskEnvelope`, `TaskResult` (+ `worker_signature`), `TaskAck`, `CancelRequest`, `Capabilities` |
+| Подписи | `TaskEnvelope`, `TaskResult` (+ `worker_signature`), `TaskAck`, `CancelRequest`, `Capabilities`, `origin_signature` (авторство задачи, не перезаписывается ретрансляторами), `KeyRebind` (переход идентичности), `SkillsSyncResponse` |
+| Навыки | Версионированные дескрипторы (name/version/digest) с epoch узла; обмен между соседями (дельта-синхронизация по RPC `skills_sync`), автообновление, если у партнёра новее; политика раскрытия, бюджет импорта, persist в `<data_dir>/skills.json` |
+| Идентичность во времени | Плановая ротация ключа (заявление, подписанное обоими ключами; самодостаточно, принимается без участия оператора) и аварийный отзыв (терминальный); доверие привязано к классу идентичностей, журнал `<data_dir>/rebinds.json` |
 | Доступ | Списки разрешённых/запрещённых пиров (ConnectionGater), уровни доверия, журнал безопасности (JSONL) |
 | Доступ к узлу | HTTP/JSON админ-API + CLI `zeptomesh-node`, bearer-токен через env |
 | Исполнитель | PicoClaw через адаптер: CLI-процесс / Pico Protocol (WebSocket `/pico/ws`) / offline-stub |
@@ -166,9 +168,12 @@ zeptoclaw/
 ├── gen/zeptomesh/v1/
 │   └── mesh.pb.go              # генерируется (protoc-gen-go), в VCS для `go build` без protoc
 ├── cmd/zeptomesh-node/
-│   ├── main.go                 # демон: run | version | genkey | psk | reload | leave
+│   ├── main.go                 # демон: run | version | genkey | psk | reload | leave |
+│   │                           #       rotate | revoke
 │   └── client.go               # CLI админ-API: status|peers|capabilities|submit (--subtask)|
-│                               #                   tasks|get|cancel|resubmit|reload|leave
+│                               #                   tasks|get|cancel|resubmit|reload|leave|
+│                               #                   skills|skill-set|skill-rm|skills-sync|
+│                               #                   rebinds|rotate|revoke
 ├── internal/
 │   ├── api/                    # HTTP/JSON админ-API (+ bearer-токен, /metrics)
 │   ├── config/                 # YAML-конфиг, дефолты, валидация, ${VAR:-default}   + тесты
@@ -179,7 +184,9 @@ zeptoclaw/
 │   ├── p2p/                    # host.go (libp2p+relay), service.go, framing.go, gater.go + тесты
 │   ├── picoclaw/               # adapter.go, cli.go, ws.go, stub.go, factory.go, limits_unix.go
 │   ├── routing/                # table.go: соседи, скоринг, Select()
-│   ├── security/               # identity.go, signing.go, trust.go, audit.go        + тесты
+│   ├── security/               # identity.go, signing.go, trust.go, rebind.go, audit.go + тесты
+│   ├── skills/                 # registry.go: версионированные дескрипторы навыков,
+│   │                           #        обмен с соседями, дельта-синхронизация + тесты
 │   ├── storage/                # storage.go: BadgerDB + артефакты sha256
 │   ├── tasks/                  # manager.go (исполнение/делегирование/search-relay),
 │   │                           # decomposition.go (план/агрегация), task.go, disk_unix.go + тесты
@@ -189,7 +196,11 @@ zeptoclaw/
 │   ├── node.yaml               # шаблон демона (env-параметризован, использует install.sh)
 │   └── examples/
 │       ├── lan.yaml            # профиль «одна локальная сеть»  (ТЗ 22.8)
-│       └── wan.yaml            # профиль «Интернет / разные хосты»
+│       ├── wan.yaml            # профиль «Интернет / разные хосты»
+│       └── dev-node.yaml       # профиль «несколько узлов на одной машине» (make dev-cluster)
+├── scripts/
+│   └── dev-cluster.sh          # поднять/остановить отладочный кластер, задачи, ротация
+├── Makefile                    # сборка, проверка, тесты, proto, отладочный кластер
 ├── deploy/docker/
 │   ├── Dockerfile              # многоэтапная сборка, non-root, HEALTHCHECK
 │   └── docker-compose.yml      # готовая сеть из 3 узлов
@@ -201,8 +212,6 @@ zeptoclaw/
 ├── .env.example                # переменные LLM/каналов для PicoClaw
 └── go.mod / go.sum
 ```
-
-`Makefile` нет — команды сборки и проверки выписаны ниже напрямую.
 
 ---
 
@@ -232,13 +241,33 @@ offline-исполнитель.
 
 ## Сборка и проверка
 
+Проект собирается `make` (цели самодокументируемы — `make help`). Напрямую
+`go`-командами — тоже; обе таблицы ниже эквивалентны.
+
 ```bash
 export PATH=$PATH:/usr/local/go/bin
 
-go build ./...          # все пакеты (16)
+make            # fmt-check + vet + build + test — стандартная проверка
+make ci         # локальный эквивалент CI: статика, сборка, тесты под -race
+make build      # демон в bin/zeptomesh-node (версия/коммит в ldflags)
+make cross      # linux/{amd64,arm64} (ТЗ 15.1)
+make test       # все тесты; также test-race, test-cover, test-unit, bench
+make proto      # регенерация gen/ из api/proto (нужны protoc и protoc-gen-go)
+make lint       # golangci-lint, если установлен (иначе ворота — vet + gofmt)
+make dev-cluster      # 3 узла на одной машине (scripts/dev-cluster.sh)
+make dev-status       # сводка по отладочному кластеру
+make dev-rotate       # ротация ключа узла 0 + перезапуск под новым
+make dev-cluster-down # остановить кластер
+```
+
+Эквивалент без Makefile:
+
+```bash
+go build ./...          # все пакеты
 go vet ./...
-gofmt -l .              # код отформатирован gofmt; пустой вывод = всё в порядке
-go test ./...           # юнит-тесты internal/{wire,security,config,tasks,p2p}
+gofmt -l .              # пустой вывод = всё отформатировано
+go test ./...           # юнит-тесты internal/{wire,security,skills,routing,discovery,config,tasks,p2p}
+go test -race ./...     # то же под детектором гонок
 go build -trimpath -o bin/ ./cmd/zeptomesh-node
 
 # Регенерация protobuf-кода (нужны protoc и protoc-gen-go в PATH):
@@ -339,11 +368,13 @@ capabilities:
 picoclaw:
   mode: stub                    # stub | binary | http
   binary: picoclaw
+  workspace_root: ""            # корень рабочих каталогов; пусто → <data_dir>/picoclaw/workspaces
   timeout_seconds: 600
   max_concurrent_agents: 4
+  model: ""                     # модель узла → --model (только режим binary, ТЗ 10.3)
   extra_args: []
   prompt_template: ""           # %s = инструкция; пусто — передавать как есть
-  env: {}                       # например PICOCLAW_CONFIG=/etc/picoclaw/mesh.json
+  env: {}                       # например PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE=0.2
   http:                         # Pico Protocol поверх WebSocket (у PicoClaw нет REST для промпта)
     base_url: http://127.0.0.1:18790   # конвертируется в ws://… адаптером
     path: /pico/ws
@@ -357,6 +388,7 @@ picoclaw:
 security:
   trust_mode: limited           # open | limited | private
   require_task_signature: true
+  require_origin_signature: true # требовать авторскую подпись содержимого (ТЗ 6.6.4)
   drop_invalid_signatures: true
   min_trust_for_tasks: limited  # trusted | known | limited | untrusted | blocked
   allowed_peers_file: ""        # base58 peer id, по одному на строку, # = комментарий

@@ -20,6 +20,14 @@ const (
 	SchemeCancel       = "zeptomesh-cancel-v1"
 	SchemeCaps         = "zeptomesh-caps-v1"
 	SchemeAck          = "zeptomesh-ack-v1"
+	// SchemeTaskOrigin covers only the authoring body (wire.TaskContent), so it
+	// survives every relay that re-signs the transport copy (ТЗ 6.6.4).
+	SchemeTaskOrigin = "zeptomesh-task-origin-v1"
+	// SchemeRebind is applied to a KeyRebind body and signed by BOTH identities
+	// the statement names — neither key alone can forge the handover (ТЗ 11.2).
+	SchemeRebind = "zeptomesh-rebind-v1"
+	// SchemeSkillsSync signs a peer's disclosed skill descriptor set.
+	SchemeSkillsSync = "zeptomesh-skills-sync-v1"
 )
 
 // KeyLookup resolves a public key for a peer whose id does not embed one.
@@ -158,6 +166,160 @@ func (s *Signer) SignAck(a *pb.TaskAck) error {
 	}
 	a.Signature = sig
 	return nil
+}
+
+// SignTaskOrigin stamps the authoring signature of a task. It covers only
+// wire.TaskContent — everything the origin wrote — so relays that rewrite
+// sender/ttl/route_stack and re-sign `signature` leave it untouched, and the
+// final consumer can still verify the origin's own words (ТЗ 6.6.4).
+func (s *Signer) SignTaskOrigin(t *pb.TaskEnvelope) error {
+	content, err := wire.TaskContent(t)
+	if err != nil {
+		return err
+	}
+	sig, err := s.id.Sign(wire.Digest(SchemeTaskOrigin, content))
+	if err != nil {
+		return err
+	}
+	t.OriginSignature = sig
+	return nil
+}
+
+// VerifyTaskOrigin checks the authoring signature against origin_peer_id.
+// Envelopes from builds that predate the field verify as "unsigned origin":
+// callers decide whether that is fatal (it is not by default, for compat).
+func VerifyTaskOrigin(t *pb.TaskEnvelope, lookup KeyLookup) error {
+	if t == nil {
+		return errors.New("security: nil task envelope")
+	}
+	if len(t.GetOriginSignature()) == 0 {
+		return ErrUnsigned
+	}
+	pid, err := peer.Decode(t.GetOriginPeerId())
+	if err != nil {
+		return fmt.Errorf("security: task origin id: %w", err)
+	}
+	content, err := wire.TaskContent(t)
+	if err != nil {
+		return err
+	}
+	return Verify(pid, wire.Digest(SchemeTaskOrigin, content), t.GetOriginSignature(), lookup)
+}
+
+// SignRebindOld signs a key-rebind statement with the RETIRING identity. The
+// caller must have s.id == the old identity.
+func (s *Signer) SignRebindOld(k *pb.KeyRebind) error {
+	return s.signRebind(k)
+}
+
+// SignRebindNew signs a key-rebind statement with the INCOMING identity.
+func (s *Signer) SignRebindNew(k *pb.KeyRebind) error {
+	return s.signRebind(k)
+}
+
+func (s *Signer) signRebind(k *pb.KeyRebind) error {
+	body, err := wire.RebindBody(k)
+	if err != nil {
+		return err
+	}
+	d := wire.Digest(SchemeRebind, body)
+	sig, err := s.id.Sign(d)
+	if err != nil {
+		return err
+	}
+	if k.GetOldPeerId() == s.id.PeerID().String() {
+		k.OldSignature = sig
+	} else if k.GetNewPeerId() == s.id.PeerID().String() {
+		k.NewSignature = sig
+	} else {
+		return errors.New("security: rebind signer matches neither identity")
+	}
+	k.SignatureScheme = SchemeRebind
+	return nil
+}
+
+// VerifyRebind checks both halves of a rebind statement: the retiring key's
+// signature and (for a rotation) the incoming key's signature over the same
+// body, plus that new_pubkey really hashes to new_peer_id. A revocation (empty
+// new id) requires only the old key's signature. This is what lets any third
+// node accept a rotation without ever having met the new key.
+func VerifyRebind(k *pb.KeyRebind, lookup KeyLookup) error {
+	if k == nil {
+		return errors.New("security: nil rebind")
+	}
+	if err := checkScheme(k.GetSignatureScheme(), SchemeRebind); err != nil {
+		return err
+	}
+	if len(k.GetOldSignature()) == 0 {
+		return ErrUnsigned
+	}
+	old, err := peer.Decode(k.GetOldPeerId())
+	if err != nil {
+		return fmt.Errorf("security: rebind old id: %w", err)
+	}
+	body, err := wire.RebindBody(k)
+	if err != nil {
+		return err
+	}
+	d := wire.Digest(SchemeRebind, body)
+	if err := Verify(old, d, k.GetOldSignature(), lookup); err != nil {
+		return fmt.Errorf("security: rebind old signature: %w", err)
+	}
+	if k.GetNewPeerId() == "" {
+		return nil // pure revocation
+	}
+	if len(k.GetNewSignature()) == 0 {
+		return ErrUnsigned
+	}
+	newID, err := peer.Decode(k.GetNewPeerId())
+	if err != nil {
+		return fmt.Errorf("security: rebind new id: %w", err)
+	}
+	pk, err := ic.UnmarshalPublicKey(k.GetNewPubkey())
+	if err != nil {
+		return fmt.Errorf("security: rebind new pubkey: %w", err)
+	}
+	derived, err := peer.IDFromPublicKey(pk)
+	if err != nil || derived != newID {
+		return errors.New("security: rebind new_pubkey does not match new_peer_id")
+	}
+	if err := Verify(newID, d, k.GetNewSignature(), lookup); err != nil {
+		return fmt.Errorf("security: rebind new signature: %w", err)
+	}
+	return nil
+}
+
+// SignSkillsSync signs a skill-descriptor disclosure.
+func (s *Signer) SignSkillsSync(r *pb.SkillsSyncResponse) error {
+	body, err := wire.SkillsSyncBody(r)
+	if err != nil {
+		return err
+	}
+	sig, err := s.id.Sign(wire.Digest(SchemeSkillsSync, body))
+	if err != nil {
+		return err
+	}
+	r.Signature = sig
+	r.SignatureScheme = SchemeSkillsSync
+	return nil
+}
+
+// VerifySkillsSync checks a disclosure against the authenticated sender.
+func VerifySkillsSync(r *pb.SkillsSyncResponse, sender peer.ID, lookup KeyLookup) error {
+	if r == nil {
+		return errors.New("security: nil skills sync")
+	}
+	if len(r.GetSignature()) == 0 {
+		return ErrUnsigned
+	}
+	if r.GetPeerId() != sender.String() {
+		return errors.New("security: skills sync peer id does not match stream identity")
+	}
+	body, err := wire.SkillsSyncBody(r)
+	if err != nil {
+		return err
+	}
+	return Verify(sender, wire.Digest(SchemeSkillsSync, body), r.GetSignature(), lookup)
 }
 
 // checkScheme rejects an unexpected scheme, treating an empty one as expected.

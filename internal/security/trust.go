@@ -104,6 +104,11 @@ type Policy struct {
 	allow    map[peer.ID]bool
 	deny     map[peer.ID]bool
 	observed map[peer.ID]Trust
+	// rebinds, when installed, makes identity rotation and revocation part of
+	// the trust decision instead of an operator chore (ТЗ 11.2 п.3–4): a retired
+	// id resolves to its successor's trust, and an id revoked by its own key is
+	// blocked everywhere without editing files on every node.
+	rebinds *RebindStore
 }
 
 // NewPolicy builds a policy from configuration values.
@@ -169,6 +174,21 @@ func (p *Policy) SetListed(pid peer.ID, allow bool) {
 	delete(p.allow, pid)
 }
 
+// SetRebindStore installs the identity-handover ledger. Safe to call once at
+// startup; readers see either the old or the new store, never a torn value.
+func (p *Policy) SetRebindStore(s *RebindStore) {
+	p.mu.Lock()
+	p.rebinds = s
+	p.mu.Unlock()
+}
+
+// RebindStoreRef returns the installed ledger (nil if none).
+func (p *Policy) RebindStoreRef() *RebindStore {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.rebinds
+}
+
 // Observe records an inferred trust level for a peer we have met.
 func (p *Policy) Observe(pid peer.ID, t Trust) {
 	p.mu.Lock()
@@ -179,25 +199,59 @@ func (p *Policy) Observe(pid peer.ID, t Trust) {
 	p.observed[pid] = t
 }
 
-// TrustOf resolves the effective trust of a peer.
+// TrustOf returns the effective trust level for a peer.
+//
+// Rotation is handled by identity class rather than by following a pointer
+// forward: a KeyRebind declares that two identifiers are the same node, so the
+// operator's decision about that node has to apply to every key in the class.
+// A deny or a self-revocation anywhere in the class blocks all of it (a
+// compromised key must not escape its block by minting a successor — the
+// successor is bound to the blocked id by the attacker's own forged-looking
+// statement, which is precisely what makes it traceable), while the most
+// privileged allow/observation in the class is what admits it.
 func (p *Policy) TrustOf(pid peer.ID) Trust {
+	// Resolved before taking p.mu: the ledger has its own lock, and nesting the
+	// two in an unspecified order would be a deadlock waiting for a future
+	// callback from one to the other.
+	cls := []peer.ID{pid}
+	if rb := p.RebindStoreRef(); rb != nil {
+		if members := rb.ClassOf(pid); len(members) > 0 {
+			cls = members
+		}
+		if rb.ClassRevoked(pid) {
+			return TrustBlocked
+		}
+	}
+
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if p.deny[pid] {
-		return TrustBlocked
+	for _, m := range cls {
+		if p.deny[m] {
+			return TrustBlocked
+		}
 	}
-	if p.allow[pid] {
+	listed := false
+	best, haveBest := TrustBlocked, false
+	for _, m := range cls {
+		if p.allow[m] {
+			listed = true
+		}
+		if t, ok := p.observed[m]; ok && (!haveBest || t < best) {
+			best, haveBest = t, true
+		}
+	}
+	if listed {
 		// An allow-list entry is at least "known"; in private mode it is trusted.
 		if p.mode == ModePrivate {
 			return TrustTrusted
 		}
-		if t, ok := p.observed[pid]; ok && t <= TrustKnown {
-			return t
+		if haveBest && best <= TrustKnown {
+			return best
 		}
 		return TrustKnown
 	}
-	if t, ok := p.observed[pid]; ok {
-		return t
+	if haveBest {
+		return best
 	}
 	if p.mode == ModePrivate {
 		return TrustBlocked
@@ -248,10 +302,25 @@ func (p *Policy) AllowDelegationTo(pid peer.ID) bool {
 	}
 }
 
+// explicitlyAllowed reports whether pid, or any identity known to be the same
+// node, is on the operator allow list. In private mode this is the admission
+// decision, so it must be class-aware: otherwise a planned rotation would lock
+// the node out of its own private mesh.
 func (p *Policy) explicitlyAllowed(pid peer.ID) bool {
+	cls := []peer.ID{pid}
+	if rb := p.RebindStoreRef(); rb != nil {
+		if members := rb.ClassOf(pid); len(members) > 0 {
+			cls = members
+		}
+	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.allow[pid]
+	for _, m := range cls {
+		if p.allow[m] {
+			return true
+		}
+	}
+	return false
 }
 
 // Mode returns the current posture.

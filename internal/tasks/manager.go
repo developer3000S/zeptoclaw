@@ -49,6 +49,18 @@ type SkillSource interface {
 	Adopt(ctx context.Context, recs []*pb.PeerRecord) int
 }
 
+// SkillView is the manager's window onto the node's own skill registry, used
+// to answer a peer's descriptor-sync request. It is a narrow interface rather
+// than the concrete *skills.Registry so the tasks package keeps its dependency
+// graph acyclic and tests can stub it.
+type SkillView interface {
+	// Epoch is this node's advertised skill epoch.
+	Epoch() int64
+	// SelectDelta returns the local descriptors the requester does not have
+	// (or has older). full ignores the diff; limit caps the answer (<=0: all).
+	SelectDelta(known []*pb.SkillVersion, full bool, limit int) []*pb.SkillDescriptor
+}
+
 // Manager owns the task lifecycle on this node: acceptance, validation,
 // local execution, delegation, relay of results and the durable journal.
 //
@@ -68,6 +80,8 @@ type Manager struct {
 	adapter picoclaw.Adapter
 	svc     *p2p.Service
 	known   SkillSource
+	sview   SkillView
+	rebind  func(*pb.KeyRebind) (bool, string)
 	mets    *metrics.Collector
 	log     *slog.Logger
 	caps    func() *pb.Capabilities
@@ -93,14 +107,25 @@ type handle struct {
 	// downstream records the peer that accepted the task when we forwarded it;
 	// cancel propagation follows it.
 	downstream peer.ID
-	running    bool
-	cancelFn   context.CancelFunc
+	// expected is the set of peers we actually handed this task to, and the only
+	// ones allowed to answer. A signature proves who authored a result, not that
+	// we asked them: without this binding anyone who learned a task id could
+	// deliver their own "COMPLETED" for work they were never given. It is a set
+	// rather than one peer because forwarding races several candidates in
+	// parallel and every one of them may legitimately answer.
+	expected map[peer.ID]bool
+	running  bool
+	cancelFn context.CancelFunc
 	// parentID marks this task as a subtask injected by this node (ТЗ 6.10.5):
 	// its result folds into the aggregator's fanout instead of a waiter or an
 	// upstream relay.
 	parentID string
 	// fan is set on the parent handle while decomposition is in flight.
 	fan *fanout
+	// model records which model answered a task executed on *this* node
+	// (ТЗ 10.3). It is journal-only: TaskResult carries no model field, so a
+	// remotely produced result leaves it empty rather than guessing.
+	model string
 }
 
 // Options wires the manager to its collaborators.
@@ -115,6 +140,13 @@ type Options struct {
 	Adapter  picoclaw.Adapter
 	Service  *p2p.Service
 	Known    SkillSource
+	// SkillView answers peers' skill-descriptor sync requests (ТЗ 6.3 skill
+	// exchange). Nil disables the endpoint's disclosure side.
+	SkillView SkillView
+	// OnRebind hands a control-plane identity-handover statement to the node
+	// ledger. The node owns the ledger and the trust policy, so the manager only
+	// transports; it returns whether the statement was accepted and why not.
+	OnRebind func(*pb.KeyRebind) (bool, string)
 	Metrics  *metrics.Collector
 	Logger   *slog.Logger
 }
@@ -144,6 +176,8 @@ func NewManager(opts Options) (*Manager, error) {
 		adapter:  opts.Adapter,
 		svc:      opts.Service,
 		known:    opts.Known,
+		sview:    opts.SkillView,
+		rebind:   opts.OnRebind,
 		mets:     opts.Metrics,
 		log:      logger,
 		slots:    make(chan struct{}, slots),
@@ -233,6 +267,9 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (string, error)
 	if err := m.signer.SignTask(env); err != nil {
 		return "", err
 	}
+	if err := m.signAuthorship(env); err != nil {
+		return "", err
+	}
 
 	deadline := time.Now().UTC().Add(m.totalBudget(env))
 	h := &handle{env: env, deadline: deadline, waiter: make(chan *pb.TaskResult, 1)}
@@ -264,6 +301,46 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (string, error)
 	}
 	go m.routeOrigin(env, deadline)
 	return env.GetTaskId(), nil
+}
+
+// signAuthorship stamps the authoring signature over everything this node wrote
+// into the envelope (wire.TaskContent: instruction, skills, constraints, ids).
+// Relays rewrite sender/ttl/route_stack and re-sign the transport copy, so this
+// keeps the author's content verifiable end to end (ТЗ 6.6.4, 11.5). Children
+// of a decomposition are authored by the node that planned them — which in this
+// mesh is always the root origin, so they are signed too.
+func (m *Manager) signAuthorship(env *pb.TaskEnvelope) error {
+	if env.GetOriginPeerId() != m.self.String() {
+		return nil // authored elsewhere: nothing of ours to sign
+	}
+	return m.signer.SignTaskOrigin(env)
+}
+
+// verifyAuthorship checks the authoring claim of a received envelope. A
+// signature that is present but wrong is always fatal: someone on the path
+// edited the author's content, or claimed authorship they do not hold.
+//
+// Subtask envelopes are exempt: their author is the node that decomposed the
+// plan, which is by construction their sender, and that fact is already covered
+// by the sender signature (parent_task_id sits inside the signed body, so a
+// relay cannot mislabel a root task as a child without breaking its own
+// signature). Requiring an origin signature there would reject legitimate
+// children whose root origin is a third node.
+//
+// A missing signature on a root task is a compatibility decision, not a
+// forgery: security.require_origin_signature opts a mesh in once every node
+// speaks this build (ТЗ 6.6.4 otherwise holds via the sender signature).
+func (m *Manager) verifyAuthorship(env *pb.TaskEnvelope) error {
+	if env.GetParentTaskId() != "" {
+		return nil
+	}
+	if len(env.GetOriginSignature()) == 0 {
+		if m.cfg.Security.RequireOriginSignature {
+			return security.ErrUnsigned
+		}
+		return nil
+	}
+	return security.VerifyTaskOrigin(env, m.keyLookup())
 }
 
 // AwaitResult blocks until an originated task resolves, ctx ends, or its
@@ -436,6 +513,10 @@ func (m *Manager) OnTask(ctx context.Context, remote peer.ID, env *pb.TaskEnvelo
 			return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_REJECTED, "signature: "+err.Error()), nil
 		}
 	}
+	if err := m.verifyAuthorship(env); err != nil {
+		m.securityEvent("task_origin_signature", remote, env.GetTaskId(), err.Error())
+		return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_REJECTED, "origin signature: "+err.Error()), nil
+	}
 	if err := CheckRoute(env, m.self.String()); err != nil {
 		return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_REJECTED, err.Error()), nil
 	}
@@ -477,18 +558,26 @@ func (m *Manager) OnTask(ctx context.Context, remote peer.ID, env *pb.TaskEnvelo
 		go m.runLocal(env, deadline)
 		return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_QUEUED, ""), nil
 	}
-	if m.forward(env, deadline) {
+	// A relay node gets one attempt: if this hop cannot place the task, the
+	// upstream is better placed to retry than we are, so no exclusion set is
+	// carried.
+	ok, reason := m.forward(env, deadline, nil)
+	if ok {
 		return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_FORWARDED, ""), nil
 	}
-	// Nothing we can do: refuse and let the upstream retry elsewhere. We
-	// release our dedup claim by finishing the journal entry as rejected.
+	// Nothing we can do: refuse and let the upstream retry elsewhere. The peers'
+	// own reasons ride along, because this node is the only place that can tell
+	// the submitter why the mesh could not run the task. Capped: the text goes
+	// into a signed ack crossing a network.
+	reason = capText("no capability; "+reason, 512)
+	// We release our dedup claim by finishing the journal entry as rejected.
 	m.recordOutcome(&pb.TaskResult{
 		TaskId: env.GetTaskId(), WorkerPeerId: m.self.String(), SenderPeerId: m.self.String(),
-		Status: pb.TaskStatus_TASK_STATUS_REJECTED, ErrorMessage: "no capability, no eligible neighbours",
+		Status: pb.TaskStatus_TASK_STATUS_REJECTED, ErrorMessage: reason,
 		FinishedAt: time.Now().UTC().Unix(),
 	})
 	m.resolve(env.GetTaskId())
-	return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_REJECTED, "no capability and no eligible neighbours"), nil
+	return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_REJECTED, reason), nil
 }
 
 // OnResult handles an inbound TaskResult: absorbed at the origin, relayed at
@@ -500,7 +589,29 @@ func (m *Manager) OnResult(ctx context.Context, remote peer.ID, res *pb.TaskResu
 	}
 	m.mu.Lock()
 	h := m.inflight[res.GetTaskId()]
+	// The membership test belongs inside the lock: forward adds to this map while
+	// other attempts are in flight, and reading it after unlocking would race a
+	// concurrent write (fatal "concurrent map read and map write"). The audit
+	// write is deliberately left for after the unlock.
+	var asked int
+	undelegated := false
+	if h != nil {
+		asked = len(h.expected)
+		undelegated = !h.expected[remote]
+	}
 	m.mu.Unlock()
+
+	// A valid signature proves who authored the result, not that we asked them.
+	// Without this binding any peer that learned a task id could hand the origin
+	// its own "COMPLETED" for work it was never given — including a peer we
+	// rejected as unfit, or a third party replaying an id scraped from logs. So
+	// only the peers this node itself delegated to may answer.
+	if undelegated {
+		m.securityEvent("result_unexpected_sender", remote, res.GetTaskId(),
+			fmt.Sprintf("task was delegated to %d peer(s), this one is not among them", asked))
+		return &pb.ResultAck{TaskId: res.GetTaskId(), Accepted: false,
+			Reason: "task was not delegated to this peer"}, nil
+	}
 
 	switch {
 	case h == nil:
@@ -626,12 +737,102 @@ func (m *Manager) OnRPC(ctx context.Context, remote peer.ID, req *pb.RpcRequest)
 		return &pb.RpcResponse{Kind: &pb.RpcResponse_SkillLookup{
 			SkillLookup: m.onSkillLookup(ctx, remote, k.SkillLookup),
 		}}, nil
+	case *pb.RpcRequest_SkillsSync:
+		return &pb.RpcResponse{Kind: &pb.RpcResponse_SkillsSync{
+			SkillsSync: m.onSkillsSync(remote, k.SkillsSync),
+		}}, nil
+	case *pb.RpcRequest_Rebind:
+		return &pb.RpcResponse{Kind: &pb.RpcResponse_Rebind{
+			Rebind: m.onRebind(k.Rebind),
+		}}, nil
 	default:
 		return nil, fmt.Errorf("tasks: unsupported rpc kind %T", k)
 	}
 }
 
 // ---------- search relay ----------
+
+// onSkillsSync answers a peer's request for skill descriptors this node can
+// disclose. Skill documentation is operator metadata about this node, so
+// disclosure is policy-gated (capabilities.skill_exchange.disclose_to) rather
+// than automatic — and the answer is signed by this node's key so the peer can
+// be sure the descriptors were not edited in transit.
+func (m *Manager) onSkillsSync(remote peer.ID, req *pb.SkillsSyncRequest) *pb.SkillsSyncResponse {
+	ex := m.cfg.Capabilities.SkillExchange
+	// An empty answer is still a claim by this node ("nothing newer" versus "not
+	// telling you"), and the requester verifies every answer — so refusals are
+	// signed too. An unsigned refusal reads as a protocol violation and audits a
+	// security event on the peer that was merely being told "no".
+	empty := func(reason string) *pb.SkillsSyncResponse {
+		if m.mets != nil {
+			m.mets.SkillsRefused.Inc()
+		}
+		resp := &pb.SkillsSyncResponse{PeerId: m.self.String(), SkillsVersion: m.skillsEpoch(), Reason: reason}
+		if err := m.signer.SignSkillsSync(resp); err != nil {
+			m.log.Warn("skills_sync_sign_failed", "peer", remote.String(), "err", err.Error())
+		}
+		return resp
+	}
+	if !ex.Enabled || m.sview == nil {
+		return empty("exchange_disabled")
+	}
+	if want, ok := disclosureFloor(ex.DiscloseTo); ok && m.policy != nil {
+		if !m.policy.TrustOf(remote).AtLeast(want) {
+			return empty("disclosure_policy")
+		}
+	}
+	docs := m.sview.SelectDelta(req.GetKnown(), req.GetFull(), ex.MaxDescriptors)
+	resp := &pb.SkillsSyncResponse{PeerId: m.self.String(), SkillsVersion: m.skillsEpoch(), Skills: docs}
+	if err := m.signer.SignSkillsSync(resp); err != nil {
+		m.log.Warn("skills_sync_sign_failed", "peer", remote.String(), "err", err.Error())
+		return empty("signing_failed")
+	}
+	return resp
+}
+
+// onRebind receives an identity-handover statement over the control RPC.
+//
+// Verification happens here rather than relying on the sender: the statement is
+// self-authenticating (both named keys signed it), so the manager can judge it
+// without trusting who relayed it. This path exists because gossip is optional —
+// a mesh running with discovery.gossip.enabled=false still has to learn that an
+// identity was rotated or retired (ТЗ 11.2).
+func (m *Manager) onRebind(req *pb.RebindRequest) *pb.RebindResponse {
+	k := req.GetRebind()
+	if k == nil {
+		return &pb.RebindResponse{Accepted: false, Reason: "empty statement"}
+	}
+	if err := security.VerifyRebind(k, m.keyLookup()); err != nil {
+		m.securityEvent("rebind_bad_signature", m.self, k.GetOldPeerId(), err.Error())
+		return &pb.RebindResponse{Accepted: false, Reason: "signature: " + err.Error()}
+	}
+	if m.rebind == nil {
+		return &pb.RebindResponse{Accepted: false, Reason: "not accepted here"}
+	}
+	ok, why := m.rebind(k)
+	return &pb.RebindResponse{Accepted: ok, Reason: why}
+}
+
+// skillsEpoch reports the advertised skill epoch, from the view when present.
+func (m *Manager) skillsEpoch() int64 {
+	if m.sview == nil {
+		return 0
+	}
+	return m.sview.Epoch()
+}
+
+// disclosureFloor maps the config knob onto a trust floor. ok=false means
+// "disclose to anyone authenticated".
+func disclosureFloor(s string) (security.Trust, bool) {
+	switch s {
+	case "trusted":
+		return security.TrustTrusted, true
+	case "known":
+		return security.TrustKnown, true
+	default:
+		return 0, false
+	}
+}
 
 // onSkillLookup answers a skill lookup, honouring a full-refresh request.
 //
@@ -871,7 +1072,9 @@ func (m *Manager) relayTargets(want []string, fanout int, visited map[peer.ID]bo
 // delegation candidate, so ask the mesh — instructing each responder to reload
 // its full skill view and run its own Select — then adopt whatever is returned.
 // It returns true when the widened view yielded at least one routable peer.
-func (m *Manager) searchRelay(ctx context.Context, want []string, deadline time.Time) bool {
+// taskID names the task the search is for, so a widening can be tied back to the
+// journal record that provoked it.
+func (m *Manager) searchRelay(ctx context.Context, want []string, deadline time.Time, taskID string) bool {
 	sr := m.cfg.Tasks.Forwarding.SearchRelay
 	if !sr.Enabled || m.known == nil || len(want) == 0 {
 		return false
@@ -902,7 +1105,8 @@ func (m *Manager) searchRelay(ctx context.Context, want []string, deadline time.
 		m.mets.SearchRelayHits.Inc()
 	}
 	if ok {
-		m.log.Info("search_relay_widened_view", "skills", strings.Join(want, ","),
+		m.log.Info("search_relay_widened_view", "task_id", taskID,
+			"skills", strings.Join(want, ","),
 			"refresh_found", found, "adopted", adopted)
 	}
 	return ok
@@ -921,22 +1125,37 @@ func (m *Manager) routeOrigin(env *pb.TaskEnvelope, deadline time.Time) {
 	if retries < 0 {
 		retries = 0
 	}
+	// Peers that refused, were unreachable, or already hold this task are never
+	// offered it again. Without this the retry loop re-sends the task to the same
+	// node that just declined it: Select is deterministic, and RecordFailure moves
+	// the success-rate weight (0.05) far too little to change the order — so
+	// "retry" meant "ask the same peer again", and a second, capable peer stayed
+	// unused (ТЗ 6.12.1).
+	excluded := make(map[peer.ID]bool)
+	// why is the last refusal any candidate gave. The generic "no eligible peers
+	// reachable" is what an operator sees today, and it sends them hunting for a
+	// connectivity fault when the real reason is usually a constraint the peers
+	// will not honour. Keeping the peer's own words makes the result actionable.
+	why := "no eligible peers reachable"
 	for attempt := 0; attempt <= retries; attempt++ {
 		if time.Now().UTC().After(deadline) {
 			break
 		}
-		if m.forward(env, deadline) {
+		ok, reason := m.forward(env, deadline, excluded)
+		if ok {
 			return
+		}
+		if reason != "" {
+			why = "no eligible peers reachable: " + reason
 		}
 		if attempt < retries {
 			select {
 			case <-time.After(m.cfg.Tasks.Forwarding.RetryInterval.D()):
 			case <-time.After(time.Until(deadline)):
-				break
 			}
 		}
 	}
-	res := m.errorResult(env, "no eligible peers reachable", pb.TaskStatus_TASK_STATUS_FAILED)
+	res := m.errorResult(env, why, pb.TaskStatus_TASK_STATUS_FAILED)
 	if err := m.signer.SignResult(res); err == nil {
 		m.absorbResult(res)
 	}
@@ -952,43 +1171,65 @@ func (m *Manager) routeOrigin(env *pb.TaskEnvelope, deadline time.Time) {
 }
 
 // forward delegates the envelope to the top-scoring neighbours, up to
-// max_parallel_candidates concurrently. It returns true when a peer accepted
-// the task; the first acceptance wins and is recorded on the handle.
-func (m *Manager) forward(env *pb.TaskEnvelope, deadline time.Time) bool {
+// max_parallel_candidates concurrently. It reports whether a peer accepted the
+// task; the first acceptance wins and is recorded on the handle. The second
+// return value explains a refusal — "why did my task not run" is the single
+// most common question an operator asks, and without the peers' own words the
+// only answer available is a generic "no eligible peers reachable".
+//
+// exclude, when non-nil, is both read and written: it keeps the candidates this
+// call asked and could not hand the task to out of the next attempt's selection
+// (ТЗ 6.12.1). Callers that make a single attempt pass nil.
+func (m *Manager) forward(env *pb.TaskEnvelope, deadline time.Time, exclude map[peer.ID]bool) (bool, string) {
 	if env.GetTtl() <= 1 {
-		return false // one more hop would spend the ttl
+		return false, "ttl exhausted: one more hop would spend it"
 	}
 	// The origin's right to keep the task local is binding (ТЗ 6.4.3): a node
 	// that cannot execute a no-delegation task must refuse it, not forward it.
 	if !env.GetConstraints().GetAllowDelegation() {
-		return false
+		return false, "delegation not allowed by task constraints"
 	}
 	fanout := m.cfg.Tasks.Forwarding.MaxFanout
-	cands := m.table.Select(env.GetRequiredSkills(), m.policy, m.self, fanout, nil)
+	cands := m.table.Select(env.GetRequiredSkills(), m.policy, m.self, fanout, exclude)
 	if len(cands) == 0 {
 		// The local neighbour view is not enough: widen it with a bounded
 		// skill-lookup relay before giving up (ТЗ 6.5.3, multi-hop delegation).
 		relayCtx, cancel := context.WithDeadline(context.Background(), deadline)
-		widened := m.searchRelay(relayCtx, env.GetRequiredSkills(), deadline)
+		widened := m.searchRelay(relayCtx, env.GetRequiredSkills(), deadline, env.GetTaskId())
 		cancel()
 		if !widened {
 			if m.mets != nil {
 				m.mets.Forward("no_candidates")
 			}
-			return false
+			return false, m.noCandidateReason(env)
 		}
-		cands = m.table.Select(env.GetRequiredSkills(), m.policy, m.self, fanout, nil)
+		cands = m.table.Select(env.GetRequiredSkills(), m.policy, m.self, fanout, exclude)
 		if len(cands) == 0 {
 			if m.mets != nil {
 				m.mets.Forward("no_candidates")
 			}
-			return false
+			return false, m.noCandidateReason(env)
 		}
 	}
 	parallel := m.cfg.Tasks.Forwarding.MaxParallelCandidates
 	if parallel > len(cands) {
 		parallel = len(cands)
 	}
+	// Record who is about to be asked before asking them: a fast candidate can
+	// answer while the loop is still dialing the others, and OnResult must not
+	// reject its answer for arriving too early. Repeated forwards (a retried
+	// subtask) add to the set rather than replace it, so a late answer from the
+	// first attempt stays acceptable.
+	m.mu.Lock()
+	if h := m.inflight[env.GetTaskId()]; h != nil {
+		if h.expected == nil {
+			h.expected = make(map[peer.ID]bool, parallel)
+		}
+		for _, c := range cands[:parallel] {
+			h.expected[c.Neighbor.PeerID] = true
+		}
+	}
+	m.mu.Unlock()
 
 	type outcome struct {
 		to  peer.ID
@@ -996,6 +1237,11 @@ func (m *Manager) forward(env *pb.TaskEnvelope, deadline time.Time) bool {
 	}
 	ch := make(chan outcome, parallel)
 	var wg sync.WaitGroup
+	// Rejection reasons from the candidates that answered "no". Without them a
+	// delegation failure reads as "no eligible peers reachable", which sends the
+	// operator looking for a connectivity problem when the real answer is usually
+	// a constraint the peers will not honour.
+	var rejects sync.Map // peer.ID -> reason
 	for _, c := range cands[:parallel] {
 		cand := c
 		wg.Add(1)
@@ -1006,6 +1252,8 @@ func (m *Manager) forward(env *pb.TaskEnvelope, deadline time.Time) bool {
 			hop.SenderPeerId = m.self.String()
 			AppendRoute(hop, m.self.String())
 			if err := m.signer.SignTask(hop); err != nil {
+				m.log.Warn("task_sign_for_hop_failed", "task_id", env.GetTaskId(),
+					"peer", cand.Neighbor.PeerID.String(), "err", err.Error())
 				return
 			}
 			ai := peer.AddrInfo{ID: cand.Neighbor.PeerID}
@@ -1020,6 +1268,7 @@ func (m *Manager) forward(env *pb.TaskEnvelope, deadline time.Time) bool {
 			if err != nil {
 				m.table.RecordFailure(cand.Neighbor.PeerID)
 				m.countForward("error")
+				rejects.Store(cand.Neighbor.PeerID, "transport: "+err.Error())
 				return
 			}
 			switch ack.GetStatus() {
@@ -1030,6 +1279,11 @@ func (m *Manager) forward(env *pb.TaskEnvelope, deadline time.Time) bool {
 			default:
 				m.countForward("rejected")
 				m.table.RecordFailure(cand.Neighbor.PeerID)
+				reason := ack.GetReason()
+				if reason == "" {
+					reason = ack.GetStatus().String()
+				}
+				rejects.Store(cand.Neighbor.PeerID, reason)
 			}
 		}()
 	}
@@ -1038,7 +1292,17 @@ func (m *Manager) forward(env *pb.TaskEnvelope, deadline time.Time) bool {
 	first, ok := <-ch
 	if !ok || first.ack == nil {
 		m.countForward("no_accept")
-		return false
+		// Everyone we just asked declined, was unreachable, or already holds this
+		// task. `channel closed` means all dispatch goroutines are done, so no
+		// other writer can be touching exclude here. Retrying the same set would
+		// only burn the attempt budget, so they leave the candidate pool (ТЗ
+		// 6.12.1); the ones we never reached stay in it.
+		if exclude != nil {
+			for _, c := range cands[:parallel] {
+				exclude[c.Neighbor.PeerID] = true
+			}
+		}
+		return false, m.rejectSummary(env, &rejects)
 	}
 	m.mu.Lock()
 	if h := m.inflight[env.GetTaskId()]; h != nil {
@@ -1056,7 +1320,40 @@ func (m *Manager) forward(env *pb.TaskEnvelope, deadline time.Time) bool {
 		m.mets.TasksDelegated.Inc()
 	}
 	m.log.Info("task_delegated", "task_id", env.GetTaskId(), "to", first.to.String(), "ack", first.ack.GetStatus().String())
-	return true
+	return true, ""
+}
+
+// noCandidateReason explains an empty candidate set. The skills are named
+// because that is the answer 90% of the time: nobody in the local view
+// advertises what the task asked for.
+func (m *Manager) noCandidateReason(env *pb.TaskEnvelope) string {
+	want := strings.Join(env.GetRequiredSkills(), ",")
+	if want == "" {
+		want = "(none requested)"
+	}
+	return fmt.Sprintf("no neighbour advertises skills [%s]", want)
+}
+
+// rejectSummary logs and renders the candidates' refusal reasons, so the
+// operator sees the peers' own words in the task result instead of a generic
+// "no eligible peers reachable".
+func (m *Manager) rejectSummary(env *pb.TaskEnvelope, rejects *sync.Map) string {
+	var reasons []string
+	rejects.Range(func(k, v any) bool {
+		pid, _ := k.(peer.ID)
+		reasons = append(reasons, pid.String()+": "+fmt.Sprint(v))
+		return true
+	})
+	if len(reasons) == 0 {
+		m.log.Info("delegation_no_answer", "task_id", env.GetTaskId(),
+			"skills", strings.Join(env.GetRequiredSkills(), ","))
+		return "candidates did not answer"
+	}
+	sort.Strings(reasons)
+	m.log.Warn("delegation_rejected", "task_id", env.GetTaskId(),
+		"skills", strings.Join(env.GetRequiredSkills(), ","),
+		"reasons", strings.Join(reasons, "; "))
+	return strings.Join(reasons, "; ")
 }
 
 // canExecute reports capability under operator policy (not load): queueing is
@@ -1157,6 +1454,11 @@ func (m *Manager) runLocal(env *pb.TaskEnvelope, deadline time.Time) {
 	})
 
 	res := m.baseResult(env, pb.TaskStatus_TASK_STATUS_COMPLETED)
+	if h := m.handleOf(env.GetTaskId()); h != nil {
+		m.mu.Lock()
+		h.model = m.executedModel(resp)
+		m.mu.Unlock()
+	}
 	switch {
 	case execErr != nil:
 		if m.mets != nil {
@@ -1238,9 +1540,25 @@ func (m *Manager) absorbResult(res *pb.TaskResult) {
 	m.recordOutcome(res)
 }
 
+// executedModel names the model behind a local execution for the journal
+// (ТЗ 10.3). The agent's own disclosure wins: a configured default is only what
+// the node asked for, and the answer is evidence of what actually replied.
+func (m *Manager) executedModel(resp *picoclaw.Response) string {
+	if resp != nil && strings.TrimSpace(resp.Model) != "" {
+		return strings.TrimSpace(resp.Model)
+	}
+	return picoclaw.ModelOf(m.adapter)
+}
+
 // recordOutcome journals a terminal result once per node.
 func (m *Manager) recordOutcome(res *pb.TaskResult) {
-	_ = m.store.PutResult(recordFromResult(res))
+	rr := recordFromResult(res)
+	if h := m.handleOf(res.GetTaskId()); h != nil {
+		m.mu.Lock()
+		rr.Model = h.model
+		m.mu.Unlock()
+	}
+	_ = m.store.PutResult(rr)
 	rec, err := m.store.GetTask(res.GetTaskId())
 	if err != nil {
 		return
@@ -1514,7 +1832,7 @@ func (m *Manager) ack(taskID string, st pb.AckStatus, reason string) *pb.TaskAck
 		Timestamp:  time.Now().UTC().Unix(),
 	}
 	if err := m.signer.SignAck(a); err != nil {
-		m.log.Error("ack_sign_failed", "err", err.Error())
+		m.log.Error("ack_sign_failed", "task_id", taskID, "err", err.Error())
 	}
 	if st == pb.AckStatus_ACK_STATUS_REJECTED && m.mets != nil {
 		m.mets.TasksRejected.Inc()
@@ -1670,6 +1988,7 @@ func recordFromResult(res *pb.TaskResult) *storage.ResultRecord {
 		WorkerSignature: append([]byte(nil), res.GetWorkerSignature()...),
 		ResultDigest:    fmt.Sprintf("%x", res.GetResultDigest()),
 		Aggregated:      res.GetAggregated(),
+		ErrorClass:      errorClassName(res.GetErrorClass()),
 	}
 	for _, a := range res.GetArtifacts() {
 		rec.Artifacts = append(rec.Artifacts, storage.ArtifactInfo{Name: a.GetName(), Hash: a.GetHash(), Size: a.GetSize()})
@@ -1693,6 +2012,14 @@ func resultFromRecord(rec *storage.ResultRecord) *pb.TaskResult {
 	}
 	if d, err := hex.DecodeString(rec.ResultDigest); err == nil && rec.ResultDigest != "" {
 		res.ResultDigest = d
+	}
+	// The class is read back as stored; a journal written before the field
+	// existed (or a hand-edited record) falls back to deriving it, the same way
+	// the aggregator does, so a retryable failure never degrades to UNSPECIFIED.
+	res.ErrorClass = errorClassByName(rec.ErrorClass)
+	if res.ErrorClass == pb.TaskErrorClass_TASK_ERROR_CLASS_UNSPECIFIED &&
+		res.GetErrorMessage() != "" {
+		res.ErrorClass = ErrorClass(res.GetStatus(), res.GetErrorMessage())
 	}
 	for _, a := range rec.Artifacts {
 		res.Artifacts = append(res.Artifacts, &pb.ArtifactRef{Name: a.Name, Hash: a.Hash, Size: a.Size})

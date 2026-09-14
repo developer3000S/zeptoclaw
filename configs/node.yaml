@@ -96,14 +96,48 @@ capabilities:
   allow_network_tools: true
   max_parallel_tasks: 4
   disabled_skills: []
+  # Документация объявленных навыков (capabilities.skill_docs): что узел
+  # рассказывает о них соседям. Права на исполнение она не даёт — право даёт
+  # только список skills выше, поэтому ни API, ни импорт от соседа не могут
+  # расширить полномочия узла.
+  skill_docs: []
+  #   - name: ocr
+  #     version: 2
+  #     description: "Распознавание сканов, русский/английский."
+  #     models: [pico-vision]
+  #     attributes: {gpu: "true", owner: team-a}
+  # Дельта-обмен этими описаниями (RPC skills_sync): узел сравнивает свой
+  # epoch (capabilities.skills_version) с соседом и подтягивает только более
+  # новые дескрипторы. disclose_to: trusted | known (по умолчанию) | any.
+  skill_exchange:
+    enabled: true
+    disclose_to: known
+    interval: 30s
+    max_descriptors: 64   # потолок одного ответа
+    import_limit: 512     # потолок выученных описаний одного соседа
+    persist: true         # <data_dir>/skills.json — часы версий переживают рестарт
 
 picoclaw:
   # stub | binary | http  — подробнее в docs/PICOCLAW-INTEGRATION.md
   mode: ${ZETOMESH_PICO_MODE:-stub}
   binary: ${ZETOMESH_PICO_BIN:-picoclaw}
   config: ${ZETOMESH_PICO_CONFIG:-}
+  # Корень рабочих каталогов задач (ТЗ 10.3 «рабочая директория»): под ним
+  # создаётся отдельный каталог на задачу, и именно он передаётся агенту через
+  # PICOCLAW_AGENTS_DEFAULTS_WORKSPACE. Пусто → <data_dir>/picoclaw/workspaces.
+  # Квота на объём задаётся не здесь, а tasks.max_workspace_bytes.
+  workspace_root: ${ZETOMESH_PICO_WORKSPACE:-}
   timeout_seconds: 600
   max_concurrent_agents: 4
+  # ТЗ 10.3 «модельные параметры»: модель по умолчанию для локального агента.
+  # Это свойство узла, а не задачи — в протоколе mesh выбора модели нет, поэтому
+  # сосед не может попросить другую модель. Пусто → решает конфигурация PicoClaw.
+  # Действует только в режиме binary (там оно становится --model): у Pico
+  # Protocol (http) поля выбора модели в запросе нет, в ответе читается только
+  # model_name. Прочие модельные параметры (temperature, max_tokens) задаются не
+  # здесь: `picoclaw agent` принимает только -d/-m/-s/--model, они живут в env
+  # ниже (PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE, …) или в файле picoclaw.config.
+  model: ${ZETOMESH_PICO_MODEL:-}
   extra_args: []
   prompt_template: ""
   env: {}
@@ -120,6 +154,12 @@ picoclaw:
 security:
   trust_mode: ${ZETOMESH_TRUST_MODE:-limited}
   require_task_signature: true
+  # Транспортная подпись доказывает, кто отправил конверт; авторская
+  # (origin_signature) доказывает, что содержимое не переписал промежуточный узел.
+  # Отсутствующая авторская подпись отсекается только этим флагом — узлы,
+  # поднятые до появления поля, остаются приемлемыми, если его выключить;
+  # присутствующая, но неверная отбрасывается всегда (ТЗ 6.6.4, 11.5).
+  require_origin_signature: true
   drop_invalid_signatures: true
   allowed_peers_file: ${ZETOMESH_ALLOWED_PEERS:-}
   blocked_peers_file: ${ZETOMESH_BLOCKED_PEERS:-}

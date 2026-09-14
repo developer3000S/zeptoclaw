@@ -110,6 +110,23 @@ capabilities:
   allow_network_tools: false
   max_parallel_tasks: 4
   disabled_skills: []
+  # Документация объявленных навыков: что узел рассказывает о них соседям.
+  # Права на исполнение она не даёт — право даёт только skills выше.
+  skill_docs:
+    - name: general
+      version: 1
+      description: "Универсальные задачи агента; внешних интеграций нет."
+      models: []
+      attributes: {zone: wan}
+  # Обмен описаниями (дельта-синхронизация skills_sync). В публичной сети
+  # раскрытие держим консервативным: незнакомые узлы видят только имена.
+  skill_exchange:
+    enabled: true
+    disclose_to: trusted    # trusted | known | any
+    interval: 30s
+    max_descriptors: 64
+    import_limit: 512
+    persist: true
 
 picoclaw:
   mode: ${ZETOMESH_PICO_MODE:-stub}

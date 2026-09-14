@@ -125,6 +125,9 @@ func (m *Manager) injectChild(f *fanout, i int) error {
 	if err := m.signer.SignTask(child); err != nil {
 		return err
 	}
+	if err := m.signAuthorship(child); err != nil {
+		return err
+	}
 	cdeadline := f.deadline
 	if d := time.Now().UTC().Add(m.totalBudget(child)); d.Before(cdeadline) {
 		cdeadline = d
@@ -178,7 +181,8 @@ func (m *Manager) foldIfChild(h *handle, res *pb.TaskResult) bool {
 	if ph == nil || ph.fan == nil {
 		// The parent resolved first (deadline or cancel): nothing waits for
 		// this child anymore, its outcome stays in the journal.
-		m.log.Debug("subtask_orphaned", "parent", h.parentID, "child", res.GetTaskId())
+		m.log.Debug("subtask_orphaned", "task_id", res.GetTaskId(),
+			"parent_task_id", h.parentID)
 		return true
 	}
 	m.foldChild(ph.fan, res.GetTaskId(), res)
@@ -216,10 +220,11 @@ func (m *Manager) foldChild(f *fanout, childID string, res *pb.TaskResult) {
 		f.attempts[idx]++
 		attempt := f.attempts[idx]
 		f.mu.Unlock()
-		m.log.Info("subtask_retry", "parent", f.parentID, "child", childID,
+		m.log.Info("subtask_retry", "task_id", childID, "parent_task_id", f.parentID,
 			"attempt", attempt, "class", res.GetErrorClass().String())
 		if err := m.injectChild(f, idx); err != nil {
-			m.log.Warn("subtask_retry_failed", "parent", f.parentID, "err", err.Error())
+			m.log.Warn("subtask_retry_failed", "task_id", childID,
+				"parent_task_id", f.parentID, "err", err.Error())
 			// Could not re-inject: settle this slot with the original failure.
 			f.mu.Lock()
 			m.settleChildLocked(f, idx, res)
@@ -266,7 +271,7 @@ func (m *Manager) finishFanout(f *fanout) {
 	f.mu.Unlock()
 
 	if len(parts) < planned {
-		m.log.Warn("subtask_missing", "parent", f.parentID, "settled", len(parts), "planned", planned)
+		m.log.Warn("subtask_missing", "task_id", f.parentID, "settled", len(parts), "planned", planned)
 	}
 	agg := m.aggregateResult(f.env, parts)
 	if ph := m.handleOf(f.parentID); ph != nil {

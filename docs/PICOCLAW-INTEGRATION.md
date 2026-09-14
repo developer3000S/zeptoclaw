@@ -84,16 +84,32 @@ type Request struct {
 ### Что исполняется
 
 ```
-picoclaw agent -m <prompt> [-s <session_key>] [--model <model>] <extra_args...>
+picoclaw agent -m <prompt> [-s <session_key>] [--model <picoclaw.model>] <picoclaw.extra_args...>
 ```
 
 - `<prompt>` — `renderPrompt`: при пустом `picoclaw.prompt_template` —
   инструкция как есть; шаблон без `%s` — конкатенация шаблона и инструкции;
   иначе `fmt.Sprintf(template, instruction)`.
 - `-s` добавляется при непустом `Request.SessionKey`, `--model` — при
-  непустом `Request.Model`.
-- `picoclaw.extra_args` дописываются хвостом.
+  непустом `picoclaw.model` (свойство узла, ТЗ 10.3). Ровно один раз:
+  `picoclaw agent` принимает одно значение `--model`.
+- `picoclaw.extra_args` дописываются последними.
 - Рабочий каталог процесса — `Request.Workspace`.
+
+**Других аргументов адаптер не выдумывает.** `picoclaw agent` объявляет ровно
+четыре флага — `-d/--debug`, `-m/--message`, `-s/--session`, `--model` — и
+`Args: cobra.NoArgs`; неизвестный флаг означает ошибку разбора, то есть сорванную
+задачу. Модельные параметры (temperature, `max_tokens`, контекстное окно и
+прочее) в PicoClaw задаются **не** аргументами, а переменными окружения
+`PICOCLAW_AGENTS_DEFAULTS_*` (`…_TEMPERATURE`, `…_MAX_TOKENS`, …) или полем
+конфигурации — и для того в этом файле уже есть `picoclaw.env` и
+`picoclaw.config`. Отдельного ключа «model_args» в mesh сознательно нет: он был
+бы вторым, худшим способом сделать то, что делает `env`.
+
+`Request.Model` — единственная точка переопределения модели **внутри процесса**
+(из кода, не из mesh): непустое значение подавляет `picoclaw.model`, потому что
+два `--model` в одном вызове не определены. По протоколу mesh модель не
+передаётся, поэтому издалека её задать нельзя.
 
 `picoclaw.binary` — имя (тогда ищется в PATH в момент запуска) либо путь
 (тогда проверяется на существование при построении адаптера).
@@ -228,7 +244,7 @@ picoclaw agent -m <prompt> [-s <session_key>] [--model <model>] <extra_args...>
   который затем через `exec` заменяется агентом — лишнего процесса не остаётся).
   Ограничение best-effort: если жёсткий лимит оператора ниже запрошенного,
   `ulimit` не применяется и задача идёт без него (`|| true` в обёртке). На
-  не-unix (`limits_other.go`) лимита памяти нет.
+  платформах вне unix (`limits_other.go`) лимита памяти нет.
 - `prepareChild` даёт процессу собственную группу (`Setpgid`) и
   `Pdeathsig=SIGKILL`, а `cmd.Cancel = killChildGroup` убивает всю группу при
   отмене/таймауте — «внучатые» процессы агента не осиротеют.
@@ -245,11 +261,16 @@ picoclaw agent -m <prompt> [-s <session_key>] [--model <model>] <extra_args...>
   остаётся политикой узла (не брать задачу), а не техническим ограничением уже
   запущенного агента; для жёсткой границы нужен контейнер/песочница. См.
   [STATUS.md](STATUS.md#2-реализовано-частично) (ТЗ 6.8.4, 11.4).
-- Адаптеры не управляют моделью PicoClaw, если `Request.Model` пуст (тогда
-  решает конфигурация PicoClaw); `capabilities.models` mesh'ом в `Request`
-  не прокидывается.
+- Модель: `picoclaw.model` (`--model`) передаётся только в режиме `binary`. В
+  режиме `http` у Pico Protocol нет проверенного поля запроса для выбора модели,
+  и адаптер его не выдумывает: узел лишь читает `model_name` из ответа
+  (`Response.Model` → локальный журнал) и при старте пишет
+  `picoclaw_model_not_applicable` (warn), если `picoclaw.model` всё же задан,
+  чтобы оператор не считал, что настройка действует во всех режимах.
 - Таймаут (`context.WithTimeout` + завершение по нему) — единственное
   ограничение по времени, наследуемое от `tasks.max_timeout_seconds`.
+- `capabilities.models` — только декларация для админ-API; mesh'ом в `Request`
+  не прокидывается и для маршрутизации не используется.
 
 ---
 
@@ -270,8 +291,12 @@ picoclaw:
   config: /etc/picoclaw/mesh.json     # → PICOCLAW_CONFIG
   timeout_seconds: 600
   max_concurrent_agents: 4
+  model: openrouter/anthropic/claude-sonnet-4   # → --model (ТЗ 10.3)
   env:
     OPENROUTER_API_KEY: ""            # лучше задавать окружением демона, не файлом
+    # Модельные параметры — окружением PicoClaw, не аргументами:
+    PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE: "0.2"
+    PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS: "4096"
 ```
 
 ```yaml

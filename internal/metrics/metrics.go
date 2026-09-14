@@ -24,6 +24,11 @@ type Collector struct {
 	SearchRelays    prometheus.Counter
 	SearchRelayHits prometheus.Counter
 	FullRefreshes   prometheus.Counter
+	SkillsSynced    prometheus.Counter
+	SkillsImported  prometheus.Counter
+	SkillsRefused   prometheus.Counter
+	SkillsVersion   prometheus.Gauge
+	RebindsApplied  prometheus.Counter
 	TaskDuration    prometheus.Histogram
 	TaskRouteHops   prometheus.Histogram
 	DiscoveryMDNS   prometheus.Counter
@@ -92,6 +97,22 @@ func New(namespace string) *Collector {
 	c.FullRefreshes = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: namespace, Name: "skill_full_refreshes_total", Help: "Full skill-view reloads performed or requested.",
 	})
+	c.SkillsSynced = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "skills_synced_total", Help: "Skill-descriptor syncs performed by this node.",
+	})
+	c.SkillsImported = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "skills_descriptors_imported_total", Help: "Peer skill descriptors accepted.",
+	})
+	c.SkillsRefused = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "skills_sync_refused_total", Help: "Skill sync requests refused by disclosure policy.",
+	})
+	c.SkillsVersion = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, Name: "skills_version", Help: "This node's advertised skill epoch.",
+	})
+	c.RebindsApplied = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "identity_rebinds_applied_total",
+		Help: "Verified identity handover (rotation/revocation) statements applied.",
+	})
 	c.TaskDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Namespace: namespace, Name: "task_duration_seconds", Help: "End-to-end task execution time.",
 		Buckets: []float64{0.05, 0.25, 1, 5, 15, 30, 60, 120, 300, 600, 1800},
@@ -150,6 +171,7 @@ func New(namespace string) *Collector {
 		c.DHTHits, c.GossipPublished, c.GossipReceived, c.BytesSent, c.BytesReceived,
 		c.PicoClawRunning, c.PicoClawErrors, c.SecurityEvents, c.ForwardAttempts,
 		c.NeighborScore, c.BuildInfo, c.SearchRelays, c.SearchRelayHits, c.FullRefreshes,
+		c.SkillsSynced, c.SkillsImported, c.SkillsRefused, c.SkillsVersion, c.RebindsApplied,
 	} {
 		reg.MustRegister(col)
 	}

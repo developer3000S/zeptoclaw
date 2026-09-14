@@ -27,6 +27,13 @@ import (
 // routing mistake (forwarding to nobody) fails fast instead of hanging.
 func newLocalManager(t *testing.T) *Manager {
 	t.Helper()
+	return newLocalManagerWith(t, nil)
+}
+
+// newLocalManagerWith is newLocalManager with a chosen adapter (nil = the
+// offline stub), for tests that must observe what the executor reported.
+func newLocalManagerWith(t *testing.T, adapter picoclaw.Adapter) *Manager {
+	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := config.Default()
 	dir := t.TempDir()
@@ -55,13 +62,16 @@ func newLocalManager(t *testing.T) *Manager {
 	}
 	t.Cleanup(func() { _ = h.Close() })
 	svc := p2p.NewService(h, p2p.Handlers{}, logger)
+	if adapter == nil {
+		adapter = picoclaw.NewStub(config.StubConfig{Echo: true}, cfg.Capabilities.Skills)
+	}
 	m, err := NewManager(Options{
 		Config:   cfg,
 		Identity: id,
 		Policy:   security.NewPolicy(security.ModeOpen, security.TrustTrusted),
 		Store:    store,
-		Table:    routing.NewTable(cfg.Neighbors, store, logger),
-		Adapter:  picoclaw.NewStub(config.StubConfig{Echo: true}, cfg.Capabilities.Skills),
+		Table:    routing.NewTable(cfg.Neighbors, store, logger, nil),
+		Adapter:  adapter,
 		Service:  svc,
 		Logger:   logger,
 	})

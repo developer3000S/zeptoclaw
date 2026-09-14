@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"sort"
 
 	"google.golang.org/protobuf/proto"
@@ -177,6 +178,95 @@ func CapsBody(c *pb.Capabilities) ([]byte, error) {
 	e.str(c.GetResourceClass())
 	e.strList(c.GetListenAddrs())
 	e.varint(c.GetTimestamp())
+	// The skill epoch and its descriptors are covered by the same signature:
+	// a peer that swaps a descriptor or bumps the version in transit breaks
+	// verification, so skill exchange cannot be poisoned on the way (ТЗ 6.3).
+	e.varint(c.GetSkillsVersion())
+	e.uvarint(uint64(len(c.GetSkillDocs())))
+	for _, d := range skillDocsSorted(c.GetSkillDocs()) {
+		raw, err := SkillDescriptorBody(d)
+		if err != nil {
+			return nil, err
+		}
+		e.raw(raw)
+	}
+	return e.out(), nil
+}
+
+// SkillDescriptorBody encodes one skill descriptor canonically. Attributes are
+// map data, so they are sorted by key — the same rule strMap applies elsewhere.
+func SkillDescriptorBody(d *pb.SkillDescriptor) ([]byte, error) {
+	if d == nil {
+		return nil, ErrNilMessage
+	}
+	e := newEncoder()
+	e.str(d.GetName())
+	e.varint(d.GetVersion())
+	e.varint(d.GetUpdatedAt())
+	e.str(d.GetDescription())
+	e.strList(d.GetModels())
+	e.strMap(d.GetAttributes())
+	return e.out(), nil
+}
+
+// SkillDescriptorDigest is the "sha256:<hex>" content id of a descriptor. It
+// deliberately excludes the descriptor's own digest field (which is where the
+// value is stored), so the definition is unambiguous.
+func SkillDescriptorDigest(d *pb.SkillDescriptor) (string, error) {
+	body, err := SkillDescriptorBody(d)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("sha256:%x", Digest("skill-descriptor-v1", body)), nil
+}
+
+// skillDocsSorted returns descriptors ordered by name for deterministic
+// encoding (protobuf repeated fields keep insertion order, but the encoder
+// must not depend on whoever built the message).
+func skillDocsSorted(in []*pb.SkillDescriptor) []*pb.SkillDescriptor {
+	out := make([]*pb.SkillDescriptor, 0, len(in))
+	for _, d := range in {
+		if d != nil {
+			out = append(out, d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].GetName() < out[j].GetName() })
+	return out
+}
+
+// RebindBody encodes the signing body of a key rebind/revocation statement.
+// Both the old and the new key sign exactly this body, so the statement binds
+// the two identities together with no third party's involvement (ТЗ 11.2).
+func RebindBody(k *pb.KeyRebind) ([]byte, error) {
+	if k == nil {
+		return nil, ErrNilMessage
+	}
+	e := newEncoder()
+	e.str(k.GetOldPeerId())
+	e.str(k.GetNewPeerId())
+	e.raw(k.GetNewPubkey())
+	e.varint(k.GetSequence())
+	e.varint(k.GetIssuedAt())
+	e.str(k.GetReason())
+	return e.out(), nil
+}
+
+// SkillsSyncBody encodes what a responder signs about its skill set.
+func SkillsSyncBody(r *pb.SkillsSyncResponse) ([]byte, error) {
+	if r == nil {
+		return nil, ErrNilMessage
+	}
+	e := newEncoder()
+	e.str(r.GetPeerId())
+	e.varint(r.GetSkillsVersion())
+	e.uvarint(uint64(len(r.GetSkills())))
+	for _, d := range skillDocsSorted(r.GetSkills()) {
+		raw, err := SkillDescriptorBody(d)
+		if err != nil {
+			return nil, err
+		}
+		e.raw(raw)
+	}
 	return e.out(), nil
 }
 

@@ -191,6 +191,40 @@ type CapabilitiesConfig struct {
 	AllowNetworkTools   bool     `yaml:"allow_network_tools"`
 	MaxParallelTasks    int      `yaml:"max_parallel_tasks"`
 	DisabledSkills      []string `yaml:"disabled_skills"`
+	// SkillDocs documents the advertised skills (description, version,
+	// attributes) so neighbours can route on more than a bare name.
+	SkillDocs []SkillDocConfig `yaml:"skill_docs"`
+	// SkillExchange tunes sharing those descriptors with peers (ТЗ 6.3).
+	SkillExchange SkillExchangeConfig `yaml:"skill_exchange"`
+}
+
+// SkillDocConfig is operator-authored documentation for one skill.
+type SkillDocConfig struct {
+	Name        string            `yaml:"name"`
+	Version     int64             `yaml:"version"`
+	Description string            `yaml:"description"`
+	Models      []string          `yaml:"models"`
+	Attributes  map[string]string `yaml:"attributes"`
+}
+
+// SkillExchangeConfig governs skill-descriptor exchange between peers.
+type SkillExchangeConfig struct {
+	// Enabled turns descriptor syncing on. With it off peers still exchange
+	// bare skill names (the historical behaviour).
+	Enabled bool `yaml:"enabled"`
+	// DiscloseTo limits whose sync requests are answered: "trusted", "known"
+	// (default) or "any". Skill documentation is operator metadata about this
+	// node; disclosure is deliberately gateable.
+	DiscloseTo string `yaml:"disclose_to"`
+	// Interval is how often the node reconciles its neighbours' skill views.
+	Interval Duration `yaml:"interval"`
+	// MaxDescriptors caps one sync answer (storm/poisoning bound).
+	MaxDescriptors int `yaml:"max_descriptors"`
+	// ImportLimit caps how many peer-learned descriptors one node keeps total.
+	ImportLimit int `yaml:"import_limit"`
+	// Persist keeps the local descriptor set (and its version clock) across
+	// restarts in <data_dir>/skills.json.
+	Persist bool `yaml:"persist"`
 }
 
 // PicoClawConfig configures the agent adapter. Mode selects the transport used
@@ -203,6 +237,16 @@ type PicoClawConfig struct {
 	TimeoutSeconds      int               `yaml:"timeout_seconds"`
 	MaxConcurrentAgents int               `yaml:"max_concurrent_agents"`
 	Env                 map[string]string `yaml:"env"`
+	// Model is the model this node asks PicoClaw to answer with (ТЗ 10.3
+	// «модельные параметры»). It is a property of the node, not of a task: a
+	// task asks for skills, and the operator decides which model serves them
+	// here. Empty means PicoClaw's own configuration chooses.
+	//
+	// The remaining model knobs (temperature, max tokens…) are not a mesh
+	// concern: `picoclaw agent` accepts only -d/-m/-s/--model and rejects an
+	// unknown flag, so those are set with the PICOCLAW_AGENTS_DEFAULTS_*
+	// variables of `env` or the PicoClaw config itself.
+	Model string `yaml:"model"`
 	// ExtraArgs are appended to every PicoClaw invocation, before the prompt.
 	ExtraArgs []string `yaml:"extra_args"`
 	// PromptTemplate controls how a task instruction is rendered for the CLI.
@@ -230,14 +274,18 @@ type StubConfig struct {
 
 // SecurityConfig holds trust policy and access lists.
 type SecurityConfig struct {
-	TrustMode             string          `yaml:"trust_mode"` // open | limited | private
-	RequireTaskSignature  bool            `yaml:"require_task_signature"`
-	DropInvalidSignatures bool            `yaml:"drop_invalid_signatures"`
-	AllowedPeersFile      string          `yaml:"allowed_peers_file"`
-	BlockedPeersFile      string          `yaml:"blocked_peers_file"`
-	MinTrustForTasks      string          `yaml:"min_trust_for_tasks"`
-	RateLimit             RateLimitConfig `yaml:"rate_limit"`
-	MaxMessageBytes       int64           `yaml:"max_message_bytes"`
+	TrustMode            string `yaml:"trust_mode"` // open | limited | private
+	RequireTaskSignature bool   `yaml:"require_task_signature"`
+	// RequireOriginSignature rejects a task whose authoring signature is
+	// missing. A present-but-wrong one is always fatal — this knob only decides
+	// whether nodes that predate the field stay acceptable (ТЗ 6.6.4).
+	RequireOriginSignature bool            `yaml:"require_origin_signature"`
+	DropInvalidSignatures  bool            `yaml:"drop_invalid_signatures"`
+	AllowedPeersFile       string          `yaml:"allowed_peers_file"`
+	BlockedPeersFile       string          `yaml:"blocked_peers_file"`
+	MinTrustForTasks       string          `yaml:"min_trust_for_tasks"`
+	RateLimit              RateLimitConfig `yaml:"rate_limit"`
+	MaxMessageBytes        int64           `yaml:"max_message_bytes"`
 }
 
 // RateLimitConfig bounds per-peer request rates.
@@ -346,6 +394,14 @@ func Default() *Config {
 			AllowShell:          false,
 			AllowNetworkTools:   true,
 			MaxParallelTasks:    4,
+			SkillExchange: SkillExchangeConfig{
+				Enabled:        true,
+				DiscloseTo:     "known",
+				Interval:       Duration(30 * time.Second),
+				MaxDescriptors: 64,
+				ImportLimit:    512,
+				Persist:        true,
+			},
 		},
 		PicoClaw: PicoClawConfig{
 			Mode:                "stub",
@@ -366,11 +422,12 @@ func Default() *Config {
 			Stub: StubConfig{Latency: Duration(50 * time.Millisecond), Echo: true},
 		},
 		Security: SecurityConfig{
-			TrustMode:             "limited",
-			RequireTaskSignature:  true,
-			DropInvalidSignatures: true,
-			MinTrustForTasks:      "limited",
-			MaxMessageBytes:       4 << 20,
+			TrustMode:              "limited",
+			RequireTaskSignature:   true,
+			RequireOriginSignature: true,
+			DropInvalidSignatures:  true,
+			MinTrustForTasks:       "limited",
+			MaxMessageBytes:        4 << 20,
 			RateLimit: RateLimitConfig{
 				RequestsPerSecond: 20,
 				Burst:             60,
@@ -639,6 +696,45 @@ func (c *Config) Validate() error {
 	}
 	if c.Capabilities.MaxParallelTasks <= 0 {
 		c.Capabilities.MaxParallelTasks = c.Tasks.MaxParallelTasks
+	}
+
+	// Skill exchange: a descriptor must document a skill this node actually
+	// advertises, otherwise it would describe a capability nobody serves here.
+	advertised := make(map[string]bool, len(seen))
+	for s := range seen {
+		advertised[strings.ToLower(s)] = true
+	}
+	for _, d := range c.Capabilities.SkillDocs {
+		name := strings.ToLower(strings.TrimSpace(d.Name))
+		if name == "" {
+			errs = append(errs, errors.New("capabilities.skill_docs entry has no name"))
+			continue
+		}
+		if !advertised[name] {
+			errs = append(errs, fmt.Errorf(
+				"capabilities.skill_docs documents %q which is not in capabilities.skills", d.Name))
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Capabilities.SkillExchange.DiscloseTo)) {
+	case "":
+		c.Capabilities.SkillExchange.DiscloseTo = "known"
+	case "any", "trusted", "known":
+		c.Capabilities.SkillExchange.DiscloseTo = strings.ToLower(strings.TrimSpace(c.Capabilities.SkillExchange.DiscloseTo))
+	default:
+		errs = append(errs, fmt.Errorf(
+			"capabilities.skill_exchange.disclose_to %q must be trusted|known|any",
+			c.Capabilities.SkillExchange.DiscloseTo))
+	}
+	if c.Capabilities.SkillExchange.Enabled {
+		if c.Capabilities.SkillExchange.Interval.D() <= 0 {
+			c.Capabilities.SkillExchange.Interval = Duration(30 * time.Second)
+		}
+		if c.Capabilities.SkillExchange.MaxDescriptors <= 0 {
+			c.Capabilities.SkillExchange.MaxDescriptors = 64
+		}
+		if c.Capabilities.SkillExchange.ImportLimit <= 0 {
+			c.Capabilities.SkillExchange.ImportLimit = 512
+		}
 	}
 
 	return errors.Join(errs...)

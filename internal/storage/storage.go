@@ -144,23 +144,89 @@ func (s *Store) GetResult(taskID string) (*ResultRecord, error) {
 	return &rec, nil
 }
 
-// PutPeer upserts a peer record and refreshes its skill index.
+// PutPeer upserts a peer record and rebuilds its skill index in one transaction.
+//
+// The index has to describe what the peer advertises *now*: entries left over
+// from a dropped skill would keep offering a node that no longer serves it, and
+// nothing else ever reclaims them (Prune touches only the task journal). Skill
+// names are normalised because every other comparison in the mesh lowercases
+// and trims them (tasks.SkillsMatch) — an index that stored "OCR" would hide the
+// peer from a lookup for "ocr".
 func (s *Store) PutPeer(rec *PeerRecord) error {
 	if rec == nil || rec.PeerID == "" {
 		return errors.New("storage: peer record requires peer_id")
 	}
 	rec.SeenAt = time.Now().UTC().Unix()
-	if err := s.putJSON(pfxPeer+rec.PeerID, rec); err != nil {
-		return err
-	}
+	want := normalizedSkills(rec.Skills)
 	return s.db.Update(func(txn *badger.Txn) error {
-		for _, sk := range rec.Skills {
-			if err := txn.Set([]byte(pfxSkill+sk+"/"+rec.PeerID), []byte{1}); err != nil {
+		if err := deletePeerSkillIndex(txn, rec.PeerID); err != nil {
+			return err
+		}
+		b, err := json.Marshal(rec)
+		if err != nil {
+			return fmt.Errorf("storage: marshal peer %s: %w", rec.PeerID, err)
+		}
+		if err := txn.Set([]byte(pfxPeer+rec.PeerID), b); err != nil {
+			return err
+		}
+		for _, sk := range want {
+			if err := txn.Set(skillKey(sk, rec.PeerID), []byte{1}); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+}
+
+// deletePeerSkillIndex removes every index entry naming peerID. It covers both
+// the normalised and the verbatim spelling of each stored skill so that keys
+// written before normalisation existed are reclaimed too.
+func deletePeerSkillIndex(txn *badger.Txn, peerID string) error {
+	item, err := txn.Get([]byte(pfxPeer + peerID))
+	switch {
+	case errors.Is(err, badger.ErrKeyNotFound):
+		// The index can only outlive the record it describes; nothing to reclaim.
+		return nil
+	case err != nil:
+		return err
+	}
+	prev := &PeerRecord{}
+	if err := item.Value(func(v []byte) error { return json.Unmarshal(v, prev) }); err != nil {
+		return nil // an unreadable record must not block the rewrite
+	}
+	for _, sk := range prev.Skills {
+		for _, name := range []string{sk, normalizeSkill(sk)} {
+			if name == "" {
+				continue
+			}
+			if err := txn.Delete(skillKey(name, peerID)); err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// normalizedSkills returns the distinct, non-empty skill names in canonical
+// form, which is how the reverse index keys them.
+func normalizedSkills(skills []string) []string {
+	out := make([]string, 0, len(skills))
+	seen := make(map[string]bool, len(skills))
+	for _, sk := range skills {
+		n := normalizeSkill(sk)
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out
+}
+
+func normalizeSkill(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+func skillKey(skill, peerID string) []byte {
+	return []byte(pfxSkill + skill + "/" + peerID)
 }
 
 // GetPeer loads a peer record.
@@ -186,9 +252,10 @@ func (s *Store) ListPeers() ([]*PeerRecord, error) {
 	return out, err
 }
 
-// PeersBySkill lists peers indexed under a skill.
+// PeersBySkill lists peers indexed under a skill. The query is normalised the
+// same way PutPeer normalises what it stores, so callers may pass any casing.
 func (s *Store) PeersBySkill(skill string) ([]string, error) {
-	pre := pfxSkill + skill + "/"
+	pre := pfxSkill + normalizeSkill(skill) + "/"
 	var out []string
 	err := s.iterate(pre, func(k, _ []byte) error {
 		out = append(out, strings.TrimPrefix(string(k), pre))
@@ -537,15 +604,20 @@ type TaskRecord struct {
 
 // ResultRecord stores the outcome payload of a completed task.
 type ResultRecord struct {
-	TaskID       string         `json:"task_id"`
-	Status       string         `json:"status"`
-	Text         string         `json:"text,omitempty"`
-	ErrorMessage string         `json:"error_message,omitempty"`
-	WorkerPeerID string         `json:"worker_peer_id,omitempty"`
-	StartedAt    time.Time      `json:"started_at,omitempty"`
-	FinishedAt   time.Time      `json:"finished_at,omitempty"`
-	Artifacts    []ArtifactInfo `json:"artifacts,omitempty"`
-	Signature    []byte         `json:"signature,omitempty"`
+	TaskID       string    `json:"task_id"`
+	Status       string    `json:"status"`
+	Text         string    `json:"text,omitempty"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+	WorkerPeerID string    `json:"worker_peer_id,omitempty"`
+	StartedAt    time.Time `json:"started_at,omitempty"`
+	FinishedAt   time.Time `json:"finished_at,omitempty"`
+	// Model names the model that answered a task executed on *this* node
+	// (ТЗ 10.3): what the local agent disclosed, or the model it was asked to
+	// use. It is journal-only — TaskResult carries no model field on the wire, so
+	// the model a remote worker used stays unknown here.
+	Model     string         `json:"model,omitempty"`
+	Artifacts []ArtifactInfo `json:"artifacts,omitempty"`
+	Signature []byte         `json:"signature,omitempty"`
 	// WorkerSignature is the chain signature of the executing peer (ТЗ 6.10.3).
 	// The transport Signature only proves who forwarded the result; this one
 	// proves what the worker returned and must survive a restart so the origin
@@ -553,6 +625,12 @@ type ResultRecord struct {
 	WorkerSignature []byte `json:"worker_signature,omitempty"`
 	ResultDigest    string `json:"result_digest,omitempty"`
 	Aggregated      bool   `json:"aggregated,omitempty"`
+	// ErrorClass is the machine-readable failure taxonomy of ТЗ 6.12 kept as a
+	// short name ("NO_WORKER"). Relays and the decomposition planner decide
+	// whether a task may be retried by this class rather than by the message,
+	// so it has to survive a journal read: a lost class silently turns a
+	// retryable failure into an unspecified one.
+	ErrorClass string `json:"error_class,omitempty"`
 }
 
 // ArtifactInfo describes one stored artifact.
@@ -580,6 +658,10 @@ type PeerRecord struct {
 	SeenAt         int64    `json:"seen_at"`
 	Connected      bool     `json:"connected"`
 	LastStatus     string   `json:"last_status,omitempty"`
+	// SkillsVersion is the peer's advertised skill epoch at last sighting; it
+	// must survive a restart, otherwise the node would forget that it already
+	// holds a peer's newest descriptors and re-sync them needlessly.
+	SkillsVersion int64 `json:"skills_version,omitempty"`
 }
 
 // DedupRecord is the idempotency guard for task delivery.

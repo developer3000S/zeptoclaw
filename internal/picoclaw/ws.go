@@ -95,6 +95,12 @@ func NewWS(cfg config.PicoClawConfig, logger *slog.Logger) (*WSAdapter, error) {
 	if slots <= 0 {
 		slots = 1
 	}
+	if logger != nil && strings.TrimSpace(cfg.Model) != "" {
+		// The Pico Protocol has no verified request field for model selection, so
+		// the gateway's own configuration decides there. Saying nothing would let
+		// an operator believe picoclaw.model applies to every mode.
+		logger.Warn("picoclaw_model_not_applicable", "mode", "http", "model", strings.TrimSpace(cfg.Model))
+	}
 	return &WSAdapter{
 		wsURL:    wsURL,
 		httpBase: base,
