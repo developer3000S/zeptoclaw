@@ -1,0 +1,28 @@
+{# Собранные начальные Peer ID (ТЗ 15.4.6) — группа {{ zeptomesh_host_group }}.
+
+   Сгенерировано deploy/ansible/collect_peerids.yml; структура —
+   хост → номер экземпляра → список multiaddr (первый адрес предпочтителен для
+   входа). Роль читает этот файл через include_vars (zeptomesh_auto_bootstrap=true),
+   поэтому частичный прогон не должен терять адреса остальных узлов: карта
+   zeptomesh_group_peerids строится как «ранее собранное + замещение адресами
+   узлов этого прогона» (см. tasks/collect.yml). #}
+# Сгенерировано ansible: deploy/ansible/collect_peerids.yml — не редактировать вручную.
+# Хост с нуля в списке — узел, Peer ID которого ещё не собран.
+#
+# Как использовать:
+#   * роль подхватывает этот файл сама (zeptomesh_auto_bootstrap=true);
+#   * готовая однострочная форма — в <группа>.bootstrap.txt (это значение
+#     ZETOMESH_BOOTSTRAP; годится и для `install.sh --bootstrap`).
+#
+# Формат: /ip4/<адрес>/tcp/<порт>/p2p/<peer id>. Без /p2p/ узел точку входа
+# отвергает при старте (internal/discovery/bootstrap.go).
+#
+{% for host in zeptomesh_group_peerids.keys() | sort %}
+{{ host }}:
+{%   for instance in zeptomesh_group_peerids[host].keys() | map('int') | sort %}
+  "{{ instance }}":
+{%     for addr in zeptomesh_group_peerids[host][instance | string] %}
+    - {{ addr }}
+{%     endfor %}
+{%   endfor %}
+{% endfor %}

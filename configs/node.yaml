@@ -17,6 +17,11 @@ node:
     - /ip4/0.0.0.0/tcp/${ZETOMESH_MESH_PORT:-4001}
     - /ip4/0.0.0.0/udp/${ZETOMESH_MESH_PORT:-4001}/quic-v1
   announce: []
+  # Закрытая сеть libp2p: один и тот же ключ у всех узлов сети, чужие
+  # соединения отбрасываются на уровне транспорта. Формат — вывод
+  # `zeptomesh-node psk`: "/1/<base32 от 32 байт>"; hex-строка не принимается.
+  # ВНИМАНИЕ: QUIC не поддерживает закрытые сети (go-libp2p), поэтому с
+  # непустым PSK узел поднимает только TCP — quic-v1-адреса ниже игнорируются.
   private_network_psk: ${ZETOMESH_PSK:-}
   # Circuit relay (libp2p relay v2): помощь узлам за NAT.
   #  enabled            — пользоваться чужими ретрансляторами, когда прямое
@@ -86,6 +91,27 @@ tasks:
     max_retries: 2
     attempt_timeout: 120s
     retry_interval_seconds: 5s
+    # search_relay — лестница расширения поиска исполнителя, когда локальная
+    # таблица соседей ничего не дала. Адресная часть (enabled) делает full
+    # refresh и ограниченный RPC-relay по соседям. Epidemic-часть (topic)
+    # публикует подписанный запрос НАВЫКОВ (без task_id и инструкции) в общий
+    # pubsub-топик: подписавшиеся узлы, которые могут закрыть навык, отвечают
+    # подписанным списком кандидатов. По умолчанию выключена — это шаг с самой
+    # широкой зоной раскрытия. Меняется только перезапуском (топик join'ится на
+    # старте). Ответы — заявления третьих лиц: прежде чем маршрутизировать,
+    # каждый кандидат обзванивается и проверяется по его собственной подписи.
+    # search_relay:
+    #   enabled: true
+    #   max_depth: 2
+    #   fanout: 3
+    #   request_timeout: 8s
+    #   cache_ttl: 60s
+    #   topic:
+    #     enabled: false
+    #     name: "/zeptomesh/skillsearch/0.1.0"
+    #     request_ttl: 30s     # устаревшие запросы не отвечаются
+    #     max_answers: 8       # сколько ответов собрать / сколько записей в одном
+    #     answer_cooldown: 10s # анти-шторм: не чаще одного ответа на набор навыков
 
 capabilities:
   skills: [general]
@@ -183,8 +209,48 @@ telemetry:
   # слушатель нужен, когда Prometheus скрейпит порт без токена: держите его на
   # внутреннем интерфейсе. В Docker — 0.0.0.0, иначе порт не будет опубликован.
   prometheus_listen: ${ZETOMESH_PROM_LISTEN:-}
+  # Трассировка OpenTelemetry (ТЗ 14.3) — выключена по умолчанию: узел, который
+  # её не упоминает, не подключает ни SDK, ни экспортёр. Контекст трейса едет
+  # внутри задачи в подписанных labels, поэтому промежуточный узел не может его
+  # переписать, а старый сосед просто пронесёт два лишних ключа. Секция меняется
+  # только рестартом: SDK ставит глобальные провайдеры один раз при старте
+  # процесса (reload отнесёт её к requires_restart).
+  # tracing:
+  #   enabled: true
+  #   endpoint: "localhost:4318"   # host:port OTLP/HTTP, без схемы и пути
+  #   insecure: true               # plaintext — обычно то, что ждёт локальный
+  #                                # collector (Jaeger, Tempo, otel-collector)
+  #   sample_ratio: 0.1            # вероятность для трейсов, НАЧАТЫХ этим узлом;
+  #                                # пришедший трассированный трейс не усекается
+  #   service_name: zeptomesh-node # имя сервиса в collector
+  #   environment: prod
 
 storage:
   engine: badger
   dir: ${ZETOMESH_DATA:-./zeptomesh-data}/${ZETOMESH_INDEX:-0}/db
   max_task_records: 100000
+
+# Плановые триггеры (ТЗ 6.6.1 п.4) — четвёртый источник задач: узел сам
+# подставляет себе задачу по cron-выражению, как если бы оператор вызвал
+# `zeptomesh-node submit`. Разрешение cron — минутное; запуски, пропущенные
+# во время простоя, НЕ доигрываются (задача на 09:00 не придёт в 14:00).
+# Список перечитывается на горячую (reload). Эти записи закреплённые: API и CLI
+# не могут удалить или перезаписать id из этого списка (POST с тем же id
+# отклоняется), чтобы YAML оставался старшим источником истины. Триггеры,
+# созданные через API, лежат в хранилище узла и видны в `zeptomesh-node
+# triggers` наравне с этими.
+# triggers:
+#   - id: nightly-vacuum          # уникальный id — обязателен
+#     name: Ночная уборка workspace
+#     schedule: "0 3 * * *"       # minute hour dom month dow, по UTC
+#     enabled: true               # по умолчанию true
+#     max_runs: 0                 # >0 — остановиться после N запусков
+#     job:
+#       instruction: "Удалить файлы старше 7 дней из рабочей области"
+#       required_skills: [general] # маршрутизация как у обычной задачи
+#       ttl: 5                     # прыжков; 0 = tasks.default_ttl
+#       priority: 0                # 1..9; 0 = по умолчанию
+#       timeout_seconds: 600       # 0 = tasks.default_timeout_seconds
+#       allow_shell: false         # разрешить агенту shell (ТЗ 11.4)
+#       allow_network_tools: true  # разрешить сетевые инструменты
+

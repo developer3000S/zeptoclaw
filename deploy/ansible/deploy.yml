@@ -1,0 +1,41 @@
+---
+# ZeptoClaw Agent Mesh — массовое развёртывание (ТЗ 15.4, ТЗ 22 п.7).
+#
+# Закрывает шаги 1–5 и (опционально) 6:
+#   1 Docker        roles/zeptomesh/tasks/docker.yml     --tags docker
+#   2 каталоги      roles/zeptomesh/tasks/dirs.yml       --tags dirs
+#   3 конфигурация  roles/zeptomesh/tasks/config.yml     --tags config
+#     (доставка параметризованного шаблона + env на экземпляр)
+#   4 контейнер     roles/zeptomesh/tasks/run.yml        --tags run
+#   5 здоровье      roles/zeptomesh/tasks/health.yml     --tags health
+#   6 Peer ID       roles/zeptomesh/tasks/collect.yml    --tags peerids
+#
+# Перед любыми изменениями на хосте выполняется tasks/preflight.yml: он ловит
+# пересекающиеся порты, отсутствующий конфиг, bootstrap без /p2p/ и пустой
+# zeptomesh_pub_ip — то, что иначе выглядело бы как «контейнер не поднялся».
+#
+# Запуск (см. README.md):
+#   ansible-playbook -i inventory.example.yml deploy.yml --check --diff
+#   ansible-vault create group_vars/mesh_nodes/vault.yml
+#   ansible-playbook -i inventory.example.yml deploy.yml --ask-vault-pass \
+#       -e zeptomesh_require_peers=false          # первая партия узлов
+#
+# После первой партии собираются Peer ID и плейбук прогоняется повторно — тогда
+# остальные узлы получат точки входа автоматически (zeptomesh_auto_bootstrap).
+
+- name: Развернуть узлы ZeptoClaw Agent Mesh (ТЗ 15.4)
+  hosts: mesh_nodes
+  gather_facts: true
+  become: true
+  # 100+ хостов: параллелизм по умолчанию и окно в 25 хостов, чтобы падение
+  # одного узла не останавливало весь прогон, но и не снимало сеть целиком.
+  serial: "{{ zeptomesh_serial | default(25) }}"
+  any_errors_fatal: false
+  # Порог — число: схема плейбука не принимает в этом ключе шаблон
+  # (в отличие от serial, где строка допустима). Правится здесь же.
+  max_fail_percentage: 10
+  roles:
+    - role: zeptomesh
+      vars:
+        zeptomesh_stage: deploy
+        zeptomesh_host_group: mesh_nodes

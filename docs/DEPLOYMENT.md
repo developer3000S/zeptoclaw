@@ -165,8 +165,19 @@ ssh -L 8081:127.0.0.1:8081 host '…'
 Одна и та же `private_network_psk` на всех узлах сети — чужие подключения
 отбрасываются на уровне транспорта libp2p. Отличающийся PSK = другая сеть
 (узлы не увидят друг друга никогда; типичная причина «распада mesh», см.
-RUNBOOK §4.3). Генерация: `zeptomesh-node psk` (hex 32 байта). Хранить в
+RUNBOOK §4.3). Генерация: `zeptomesh-node psk` — формат `/1/<base32 от 32 байт>`
+(именно его ждёт `internal/p2p.decodePSK`; «hex 32 байта» сюда не подойдёт —
+узел откажет в старте). Хранить в
 окружении/secret-хранилище, не в git.
+
+Важное ограничение транспорта: QUIC в go-libp2p не поддерживает закрытые сети
+(`PrivateNetwork`) — транспорт с PSK отказывается строиться. Поэтому узел с
+непустым `private_network_psk` поднимает **только TCP**: QUIC-адреса из
+`node.listen`/`node.announce` отбрасываются при старте (в лог —
+`quic_disabled_private_network`), и узел работает, а не падает. Если в `listen`
+не останется ни одного TCP-адреса, старт завершится ошибкой с внятным текстом.
+Соседи по той же PSK-сети должны доставать узлу по TCP; смешивать PSK-узлы с
+pure-QUIC-кластером нельзя — у тех нет общего транспорта.
 
 ### Allow/deny-списки и доверие
 
@@ -211,7 +222,59 @@ sudo ZETOMESH_PSK=<тот же> ./install.sh install --mode local --nodes 2 \
 
 ---
 
-## 6. Проверка после развёртывания
+## 6. Ansible: развёртывание на множество хостов (ТЗ 15.4)
+
+`install.sh` поднимает N экземпляров на одном хосте; когда хостов десятки и
+сотни, их разворачивают плейбуки `deploy/ansible/` (роль `zeptomesh`). Она
+закрывает шесть обязанностей ТЗ 15.4 отдельными тегами — `docker`, `dirs`,
+`config`, `run`, `health`, `peerids` — плюс шаг `preflight` (`tags: always`),
+который проверяет входные данные до любых изменений на хосте.
+
+```bash
+cd deploy/ansible
+cp inventory.example.yml inventory.yml        # хосты, адреса, порты, экземпляры
+mkdir -p group_vars/mesh_nodes
+cp .vault.example.yml group_vars/mesh_nodes/vault.yml
+ansible-vault encrypt group_vars/mesh_nodes/vault.yml   # PSK и API-токены — только здесь
+
+ansible-playbook -i inventory.yml --check --diff deploy.yml --ask-vault-pass \
+    -e zeptomesh_image_source=none            # что будет, не меняя ничего
+
+# первая волна — якоря (соседей у них нет, требование соседей отключаем):
+ansible-playbook -i inventory.yml deploy.yml --ask-vault-pass \
+    --limit anchors -e zeptomesh_require_peers=false
+ansible-playbook -i inventory.yml collect_peerids.yml --ask-vault-pass --limit anchors
+cat collected/mesh_nodes.bootstrap.txt        # готовое ZETOMESH_BOOTSTRAP
+
+# остальные узлы: роль подставит точки входа сама (zeptomesh_auto_bootstrap)
+ansible-playbook -i inventory.yml deploy.yml --ask-vault-pass
+```
+
+Что делает роль:
+
+| Шаг ТЗ 15.4 | Реализация |
+|---|---|
+| 1. Установить Docker | `roles/zeptomesh/tasks/docker.yml` (репозиторий + пакет + сервис) |
+| 2. Создать каталоги | `dirs.yml` — тома данных/ключей с правами 0700 |
+| 3. Сгенерировать и доставить конфигурацию | `config.yml` + `templates/instance.env.j2` (env-файл на экземпляр, секреты из vault) |
+| 4. Запустить контейнер | `image.yml` + `run.yml`; тег образа закреплён (`zeptomesh_image_tag: "0.1.0"`), `latest` не используется |
+| 5. Проверить здоровье узла | `health.yml` — `GET /healthz` (ожидание с ретраями) и `GET /api/v1/status` с bearer-токеном |
+| 6. Собрать начальные Peer ID | `collect.yml` + `templates/peerids.{yml,csv}.j2`, `bootstrap.txt` — готовое значение `ZETOMESH_BOOTSTRAP` |
+
+`collect_peerids.yml` ничего не устанавливает и не перезапускает: он только
+опрашивает уже работающие узлы (`zeptomesh_stage=collect`), поэтому его можно
+запускать периодически для обновления bootstrap-списка.
+
+Граница честности: на разработческой машине проверены `--syntax-check` обоих
+плейбуков и `ansible-lint --profile production` (0 ошибок на 15 файлах), а
+также соответствие используемых эндпоинтов реализации `internal/api`. Живого
+прогона против парка хостов не было — одна машина не является таким парком.
+Перед боевым применением: `--check --diff` на инвентаре, затем `--limit` на
+одном узле. Подробный README роли — `deploy/ansible/README.md`.
+
+---
+
+## 7. Проверка после развёртывания
 
 ```bash
 zeptomesh-node status -addr http://127.0.0.1:8081   # peer_id, адреса, adapter
@@ -229,13 +292,17 @@ RUNBOOK §3–4; бэкап ключей — RUNBOOK §5 (ключ `peer.key` к
 
 ---
 
-## 7. Безопасность развёртывания (чеклист)
+## 8. Безопасность развёртывания (чеклист)
 
 - [ ] PSK сгенерирован (`zeptomesh-node psk`), одинаков у узлов одной сети, не в git.
 - [ ] API (`8081+i`) и метрики (`9464+i`) не опубликованы наружу; при необходимости — `ZETOMESH_API_TOKEN`.
 - [ ] `accept_external_tasks: false` на узлах, торчащих в Интернет, пока не решено, кому служить.
 - [ ] `trust_mode: limited|private` + allow/blocked-файлы для WAN.
 - [ ] `allow_shell: false`, `allow_network_tools: false` по умолчанию (ТЗ 11.4).
+- [ ] Плановые задачи (`triggers:`) не шире прав узла: расписание не может дать
+      задаче shell или сеть, которых у узла нет (ТЗ 6.6.1 п.4), — но проверьте,
+      что ни одна cron-задача не предполагает исполнитель с `allow_shell: true`
+      на узлах, которые торчат в Интернет.
 - [ ] Секреты провайдеров — только в окружении демона (`PICOCLAW_*`), не в `node.yaml`.
 - [ ] Бэкап `keys/` настроен (RUNBOOK §5) и отделён от бэкапа данных.
 - [ ] Учтите: лимиты ресурсов (ТЗ 6.8.4) исполняются (`max_parallel_tasks_per_peer`,

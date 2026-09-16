@@ -24,27 +24,32 @@ type Collector struct {
 	SearchRelays    prometheus.Counter
 	SearchRelayHits prometheus.Counter
 	FullRefreshes   prometheus.Counter
-	SkillsSynced    prometheus.Counter
-	SkillsImported  prometheus.Counter
-	SkillsRefused   prometheus.Counter
-	SkillsVersion   prometheus.Gauge
-	RebindsApplied  prometheus.Counter
-	TaskDuration    prometheus.Histogram
-	TaskRouteHops   prometheus.Histogram
-	DiscoveryMDNS   prometheus.Counter
-	DiscoveryLocal  prometheus.Counter
-	DHTLookups      prometheus.Counter
-	DHTHits         prometheus.Counter
-	GossipPublished prometheus.Counter
-	GossipReceived  prometheus.Counter
-	BytesSent       prometheus.Counter
-	BytesReceived   prometheus.Counter
-	PicoClawRunning prometheus.Gauge
-	PicoClawErrors  prometheus.Counter
-	SecurityEvents  *prometheus.CounterVec
-	ForwardAttempts *prometheus.CounterVec
-	NeighborScore   *prometheus.GaugeVec
-	BuildInfo       prometheus.Gauge
+	// Search-topic plane (ТЗ 6.9.5 п.5): requests this node published, requests
+	// it answered, and messages it refused to parse/verify/trust.
+	SearchTopicRequests prometheus.Counter
+	SearchTopicAnswers  prometheus.Counter
+	SearchTopicRejected prometheus.Counter
+	SkillsSynced        prometheus.Counter
+	SkillsImported      prometheus.Counter
+	SkillsRefused       prometheus.Counter
+	SkillsVersion       prometheus.Gauge
+	RebindsApplied      prometheus.Counter
+	TaskDuration        prometheus.Histogram
+	TaskRouteHops       prometheus.Histogram
+	DiscoveryMDNS       prometheus.Counter
+	DiscoveryLocal      prometheus.Counter
+	DHTLookups          prometheus.Counter
+	DHTHits             prometheus.Counter
+	GossipPublished     prometheus.Counter
+	GossipReceived      prometheus.Counter
+	BytesSent           prometheus.Counter
+	BytesReceived       prometheus.Counter
+	PicoClawRunning     prometheus.Gauge
+	PicoClawErrors      prometheus.Counter
+	SecurityEvents      *prometheus.CounterVec
+	ForwardAttempts     *prometheus.CounterVec
+	NeighborScore       *prometheus.GaugeVec
+	BuildInfo           prometheus.Gauge
 
 	mu sync.Mutex
 }
@@ -96,6 +101,15 @@ func New(namespace string) *Collector {
 	})
 	c.FullRefreshes = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: namespace, Name: "skill_full_refreshes_total", Help: "Full skill-view reloads performed or requested.",
+	})
+	c.SearchTopicRequests = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "search_topic_requests_total", Help: "Skill searches published on the epidemic search topic.",
+	})
+	c.SearchTopicAnswers = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "search_topic_answers_total", Help: "Search-topic requests this node answered.",
+	})
+	c.SearchTopicRejected = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "search_topic_rejected_total", Help: "Search-topic messages refused (bad signature, stale, unsolicited, policy).",
 	})
 	c.SkillsSynced = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: namespace, Name: "skills_synced_total", Help: "Skill-descriptor syncs performed by this node.",
@@ -171,6 +185,7 @@ func New(namespace string) *Collector {
 		c.DHTHits, c.GossipPublished, c.GossipReceived, c.BytesSent, c.BytesReceived,
 		c.PicoClawRunning, c.PicoClawErrors, c.SecurityEvents, c.ForwardAttempts,
 		c.NeighborScore, c.BuildInfo, c.SearchRelays, c.SearchRelayHits, c.FullRefreshes,
+		c.SearchTopicRequests, c.SearchTopicAnswers, c.SearchTopicRejected,
 		c.SkillsSynced, c.SkillsImported, c.SkillsRefused, c.SkillsVersion, c.RebindsApplied,
 	} {
 		reg.MustRegister(col)

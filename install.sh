@@ -395,9 +395,37 @@ install_docker() {
     -t zeptomesh-node:latest "$REPO_DIR"
 
   write_compose "$stack_dir/docker-compose.yml"
+  local compose_file="$stack_dir/docker-compose.yml"
+
+  # Точка входа без /p2p/<peer id> узел отвергает на старте (адрес без
+  # идентичности не к чему диалить), а peer ID узла становится известен только
+  # после первого запуска — он рождается в ключе на томе. Поэтому поднимаем
+  # якорь отдельно, спрашиваем его ID у его же /healthz и дописываем остальным.
+  if (( NODES > 1 )) && [[ -z "$BOOTSTRAP" ]]; then
+    log "запуск якоря zepto-0 (узел 0)"
+    docker compose -f "$compose_file" up -d zepto-0 \
+      || die "compose up zepto-0: docker compose -f $compose_file ps"
+    local zp="" tries=0
+    while (( tries < 30 )); do
+      zp="$(docker exec zeptomesh-0 sh -c \
+              "curl -fsS http://127.0.0.1:${API_BASE_PORT}/healthz" 2>/dev/null \
+            | sed -nE 's/.*"peer_id":"([^"]+)".*/\1/p')"
+      [[ -n "$zp" ]] && break
+      sleep 2; (( tries++ ))
+    done
+    if [[ -n "$zp" ]]; then
+      local addr="/dns4/zepto-0/tcp/$MESH_BASE_PORT/p2p/$zp"
+      log "точка входа для узлов 1..$((NODES-1)): $addr"
+      sed -i -E "s|%%ANCHOR%%|$addr|g" "$compose_file"
+    else
+      warn "peer ID якоря не получен за 60 с: остальные узлы стартуют без bootstrap — сойдутся через DHT/PEX или после ручного заполнения ZETOMESH_BOOTSTRAP (команда ниже)"
+      sed -i -E "s|%%ANCHOR%%||g" "$compose_file"
+    fi
+  fi
+
   log "запуск $NODES контейнеров"
-  docker compose -f "$stack_dir/docker-compose.yml" up -d \
-    || die "compose up завершился с ошибкой: docker compose -f $stack_dir/docker-compose.yml ps"
+  docker compose -f "$compose_file" up -d \
+    || die "compose up завершился с ошибкой: docker compose -f $compose_file ps"
 
   local i
   echo
@@ -408,8 +436,9 @@ install_docker() {
   done
   cat <<EOF
 
-Точки входа для других хостов (нужен p2p-адрес узла):
-  docker exec zeptomesh-0 zeptomesh-node status --format '{{.peer_id}}'
+Точки входа для других хостов (нужен p2p-адрес узла, без /p2p/… адрес не принимается):
+  docker exec zeptomesh-0 sh -c 'curl -fsS http://127.0.0.1:${API_BASE_PORT}/healthz'
+  # или с хоста:  curl -fsS http://127.0.0.1:${API_BASE_PORT}/healthz
 Управление: ./install.sh status|start|stop|uninstall
 EOF
 }
@@ -424,9 +453,11 @@ write_compose() {
     for ((i = 0; i < NODES; i++)); do
       local mesh=$((MESH_BASE_PORT + i)) api=$((API_BASE_PORT + i)) prom=$((PROM_BASE_PORT + i))
       local boot="$BOOTSTRAP"
-      # Внутри compose-сети узлы видны по dns-именам: подсказываем точку входа,
-      # если оператор её не задал.
-      [[ -z "$boot" && $i -gt 0 ]] && boot="/dns4/zepto-0/tcp/$MESH_BASE_PORT"
+      # Внутри compose-сети узлы видны по dns-именам, но точка входа обязана
+      # содержать /p2p/<peer id> якоря — а он известен только после его первого
+      # запуска. Остальные помечаются маркером; install_docker поднимает якорь,
+      # узнаёт его ID из /healthz и вписывает адрес в файл до общего запуска.
+      [[ -z "$boot" && $i -gt 0 ]] && boot="%%ANCHOR%%"
       cat <<EOF
   zepto-$i:
     image: zeptomesh-node:latest

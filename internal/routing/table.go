@@ -333,6 +333,41 @@ func (t *Table) Remove(p peer.ID) {
 	delete(t.neis, p)
 }
 
+// Suspects returns the neighbours silent for longer than timeout, without
+// removing them. Eviction based on silence alone punishes a peer that is alive
+// but quiet (its gossip is delayed, our inbound queue is not), so the caller
+// confirms each suspect with a direct probe and prunes only those that answer
+// nothing (ТЗ 6.5.3).
+func (t *Table) Suspects(timeout time.Duration) []Neighbor {
+	cutoff := time.Now().UTC().Add(-timeout)
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	var out []Neighbor
+	for _, n := range t.neis {
+		if n.LastSeen.Before(cutoff) {
+			out = append(out, *n)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].LastSeen.Before(out[j].LastSeen) })
+	return out
+}
+
+// Touch records a live confirmation from a peer: it keeps the neighbour in the
+// table with a fresh LastSeen and the connectivity the caller just observed.
+func (t *Table) Touch(p peer.ID, connected bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n, ok := t.neis[p]
+	if !ok {
+		return
+	}
+	n.LastSeen = time.Now().UTC()
+	n.Connected = connected
+	if connected {
+		n.Left = false
+	}
+}
+
 // PruneStale drops neighbours silent for longer than timeout and returns the
 // peers that were evicted.
 func (t *Table) PruneStale(timeout time.Duration) []peer.ID {

@@ -193,3 +193,81 @@ func TestRestoreKeepsSkillsVersion(t *testing.T) {
 		t.Fatalf("restored epoch = %d (ok=%v), want 7", got.SkillsVersion, ok)
 	}
 }
+
+// ТЗ 6.5.3: eviction asks first. The table's half of that contract is to name
+// the silent neighbours without dropping them, so the caller can probe each one
+// and keep whoever answers.
+func TestSuspectsNameSilentPeersWithoutDroppingThem(t *testing.T) {
+	tab := NewTable(config.NeighborsConfig{}, nil, quietLog(), nil)
+	a, b := peerID(t), peerID(t)
+	tab.Upsert(&Neighbor{PeerID: a, Skills: []string{"coding"}, Connected: true})
+	time.Sleep(40 * time.Millisecond)
+	tab.Upsert(&Neighbor{PeerID: b, Skills: []string{"ops"}, Connected: true})
+	// Both sightings are now older than the threshold below, but by different
+	// amounts — which is what the ordering assertion is about.
+	time.Sleep(40 * time.Millisecond)
+
+	// Nothing is silent yet.
+	if got := tab.Suspects(time.Minute); len(got) != 0 {
+		t.Fatalf("fresh entries reported as suspects: %+v", got)
+	}
+	if tab.Len() != 2 {
+		t.Fatalf("Len = %d, want both entries still in the table", tab.Len())
+	}
+
+	suspects := tab.Suspects(5 * time.Millisecond)
+	if len(suspects) != 2 {
+		t.Fatalf("suspects = %+v, want both silent entries", suspects)
+	}
+	// Oldest first: a sweep with a bounded budget must reach the entries that
+	// have been silent longest before the ones that just went quiet.
+	if suspects[0].PeerID != a || suspects[1].PeerID != b {
+		t.Fatalf("suspects are not ordered oldest-first: %v, %v", suspects[0].PeerID, suspects[1].PeerID)
+	}
+	if tab.Len() != 2 {
+		t.Fatal("Suspects removed entries; only the caller's probe decides eviction")
+	}
+}
+
+// A probe answer refreshes the sighting; that is the only reason a silent-but-
+// living peer survives the next sweep.
+func TestTouchRefreshesAndNeverResurrects(t *testing.T) {
+	tab := NewTable(config.NeighborsConfig{}, nil, quietLog(), nil)
+	pid := peerID(t)
+	tab.Upsert(&Neighbor{PeerID: pid, Skills: []string{"coding"}, Connected: false, Left: true})
+	before := mustGet(t, tab, pid)
+
+	time.Sleep(10 * time.Millisecond)
+	tab.Touch(pid, true)
+	after := mustGet(t, tab, pid)
+	if !after.LastSeen.After(before.LastSeen) {
+		t.Fatalf("Touch did not refresh LastSeen: %v → %v", before.LastSeen, after.LastSeen)
+	}
+	if !after.Connected || after.Left {
+		t.Fatalf("Touch must record observed liveness: %+v", after)
+	}
+	if got := tab.Suspects(time.Minute); len(got) != 0 {
+		t.Fatalf("touched peer is still a suspect: %+v", got)
+	}
+
+	// A reply from an already-evicted peer must not put it back: the entry is
+	// gone, and re-adding it from a probe answer would invent a neighbour whose
+	// skills and addresses nobody ever verified.
+	gone := peerID(t)
+	tab.Touch(gone, true)
+	if _, ok := tab.Get(gone); ok {
+		t.Fatal("Touch created a table entry for an unknown peer")
+	}
+	if tab.Len() != 1 {
+		t.Fatalf("Len = %d, want only the touched peer", tab.Len())
+	}
+}
+
+func mustGet(t *testing.T, tab *Table, pid peer.ID) Neighbor {
+	t.Helper()
+	nb, ok := tab.Get(pid)
+	if !ok {
+		t.Fatalf("peer %s missing from the table", pid)
+	}
+	return nb
+}

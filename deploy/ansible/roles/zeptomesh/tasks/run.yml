@@ -1,0 +1,136 @@
+---
+# ТЗ 15.4.4 — запуск контейнера на экземпляр.
+#
+# Раскладка повторяет deploy/docker/docker-compose.yml и install.sh
+# --mode docker: mesh-порт наружу (tcp + udp для QUIC), API и метрики — только на
+# loopback хоста (docs/DEPLOYMENT.md §3), том данных на экземпляр,
+# restart=unless-stopped, grace 30s.
+#
+# Окружение берётся из env-файла экземпляра: модуль читает файл на хосте и
+# передаёт переменные в Env контейнера; сам файл в контейнер не монтируется.
+#
+# Идемпотентность: docker_container сравнивает Env, тома, порты и метки, поэтому
+# повторный прогон ничего не меняет. Смена конфигурации отлавливается меткой
+# com.zeptomesh.config-hash (хэш содержимого файла на хосте) — изменение
+# значения в dict-метке заставляет модуль пересоздать контейнер, без отдельного
+# обработчика.
+
+- name: Том | Создать именованный том данных экземпляра
+  community.docker.docker_volume:
+    volume_name: "{{ item.volume }}"
+    state: present
+    labels: "{{ zeptomesh_labels }}"
+  loop: "{{ zeptomesh_instances }}"
+  loop_control:
+    label: "{{ item.volume }}"
+  when: not (zeptomesh_data_bind_mount | bool)
+
+# Ограничение check-mode: community.docker.docker_container читает env_file с
+# диска хоста (base.py:_preprocess_env → parse_env_file), а в --check шаблон
+# ничего не записывает. Без этой проверки dry-run падал бы с FileNotFoundError
+# на самом интересном шаге; вместо этого шаг честно пропускается и помечается.
+- name: Контейнер | Проверить наличие env-файлов экземпляров
+  ansible.builtin.stat:
+    path: "{{ item.env_file }}"
+  loop: "{{ zeptomesh_instances }}"
+  loop_control:
+    label: "{{ item.env_file }}"
+  register: zeptomesh_env_files
+  changed_when: false
+  when: ansible_check_mode
+
+- name: "Контейнер | Предупредить: dry-run не моделирует запуск узлов"
+  ansible.builtin.debug:
+    msg: >-
+      check-mode: контейнеры {{ zeptomesh_instances | map(attribute='container') | join(', ') }}
+      не проверялись — community.docker.docker_container читает env-файлы с диска
+      хоста, а --check их не создаёт. Итог dry-run верен для каталогов, конфига и
+      окружения; сам запуск и здоровье узла проверяются только реальным прогоном.
+  when:
+    - ansible_check_mode
+    - (zeptomesh_env_files.results | default([]) | rejectattr('stat.exists') | list | length) > 0
+
+- name: Контейнер | Запустить узел mesh
+  community.docker.docker_container:
+    name: "{{ item.container }}"
+    image: "{{ zeptomesh_image }}"
+    state: started
+    restart_policy: "{{ zeptomesh_restart_policy }}"
+    # Grace-период остановки: в community.docker 3.x параметр называется
+    # stop_timeout (секунды), а не stop_grace_period, как в compose.
+    stop_timeout: "{{ zeptomesh_stop_timeout }}"
+    stop_signal: SIGTERM
+    hostname: "{{ item.name }}"
+    init: "{{ zeptomesh_init | bool }}"
+    env_file: "{{ item.env_file }}"
+    published_ports: "{{ item.published_ports }}"
+    volumes: "{{ item.volumes + zeptomesh_extra_volumes }}"
+    labels: >-
+      {{- zeptomesh_labels | combine({
+        'com.zeptomesh.instance': item.index | string,
+        'com.zeptomesh.node_name': item.name,
+        'com.zeptomesh.mesh_port': item.mesh_port | string,
+        'com.zeptomesh.config-hash': zeptomesh_config_hash | default('unknown', true),
+        'com.zeptomesh.image-tag': zeptomesh_image_tag | string
+      }) -}}
+    cap_drop: "{{ zeptomesh_cap_drop if zeptomesh_cap_drop | length > 0 else omit }}"
+    security_opts: "{{ zeptomesh_security_opts if zeptomesh_security_opts | length > 0 else omit }}"
+    memory: "{{ zeptomesh_memory if zeptomesh_memory | length > 0 else omit }}"
+    cpus: "{{ zeptomesh_cpus if zeptomesh_cpus | string | length > 0 else omit }}"
+    # Healthcheck образа дублируется здесь явно: с явным тестом состояние
+    # `docker ps` становится полезным, а оператор видит деградацию до того, как
+    # она превратится в «узел пропал из mesh».
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:{{ item.api_port }}/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: "{{ zeptomesh_start_period }}s"
+      retries: 3
+  loop: "{{ zeptomesh_instances }}"
+  loop_control:
+    label: "{{ item.container }}"
+  # env-файл содержит PSK и токены: не светить их в выводе модуля.
+  no_log: "{{ zeptomesh_no_log | bool }}"
+  # В check-mode env-файлы ещё не созданы (шаблон ничего не пишет), а
+  # docker_container читает их с диска до обращения к демону — шаг честно
+  # пропускается, а не падает с FileNotFoundError (см. задание выше).
+  # Фигурные скобки вокруг условия здесь не нужны: when шаблонизируется неявно,
+  # а ansible-lint (no-jinja-when) требует не оборачивать условие в {{ }}.
+  when: >-
+    not ansible_check_mode
+    or (zeptomesh_env_files.results | default([]) | selectattr('stat.exists') | list | length
+        == zeptomesh_instances | length)
+
+- name: Контейнер | Проверить состояние каждого экземпляра
+  community.docker.docker_container_info:
+    name: "{{ item.container }}"
+  loop: "{{ zeptomesh_instances }}"
+  loop_control:
+    label: "{{ item.container }}"
+  register: zeptomesh_container_info
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Контейнер | Остановиться, если экземпляр не запущен
+  ansible.builtin.assert:
+    that:
+      - info | default({}) | length > 0
+      - info.State | default({}) | length > 0
+      - info.State.Running | default(false) | bool
+    fail_msg: >-
+      Контейнер '{{ item.container }}' не работает (статус:
+      {{ (info.State | default({})).Status | default('контейнер не создан') }}).
+      Типичные причины: занят порт {{ item.mesh_port }}/{{ item.api_port }},
+      некорректная конфигурация (например ZETOMESH_BOOTSTRAP без /p2p/ или
+      неверный PSK), недоступен образ. Диагностика:
+      docker logs {{ item.container }}
+    quiet: true
+  loop: "{{ zeptomesh_instances }}"
+  loop_control:
+    index_var: i
+    label: "{{ item.container }}"
+  vars:
+    info: "{{ (zeptomesh_container_info.results | default([]))[i].container | default({}, true) }}"
+  when:
+    - not ansible_check_mode
+    - zeptomesh_container_info.results is defined

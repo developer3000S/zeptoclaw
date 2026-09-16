@@ -1,0 +1,164 @@
+---
+# ТЗ 15.4.5 — проверка здоровья узла.
+#
+# Источник истины — HTTP-API самого узла (internal/api/admin.go):
+#   GET /healthz        — без токена; {"status":"ok","peer_id":"12D3K…"}
+#   GET /api/v1/status  — с bearer-токеном (api.auth_token_env = ZETOMESH_API_TOKEN);
+#                         отдаёт Node.Status, поле addrs = Node.DiscoverableAddrs()
+#                         — адреса, которые узел сам себе анонсирует.
+#
+# Запросы идут с самого хоста к loopback-опубликованному порту API контейнера:
+# наружу админ-API не смотрит никогда (docs/DEPLOYMENT.md §3). Логи не
+# разбираются: API — единственный стабильный контракт узла.
+
+- name: Здоровье | Дождаться ответа /healthz на каждом экземпляре
+  ansible.builtin.uri:
+    url: "{{ item.api_url }}/healthz"
+    method: GET
+    return_content: true
+    status_code: 200
+    timeout: "{{ zeptomesh_http_timeout }}"
+  loop: "{{ zeptomesh_instances }}"
+  loop_control:
+    label: "{{ item.container }} {{ item.api_url }}"
+  register: zeptomesh_healthz
+  until: zeptomesh_healthz is succeeded
+  retries: "{{ zeptomesh_health_retries }}"
+  delay: "{{ zeptomesh_health_delay }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Здоровье | Проверить ответ /healthz
+  ansible.builtin.assert:
+    that:
+      - item.json | default({}) | length > 0
+      - (item.json.status | default('')) == 'ok'
+      - (item.json.peer_id | default('')) | length > 20
+    fail_msg: >-
+      /healthz экземпляра {{ (item.item | default({})).container | default('?') }}
+      ответил не тем, что ожидалось: {{ item.json | default({}) }}. Похоже, на
+      порту сидит другая служба.
+    quiet: true
+  loop: "{{ zeptomesh_healthz.results | default([]) }}"
+  loop_control:
+    label: "{{ (item.item | default({})).container | default('?') }}"
+  when: not ansible_check_mode
+
+- name: Здоровье | Опросить /api/v1/status (адреса анонса, соседи, версия, адаптер)
+  ansible.builtin.uri:
+    url: "{{ item.api_url }}/api/v1/status"
+    method: GET
+    headers: "{{ zeptomesh_api_headers }}"
+    return_content: true
+    status_code: 200
+    timeout: "{{ zeptomesh_http_timeout }}"
+  loop: "{{ zeptomesh_instances }}"
+  loop_control:
+    label: "{{ item.container }}"
+  register: zeptomesh_status
+  until: zeptomesh_status is succeeded
+  retries: "{{ zeptomesh_health_retries }}"
+  delay: "{{ zeptomesh_health_delay }}"
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - zeptomesh_query_status | bool
+  vars:
+    zeptomesh_api_headers: >-
+      {{- {'Authorization': 'Bearer ' ~ zeptomesh_api_token}
+          if zeptomesh_api_token | default('', true) | length > 0 else {} -}}
+
+- name: Здоровье | Проверить, что узел объявил хотя бы один адрес
+  ansible.builtin.assert:
+    that:
+      - st | default({}) | length > 0
+      - (st.addrs | default([])) | length > 0
+      - (st.peer_id | default('')) | length > 20
+    fail_msg: >-
+      Экземпляр {{ (item.item | default({})).container | default('?') }} вернул
+      пустой addrs: узел не опубликовал ни одного адреса (announce пуст и
+      адреса интерфейсов получить не удалось) — соседи не смогут подключиться.
+      Проверьте node.announce в конфигурации и zeptomesh_pub_ip.
+    quiet: true
+  loop: "{{ zeptomesh_status.results | default([]) }}"
+  loop_control:
+    label: "{{ (item.item | default({})).container | default('?') }}"
+  vars:
+    st: "{{ item.json | default({}, true) }}"
+  when:
+    - not ansible_check_mode
+    - zeptomesh_query_status | bool
+    - zeptomesh_status.results is defined
+
+# Узел обязан видеть соседей, иначе «здоровый» контейнер просто сидит в стороне
+# от mesh. Для самой первой партии узлов соседей по определению нет, поэтому
+# проверка разделена: zeptomesh_isolated_instances всегда считается и
+# показывается, а плейбук прерывается только при zeptomesh_require_peers=true.
+- name: Здоровье | Выделить экземпляры без соседей
+  ansible.builtin.set_fact:
+    zeptomesh_isolated_instances: >-
+      {{- zeptomesh_instances | map(attribute='container') | list
+          | difference(
+              (zeptomesh_status.results | default([]))
+              | selectattr('json.neighbors_connected', 'defined')
+              | rejectattr('json.neighbors_connected', 'lt', 1)
+              | map(attribute='item') | map(attribute='container') | list) -}}
+  when:
+    - not ansible_check_mode
+    - zeptomesh_query_status | bool
+    - zeptomesh_status.results is defined
+
+- name: Здоровье | Проверить, что узел присоединился к mesh
+  ansible.builtin.assert:
+    that:
+      - zeptomesh_isolated_instances | default([]) | length == 0
+    fail_msg: >-
+      Экземпляры без соседей: {{ zeptomesh_isolated_instances | join(', ') }}.
+      Типичные причины: разный PSK у узлов (см. docs/RUNBOOK.md §4.3), пустой или
+      неверный ZETOMESH_BOOTSTRAP (нужен /ip4/…/tcp/…/p2p/<peer id>), закрытые
+      межхостовым файрволом tcp+udp mesh-порты. Для самой первой партии узлов это
+      норма — пропустите проверку (-e zeptomesh_require_peers=false), соберите
+      Peer ID (collect_peerids.yml) и повторите запуск с
+      zeptomesh_auto_bootstrap=true.
+    quiet: true
+  when:
+    - zeptomesh_require_peers | bool
+    - not ansible_check_mode
+
+- name: Здоровье | Предупредить об изолированных узлах
+  ansible.builtin.debug:
+    msg: >-
+      ВНИМАНИЕ, без соседей: {{ zeptomesh_isolated_instances | join(', ') }}
+      (проверка отключена: zeptomesh_require_peers=false — это ожидаемо для
+      первой партии узлов, чьи Peer ID ещё не розданы).
+  when:
+    - zeptomesh_isolated_instances is defined
+    - zeptomesh_isolated_instances | length > 0
+    - not (zeptomesh_require_peers | bool)
+
+- name: Здоровье | Сформировать сводку по экземплярам хоста
+  ansible.builtin.set_fact:
+    zeptomesh_health_summary: >-
+      {{ (zeptomesh_health_summary | default([])) + [ '%s: peer=%s версия=%s соседи=%s/%s addrs=%s адаптер=%s(healthy=%s)' | format(
+          item.container,
+          st.peer_id | default('—'), st.version | default('—'),
+          st.neighbors_connected | default(0), st.neighbors_total | default(0),
+          st.addrs | default([]) | length,
+          st.adapter.name | default('—'), st.adapter.healthy | default('—')) ] }}
+  loop: "{{ zeptomesh_instances }}"
+  loop_control:
+    index_var: i
+    label: "{{ item.container }}"
+  vars:
+    st: "{{ ((zeptomesh_status | default({})).results | default([], true))[i] | default({}, true) }}"
+
+- name: Здоровье | Сводка по экземплярам хоста
+  ansible.builtin.debug:
+    msg: >-
+      {{ zeptomesh_health_summary | default(['нет данных'])
+         + (zeptomesh_check_mode_note if ansible_check_mode else []) }}
+  vars:
+    zeptomesh_check_mode_note:
+      - >-
+        check-mode: здоровье не проверялось — контейнеры не запускались,
+        ответов /healthz нет.

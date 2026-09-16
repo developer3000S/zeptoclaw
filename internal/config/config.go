@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/developer3000S/zeptoclaw/internal/triggers"
 	"gopkg.in/yaml.v3"
 )
 
@@ -58,6 +59,51 @@ type Config struct {
 	API          APIConfig          `yaml:"api"`
 	Telemetry    TelemetryConfig    `yaml:"telemetry"`
 	Storage      StorageConfig      `yaml:"storage"`
+	// Triggers are the fourth task source of ТЗ 6.6.1: cron-declared jobs the
+	// node injects into its own pipeline. They are hot-reloadable because the
+	// scheduler owns a live view of this list.
+	Triggers []TriggerConfig `yaml:"triggers"`
+}
+
+// TriggerConfig is one scheduled job declared in YAML. The shape mirrors the
+// admin API's trigger document so an operator reads the same fields in the
+// config file, in the API answer and in the store.
+type TriggerConfig struct {
+	ID       string    `yaml:"id"`
+	Name     string    `yaml:"name"`
+	Schedule string    `yaml:"schedule"`
+	Enabled  *bool     `yaml:"enabled"`
+	MaxRuns  int       `yaml:"max_runs"`
+	Job      JobConfig `yaml:"job"`
+}
+
+// JobConfig is the task a trigger submits, with the same names as the
+// submitted task document.
+type JobConfig struct {
+	Instruction    string            `yaml:"instruction"`
+	RequiredSkills []string          `yaml:"required_skills"`
+	TTL            int32             `yaml:"ttl"`
+	Priority       int32             `yaml:"priority"`
+	TimeoutSeconds int32             `yaml:"timeout_seconds"`
+	AllowShell     bool              `yaml:"allow_shell"`
+	AllowNetwork   bool              `yaml:"allow_network_tools"`
+	Labels         map[string]string `yaml:"labels"`
+}
+
+// ToDomain converts the YAML view into the scheduler's type. Keeping the
+// mapping here means the config tags are the only place the wire shape and the
+// domain shape are reconciled.
+func (t TriggerConfig) ToDomain() *triggers.Trigger {
+	return &triggers.Trigger{
+		ID: t.ID, Name: t.Name, Schedule: t.Schedule,
+		Enabled: t.Enabled, MaxRuns: t.MaxRuns,
+		Job: triggers.Job{
+			Instruction: t.Job.Instruction, RequiredSkills: t.Job.RequiredSkills,
+			TTL: t.Job.TTL, Priority: t.Job.Priority,
+			TimeoutSeconds: t.Job.TimeoutSeconds, AllowShell: t.Job.AllowShell,
+			AllowNetwork: t.Job.AllowNetwork, Labels: t.Job.Labels,
+		},
+	}
 }
 
 // NodeConfig describes the daemon's own identity on disk and on the wire.
@@ -66,7 +112,7 @@ type NodeConfig struct {
 	DataDir        string      `yaml:"data_dir"`
 	Listen         []string    `yaml:"listen"`
 	Announce       []string    `yaml:"announce"`
-	PrivateNetwork string      `yaml:"private_network_psk"` // optional hex PSK: isolates the mesh
+	PrivateNetwork string      `yaml:"private_network_psk"` // optional /1/<base32> PSK: isolates the mesh
 	Relay          RelayConfig `yaml:"relay"`
 }
 
@@ -179,6 +225,30 @@ type SearchRelayConfig struct {
 	RequestTimeout Duration `yaml:"request_timeout"`
 	// CacheTTL is how long a peer's refreshed skill answer is reused.
 	CacheTTL Duration `yaml:"cache_ttl"`
+	// Topic is the epidemic search plane (ТЗ 6.9.5 п.5): a pubsub topic peers
+	// use when the addressed ladder (local → table → cache → relay RPC) found
+	// no executor. Disabled by default — it is the widest blast radius step.
+	Topic SearchTopicConfig `yaml:"topic"`
+}
+
+// SearchTopicConfig bounds the signed skill-search topic. Requests name
+// skills only — never a task id or instruction — so a lookup cannot leak what
+// is being executed even though every subscriber sees it.
+type SearchTopicConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Name is the pubsub topic id. Peers must agree on it to see each other.
+	Name string `yaml:"name"`
+	// RequestTTL: requests older than this are not answered. It bounds how
+	// long a delayed redelivery can still trigger work and forgives modest
+	// clock skew in the friendly direction only (future timestamps refused).
+	RequestTTL Duration `yaml:"request_ttl"`
+	// MaxAnswers is how many matching replies the requester collects before
+	// stopping, and how many records a responder may return per record list.
+	MaxAnswers int `yaml:"max_answers"`
+	// AnswerCooldown is the minimum time between two answers this node sends
+	// for the same skill set, so a chatty search plane cannot become a reply
+	// storm on a busy mesh.
+	AnswerCooldown Duration `yaml:"answer_cooldown"`
 }
 
 // CapabilitiesConfig declares what this node can execute.
@@ -305,9 +375,30 @@ type APIConfig struct {
 
 // TelemetryConfig configures metrics and logs.
 type TelemetryConfig struct {
-	PrometheusListen string `yaml:"prometheus_listen"`
-	LogLevel         string `yaml:"log_level"`
-	StructuredLogs   bool   `yaml:"structured_logs"`
+	PrometheusListen string        `yaml:"prometheus_listen"`
+	LogLevel         string        `yaml:"log_level"`
+	StructuredLogs   bool          `yaml:"structured_logs"`
+	Tracing          TracingConfig `yaml:"tracing"`
+}
+
+// TracingConfig configures OpenTelemetry (ТЗ 14.3). The specification makes
+// task_id the cross-cutting identifier and only *recommends* OpenTelemetry, so
+// this is off by default: a node that never mentions it links no exporter and
+// pays nothing for the possibility.
+type TracingConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Endpoint is host:port for OTLP over HTTP, e.g. "localhost:4318". Empty
+	// defers to the standard OTEL_EXPORTER_OTLP_ENDPOINT variables.
+	Endpoint string `yaml:"endpoint"`
+	// Insecure sends plaintext; with a scheme-less endpoint that is what a local
+	// collector (Jaeger, Tempo) normally expects.
+	Insecure bool `yaml:"insecure"`
+	// SampleRatio is the head probability for traces this node starts, 0..1.
+	// 0 is read as 1 (sample everything): a zero ratio means "unset", not
+	// "sample nothing" — turning tracing off is `enabled: false`.
+	SampleRatio float64 `yaml:"sample_ratio"`
+	ServiceName string  `yaml:"service_name"`
+	Environment string  `yaml:"environment"`
 }
 
 // StorageConfig selects the local key/value engine.
@@ -384,6 +475,13 @@ func Default() *Config {
 					Fanout:         3,
 					RequestTimeout: Duration(8 * time.Second),
 					CacheTTL:       Duration(60 * time.Second),
+					Topic: SearchTopicConfig{
+						Enabled:        false,
+						Name:           "/zeptomesh/skillsearch/0.1.0",
+						RequestTTL:     Duration(30 * time.Second),
+						MaxAnswers:     8,
+						AnswerCooldown: Duration(10 * time.Second),
+					},
 				},
 			},
 		},
@@ -443,6 +541,11 @@ func Default() *Config {
 			PrometheusListen: "",
 			LogLevel:         "info",
 			StructuredLogs:   true,
+			Tracing: TracingConfig{
+				Enabled:     false,
+				SampleRatio: 1,
+				ServiceName: "zeptomesh-node",
+			},
 		},
 		Storage: StorageConfig{Engine: "badger", MaxTaskRecords: 100_000},
 	}
@@ -627,6 +730,20 @@ func (c *Config) Validate() error {
 	if c.Tasks.Forwarding.MaxParallelCandidates > c.Tasks.Forwarding.MaxFanout {
 		errs = append(errs, errors.New("tasks.forwarding.max_parallel_candidates must be <= max_fanout"))
 	}
+	if st := c.Tasks.Forwarding.SearchRelay.Topic; st.Enabled {
+		if st.Name == "" || !strings.HasPrefix(st.Name, "/") {
+			errs = append(errs, errors.New("tasks.forwarding.search_relay.topic.name must be a non-empty topic id starting with /"))
+		}
+		if st.RequestTTL <= 0 {
+			errs = append(errs, errors.New("tasks.forwarding.search_relay.topic.request_ttl must be > 0"))
+		}
+		if st.MaxAnswers <= 0 {
+			errs = append(errs, errors.New("tasks.forwarding.search_relay.topic.max_answers must be > 0"))
+		}
+		if st.AnswerCooldown < 0 {
+			errs = append(errs, errors.New("tasks.forwarding.search_relay.topic.answer_cooldown must be >= 0"))
+		}
+	}
 	if c.Tasks.MaxParallelPerPeer < 0 {
 		errs = append(errs, errors.New("tasks.max_parallel_tasks_per_peer must be >= 0"))
 	}
@@ -662,6 +779,21 @@ func (c *Config) Validate() error {
 	}
 	if c.API.Enabled && c.API.Listen == "" {
 		errs = append(errs, errors.New("api.listen is required when api.enabled"))
+	}
+	// Tracing (ТЗ 14.3): only checked when it is on — a disabled section must
+	// never be able to stop the node. The format rules are the ones that would
+	// otherwise surface as an opaque export failure at the first span.
+	if c.Telemetry.Tracing.Enabled {
+		t := c.Telemetry.Tracing
+		if t.SampleRatio < 0 || t.SampleRatio > 1 {
+			errs = append(errs, fmt.Errorf("telemetry.tracing.sample_ratio %v must be within 0..1", t.SampleRatio))
+		}
+		if ep := strings.TrimSpace(t.Endpoint); ep != "" {
+			if strings.ContainsAny(ep, " \t") || strings.HasPrefix(ep, "http://") || strings.HasPrefix(ep, "https://") ||
+				strings.Contains(ep, "/") || strings.HasSuffix(ep, ":") {
+				errs = append(errs, fmt.Errorf("telemetry.tracing.endpoint %q must be host:port without a scheme or path (use telemetry.tracing.insecure for plaintext)", ep))
+			}
+		}
 	}
 	if c.Security.RateLimit.RequestsPerSecond <= 0 {
 		c.Security.RateLimit.RequestsPerSecond = 20
@@ -737,6 +869,24 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Scheduled triggers: the schedule list is rejected as a whole before the
+	// node starts, so a typo in a cron expression is a startup error rather
+	// than a job that silently never runs.
+	triggerIDs := make(map[string]bool, len(c.Triggers))
+	for i, tc := range c.Triggers {
+		if strings.TrimSpace(tc.ID) == "" {
+			errs = append(errs, fmt.Errorf("triggers[%d]: id is required", i))
+			continue
+		}
+		if triggerIDs[tc.ID] {
+			errs = append(errs, fmt.Errorf("triggers: id %q is declared twice", tc.ID))
+		}
+		triggerIDs[tc.ID] = true
+		if err := tc.ToDomain().Validate(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
 	return errors.Join(errs...)
 }
 
@@ -753,6 +903,20 @@ func (c *Config) TasksDir() string {
 // AuditDir returns the security journal root.
 func (c *Config) AuditDir() string {
 	return filepath.Join(c.Node.DataDir, "audit")
+}
+
+// ConfigTriggers renders the YAML-declared schedules as domain objects. The
+// node's scheduler treats this list as the authoritative config view on a hot
+// reload.
+func (c *Config) ConfigTriggers() []*triggers.Trigger {
+	if len(c.Triggers) == 0 {
+		return nil
+	}
+	out := make([]*triggers.Trigger, 0, len(c.Triggers))
+	for _, tc := range c.Triggers {
+		out = append(out, tc.ToDomain())
+	}
+	return out
 }
 
 // EffectiveSkills returns declared skills minus operator-disabled ones.
@@ -802,6 +966,10 @@ func (c *Config) Diff(next *Config) ReloadDiff {
 	addHot("security.allowed_peers_file", c.Security.AllowedPeersFile != next.Security.AllowedPeersFile)
 	addHot("security.blocked_peers_file", c.Security.BlockedPeersFile != next.Security.BlockedPeersFile)
 	addHot("telemetry.log_level", c.Telemetry.LogLevel != next.Telemetry.LogLevel)
+	// The scheduler keeps a live, synchronised copy of the config-declared
+	// schedules; ReloadConfig pushes the new list through SetConfigTriggers,
+	// which validates as a group before swapping.
+	addHot("triggers", !reflect.DeepEqual(c.Triggers, next.Triggers))
 	// "Hot" means the value has a synchronised live owner (Policy, Limiter,
 	// slog.LevelVar) that ReloadConfig updates; the config struct itself is
 	// never mutated, so readers of Cfg keep a consistent startup snapshot.
@@ -819,5 +987,9 @@ func (c *Config) Diff(next *Config) ReloadDiff {
 	addRestart("storage", !reflect.DeepEqual(c.Storage, next.Storage))
 	addRestart("picoclaw", !reflect.DeepEqual(c.PicoClaw, next.PicoClaw))
 	addRestart("neighbors", !reflect.DeepEqual(c.Neighbors, next.Neighbors))
+	// The SDK installs its global providers once, at process start; turning
+	// tracing on or off needs a restart — and the trace context already riding
+	// in signed labels is untouched by it.
+	addRestart("telemetry.tracing", !reflect.DeepEqual(c.Telemetry.Tracing, next.Telemetry.Tracing))
 	return d
 }

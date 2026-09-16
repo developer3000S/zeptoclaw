@@ -284,6 +284,42 @@ func AckBody(a *pb.TaskAck) ([]byte, error) {
 	return e.out(), nil
 }
 
+// SearchRequestBody encodes the signing body of a search-topic request
+// (ТЗ 6.9.5 п.5). The signature scheme is deliberately excluded — the same
+// convention as every other body here.
+func SearchRequestBody(s *pb.SearchRequest) ([]byte, error) {
+	if s == nil {
+		return nil, ErrNilMessage
+	}
+	e := newEncoder()
+	e.str(s.GetRequestId())
+	e.str(s.GetRequesterPeerId())
+	e.strList(s.GetSkills())
+	e.varint(s.GetIssuedAt())
+	return e.out(), nil
+}
+
+// SearchReplyBody encodes the signing body of a search-topic answer. The
+// records are included field-by-field in wire order (no sorting: a responder's
+// preference order is part of what it signs).
+func SearchReplyBody(s *pb.SearchReply) ([]byte, error) {
+	if s == nil {
+		return nil, ErrNilMessage
+	}
+	e := newEncoder()
+	e.str(s.GetRequestId())
+	e.str(s.GetResponderPeerId())
+	e.varint(s.GetIssuedAt())
+	e.uvarint(uint64(len(s.GetPeers())))
+	for _, r := range s.GetPeers() {
+		e.str(r.GetPeerId())
+		e.strList(r.GetAddrs())
+		e.strList(r.GetSkills())
+		e.varint(r.GetSeenAt())
+	}
+	return e.out(), nil
+}
+
 // encoder accumulates a canonical byte encoding.
 type encoder struct{ buf []byte }
 

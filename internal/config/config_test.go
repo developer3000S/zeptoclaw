@@ -203,3 +203,174 @@ func containsFold(hay []string, needle string) bool {
 	}
 	return false
 }
+
+// ТЗ 6.6.1 п.4: cron-declared triggers live in the node config and must be
+// refused at startup when malformed — a typo in a schedule is otherwise a job
+// that silently never runs.
+func TestTriggersSectionParsesAndValidates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "node.yaml")
+	write := func(body string) (*Config, error) {
+		full := "node:\n  name: t\n  data_dir: " + filepath.Join(dir, "d") + "\n" + body
+		if err := os.WriteFile(path, []byte(full), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(path)
+	}
+
+	cfg, err := write(`
+triggers:
+  - id: nightly
+    name: Ночная уборка
+    schedule: "0 3 * * *"
+    max_runs: 10
+    job:
+      instruction: "чистка"
+      required_skills: [general]
+      ttl: 5
+      allow_network_tools: true
+  - id: quiet
+    enabled: false
+    schedule: "*/15 * * * *"
+    job:
+      instruction: "ping"
+`)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Triggers) != 2 {
+		t.Fatalf("triggers = %d, want 2", len(cfg.Triggers))
+	}
+	dom := cfg.ConfigTriggers()
+	if dom[0].ID != "nightly" || dom[0].MaxRuns != 10 || dom[0].Job.TTL != 5 {
+		t.Fatalf("first trigger = %+v", dom[0])
+	}
+	if !dom[0].EnabledOrDefault() {
+		t.Fatal("a trigger without an explicit enabled must default to on")
+	}
+	if dom[1].EnabledOrDefault() {
+		t.Fatal("enabled: false must survive the conversion")
+	}
+	if dom[1].Job.Instruction != "ping" {
+		t.Fatalf("job mapping = %+v", dom[1].Job)
+	}
+
+	if _, err := write("triggers:\n  - id: bad\n    schedule: \"61 * * * *\"\n    job:\n      instruction: x\n"); err == nil {
+		t.Fatal("an out-of-range cron field must fail validation")
+	} else if !strings.Contains(err.Error(), "minute") {
+		t.Fatalf("error must name the broken field: %v", err)
+	}
+	if _, err := write("triggers:\n  - id: a\n    schedule: \"* * * * *\"\n    job:\n      instruction: x\n  - id: a\n    schedule: \"0 4 * * *\"\n    job:\n      instruction: y\n"); err == nil || !strings.Contains(err.Error(), "twice") {
+		t.Fatalf("duplicate trigger ids must be refused: %v", err)
+	}
+	if _, err := write("triggers:\n  - schedule: \"* * * * *\"\n    job:\n      instruction: x\n"); err == nil || !strings.Contains(err.Error(), "id is required") {
+		t.Fatalf("a trigger without an id must be refused: %v", err)
+	}
+	if _, err := write("triggers:\n  - id: empty\n    schedule: \"* * * * *\"\n    job: {}\n"); err == nil || !strings.Contains(err.Error(), "instruction") {
+		t.Fatalf("an empty instruction must be refused: %v", err)
+	}
+
+	// Diff reports the section as hot, because ReloadConfig pushes the new list
+	// through the scheduler's live owner.
+	base := Default()
+	base.Node.DataDir = dir
+	next := Default()
+	next.Node.DataDir = dir
+	next.Triggers = []TriggerConfig{{ID: "nightly", Schedule: "0 3 * * *", Job: JobConfig{Instruction: "x"}}}
+	if err := base.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := next.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	d := base.Diff(next)
+	if !containsFold(d.Hot, "triggers") {
+		t.Fatalf("Diff().Hot = %v, want triggers", d.Hot)
+	}
+}
+
+// TestTracingSectionParsesAndValidates (ТЗ 14.3): the tracing block is optional
+// and off by default; a malformed endpoint or ratio is refused only when it
+// would actually be used — a disabled section must never stop a node.
+func TestTracingSectionParsesAndValidates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "node.yaml")
+	write := func(body string) (*Config, error) {
+		full := "node:\n  name: t\n  data_dir: " + filepath.Join(dir, "d") + "\n" + body
+		if err := os.WriteFile(path, []byte(full), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(path)
+	}
+
+	// Absent section: defaults, disabled.
+	cfg, err := write("")
+	if err != nil {
+		t.Fatalf("Load without tracing: %v", err)
+	}
+	if cfg.Telemetry.Tracing.Enabled {
+		t.Fatal("tracing must be off unless configured")
+	}
+	if cfg.Telemetry.Tracing.ServiceName != "zeptomesh-node" {
+		t.Fatalf("default service name = %q", cfg.Telemetry.Tracing.ServiceName)
+	}
+
+	cfg, err = write(`
+telemetry:
+  tracing:
+    enabled: true
+    endpoint: "localhost:4318"
+    insecure: true
+    sample_ratio: 0.25
+    service_name: "zepto-a"
+    environment: "staging"
+`)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	tr := cfg.Telemetry.Tracing
+	if !tr.Enabled || tr.Endpoint != "localhost:4318" || !tr.Insecure ||
+		tr.SampleRatio != 0.25 || tr.ServiceName != "zepto-a" || tr.Environment != "staging" {
+		t.Fatalf("tracing = %+v", tr)
+	}
+
+	// A disabled section is not validated at all: operators keep stale or
+	// experimental values in the file without paying a startup failure.
+	if _, err := write("telemetry:\n  tracing:\n    enabled: false\n    endpoint: \"http://bad/url\"\n    sample_ratio: 9\n"); err != nil {
+		t.Fatalf("disabled tracing must not be validated: %v", err)
+	}
+
+	for _, body := range []string{
+		"telemetry:\n  tracing:\n    enabled: true\n    endpoint: \"http://localhost:4318\"\n",
+		"telemetry:\n  tracing:\n    enabled: true\n    endpoint: \"localhost:4318/v1/traces\"\n",
+		"telemetry:\n  tracing:\n    enabled: true\n    endpoint: \"localhost:4318 localhost:4319\"\n",
+		"telemetry:\n  tracing:\n    enabled: true\n    endpoint: \"localhost:\"\n",
+	} {
+		if _, err := write(body); err == nil || !strings.Contains(err.Error(), "telemetry.tracing.endpoint") {
+			t.Fatalf("endpoint %q must be refused with a named error, got %v", body, err)
+		}
+	}
+	for _, ratio := range []string{"-0.1", "1.5"} {
+		body := "telemetry:\n  tracing:\n    enabled: true\n    sample_ratio: " + ratio + "\n"
+		if _, err := write(body); err == nil || !strings.Contains(err.Error(), "sample_ratio") {
+			t.Fatalf("sample_ratio %s must be refused: %v", ratio, err)
+		}
+	}
+
+	// Turning tracing on requires a restart: the SDK installs globals once.
+	base := Default()
+	base.Node.DataDir = dir
+	next := Default()
+	next.Node.DataDir = dir
+	next.Telemetry.Tracing.Enabled = true
+	if err := base.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := next.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	d := base.Diff(next)
+	if !containsFold(d.RequiresRestart, "telemetry.tracing") {
+		t.Fatalf("Diff().RequiresRestart = %v, want telemetry.tracing", d.RequiresRestart)
+	}
+}

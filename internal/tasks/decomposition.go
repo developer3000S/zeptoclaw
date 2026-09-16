@@ -1,13 +1,18 @@
 package tasks
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+
 	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
+	"github.com/developer3000S/zeptoclaw/internal/tracing"
 	"github.com/developer3000S/zeptoclaw/internal/wire"
 )
 
@@ -47,7 +52,11 @@ type fanout struct {
 	parentID string
 	env      *pb.TaskEnvelope
 	deadline time.Time
-	specs    []*SubtaskRequest
+	// ctx keeps the plan span's trace for child re-injection (ТЗ 14.3); it is a
+	// span-only context — carrying a cancellation across the fanout's whole
+	// lifetime would abort children the parent can still wait for.
+	ctx   context.Context
+	specs []*SubtaskRequest
 	// attempts[i] counts re-injections of child i; live[i] is its current id.
 	attempts []int
 	live     []string
@@ -95,8 +104,9 @@ func (f *fanout) subRequest(i int) BuildRequest {
 }
 
 // decompose injects every child of f and marks the parent as waiting. It is
-// called with f already attached to the parent handle.
-func (m *Manager) decompose(f *fanout) error {
+// called with f already attached to the parent handle. ctx carries the origin's
+// submit span, so every subtask hangs off the same trace as its parent.
+func (m *Manager) decompose(ctx context.Context, f *fanout) error {
 	if len(f.specs) == 0 {
 		return errors.New("tasks: empty subtask plan")
 	}
@@ -106,8 +116,18 @@ func (m *Manager) decompose(f *fanout) error {
 	if f.env.GetTtl()-1 < 1 {
 		return fmt.Errorf("tasks: ttl %d is too small to decompose", f.env.GetTtl())
 	}
+	pctx, planSpan := m.startTaskSpan(ctx, tracing.SpanPlan, f.env)
+	planSpan.SetAttributes(attribute.Int("zeptomesh.subtasks", len(f.specs)))
+	defer planSpan.End()
+	// Re-injection of a failed child happens in foldChild, far from this call
+	// stack. Carrying the plan's span context on the fanout keeps the retry in
+	// the same trace; spanOnly makes that safe to keep (no cancellation, no
+	// deadline rides along).
+	f.ctx = spanOnly(pctx)
 	for i := range f.specs {
-		if err := m.injectChild(f, i); err != nil {
+		if err := m.injectChild(pctx, f, i); err != nil {
+			planSpan.RecordError(err)
+			planSpan.SetStatus(codes.Error, err.Error())
 			return err
 		}
 	}
@@ -115,10 +135,14 @@ func (m *Manager) decompose(f *fanout) error {
 	return nil
 }
 
-func (m *Manager) injectChild(f *fanout, i int) error {
+func (m *Manager) injectChild(ctx context.Context, f *fanout, i int) error {
 	childID := NewID()
 	req := f.subRequest(i)
 	child := DeriveSubtask(f.env, childID, req, time.Now().UTC())
+	// A subtask is authored here, so this is where its trace context may be
+	// stamped; DeriveSubtask already fixed the digest, hence the recomputation.
+	injectTraceContext(ctx, child)
+	child.ContextDigest = ContentDigest(child)
 	if err := Validate(child, m.cfg.Tasks.MaxPayloadBytes, time.Now().UTC()); err != nil {
 		return fmt.Errorf("tasks: subtask %d invalid: %w", i, err)
 	}
@@ -144,7 +168,7 @@ func (m *Manager) injectChild(f *fanout, i int) error {
 	f.live[i] = childID
 	f.mu.Unlock()
 
-	go m.routeOrigin(child, cdeadline)
+	go m.routeOrigin(spanOnly(ctx), child, cdeadline)
 	return nil
 }
 
@@ -222,7 +246,7 @@ func (m *Manager) foldChild(f *fanout, childID string, res *pb.TaskResult) {
 		f.mu.Unlock()
 		m.log.Info("subtask_retry", "task_id", childID, "parent_task_id", f.parentID,
 			"attempt", attempt, "class", res.GetErrorClass().String())
-		if err := m.injectChild(f, idx); err != nil {
+		if err := m.injectChild(f.ctx, f, idx); err != nil {
 			m.log.Warn("subtask_retry_failed", "task_id", childID,
 				"parent_task_id", f.parentID, "err", err.Error())
 			// Could not re-inject: settle this slot with the original failure.

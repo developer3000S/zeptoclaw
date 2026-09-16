@@ -1,0 +1,22 @@
+{#
+  Только значение: предпочтительные точки входа через запятую — готовое
+  ZETOMESH_BOOTSTRAP / discovery.bootstrap (ТЗ 15.4.6).
+
+  ВНИМАНИЕ: файл обязан оставаться ровно одной строкой без комментариев —
+  его подставляют как есть:
+      -e zeptomesh_bootstrap="$(cat collected/<группа>.bootstrap.txt)"
+      ./install.sh --mode docker --bootstrap "$(cat collected/...txt)"
+  Поэтому здесь нет ни #, ни Jinja-комментариев в теле, а все блоки цикла
+  обрезаются до/после ({%- -%}): иначе в файле появятся пустые строки.
+  Пояснения для оператора — в README.md и в шапке <группа>.peerids.yml.
+
+  Собственные адреса узла при подстановке исключает роль (узлу некуда звонить
+  «в себя»); в файле — полный список группы.
+#}
+{% set collected = [] -%}
+{% for host in zeptomesh_group_peerids.keys() | sort -%}
+{%   for instance in zeptomesh_group_peerids[host].keys() | map('int') | sort -%}
+{%     set _ = collected.append(zeptomesh_group_peerids[host][instance | string] | first) -%}
+{%   endfor -%}
+{% endfor -%}
+{{ collected | unique | join(',') }}

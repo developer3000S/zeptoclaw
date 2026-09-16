@@ -28,6 +28,11 @@ const (
 	SchemeRebind = "zeptomesh-rebind-v1"
 	// SchemeSkillsSync signs a peer's disclosed skill descriptor set.
 	SchemeSkillsSync = "zeptomesh-skills-sync-v1"
+	// SchemeSearchRequest/SchemeSearchReply sign the epidemic search-topic
+	// lookups (ТЗ 6.9.5 п.5). Separate schemes keep a request bytes from
+	// verifying as a reply and vice versa even if their bodies collided.
+	SchemeSearchRequest = "zeptomesh-search-request-v1"
+	SchemeSearchReply   = "zeptomesh-search-reply-v1"
 )
 
 // KeyLookup resolves a public key for a peer whose id does not embed one.
@@ -429,4 +434,76 @@ func VerifyAck(a *pb.TaskAck, lookup KeyLookup) error {
 		return err
 	}
 	return Verify(pid, wire.Digest(SchemeAck, body), a.GetSignature(), lookup)
+}
+
+// SignSearchRequest signs a search-topic request in place. The requester signs
+// with its own key; the receiver checks that against the authenticated pubsub
+// sender, not the claim inside the message (the same rule Membership follows).
+func (s *Signer) SignSearchRequest(r *pb.SearchRequest) error {
+	body, err := wire.SearchRequestBody(r)
+	if err != nil {
+		return err
+	}
+	sig, err := s.id.Sign(wire.Digest(SchemeSearchRequest, body))
+	if err != nil {
+		return err
+	}
+	r.Signature = sig
+	r.SignatureScheme = SchemeSearchRequest
+	return nil
+}
+
+// VerifySearchRequest checks a request against the sender of the pubsub
+// message that carried it.
+func VerifySearchRequest(r *pb.SearchRequest, sender peer.ID, lookup KeyLookup) error {
+	return verifySearch(SchemeSearchRequest, r.GetRequestId(), r.GetRequesterPeerId(),
+		r.GetSignatureScheme(), r.GetSignature(), sender, lookup,
+		func() ([]byte, error) { return wire.SearchRequestBody(r) }, "search request")
+}
+
+// SignSearchReply signs a search-topic answer in place.
+func (s *Signer) SignSearchReply(r *pb.SearchReply) error {
+	body, err := wire.SearchReplyBody(r)
+	if err != nil {
+		return err
+	}
+	sig, err := s.id.Sign(wire.Digest(SchemeSearchReply, body))
+	if err != nil {
+		return err
+	}
+	r.Signature = sig
+	r.SignatureScheme = SchemeSearchReply
+	return nil
+}
+
+// VerifySearchReply checks an answer against the sender of the pubsub message
+// that carried it.
+func VerifySearchReply(r *pb.SearchReply, sender peer.ID, lookup KeyLookup) error {
+	return verifySearch(SchemeSearchReply, r.GetRequestId(), r.GetResponderPeerId(),
+		r.GetSignatureScheme(), r.GetSignature(), sender, lookup,
+		func() ([]byte, error) { return wire.SearchReplyBody(r) }, "search reply")
+}
+
+// verifySearch is the shared shape of the two checks: a search message is only
+// worth anything if the authenticated transport sender is the peer it claims to
+// be, so the claimed id is compared before any crypto runs.
+func verifySearch(scheme, requestID, claimed, gotScheme string, sig []byte, sender peer.ID,
+	lookup KeyLookup, body func() ([]byte, error), what string) error {
+	if requestID == "" {
+		return fmt.Errorf("security: %s without a request id", what)
+	}
+	if len(sig) == 0 {
+		return ErrUnsigned
+	}
+	if claimed != sender.String() {
+		return fmt.Errorf("security: %s claims %s but arrived from %s", what, claimed, sender)
+	}
+	if err := checkScheme(gotScheme, scheme); err != nil {
+		return err
+	}
+	raw, err := body()
+	if err != nil {
+		return err
+	}
+	return Verify(sender, wire.Digest(scheme, raw), sig, lookup)
 }

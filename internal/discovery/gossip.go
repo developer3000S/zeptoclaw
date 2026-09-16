@@ -64,30 +64,23 @@ type Membership struct {
 	wg     sync.WaitGroup
 }
 
-// NewMembership joins the gossip topic.
-func NewMembership(ctx context.Context, h host.Host, cfg config.GossipConfig, policy *security.Policy, audit *security.Audit, logger *slog.Logger) (*Membership, error) {
+// NewMembership joins the gossip topic. The PubSub router is passed in, not
+// created here: a second NewGossipSub on the same host re-registers the same
+// stream handler and silently takes the first router's subscriptions away, so
+// every topic this node uses (membership and the skill search plane) must ride
+// one shared router (ТЗ 6.9.5 п.5).
+func NewMembership(ctx context.Context, h host.Host, ps *pubsub.PubSub, cfg config.GossipConfig, policy *security.Policy, audit *security.Audit, logger *slog.Logger) (*Membership, error) {
 	if h == nil {
 		return nil, errors.New("discovery: nil host")
+	}
+	if ps == nil {
+		return nil, errors.New("discovery: pubsub router required")
 	}
 	if cfg.Topic == "" {
 		return nil, errors.New("discovery: gossip.topic is required")
 	}
 	if cfg.Heartbeat.D() <= 0 {
 		return nil, errors.New("discovery: gossip.heartbeat must be > 0")
-	}
-	ps, err := pubsub.NewGossipSub(ctx, h,
-		pubsub.WithPeerFilter(func(p peer.ID, topic string) bool {
-			if policy != nil && !policy.AllowConnection(p) {
-				if audit != nil {
-					audit.Log(security.AuditEvent{Event: "gossip_filtered", PeerID: p.String(), Reason: "blocked"})
-				}
-				return false
-			}
-			return true
-		}),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("discovery: gossipsub: %w", err)
 	}
 	topic, err := ps.Join(cfg.Topic)
 	if err != nil {

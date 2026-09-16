@@ -1,0 +1,50 @@
+---
+# Сбор начальных Peer ID с уже развёрнутых узлов (ТЗ 15.4.6).
+#
+# Ничего не устанавливает и не перезапускает: роль вызывается в этапе collect,
+# где остаются только шаги «проверить здоровье» и «собрать Peer ID».
+#
+# Источник данных — HTTP-API узла (не логи и не разбор ключей):
+#   GET /healthz       → {"status":"ok","peer_id":"12D3K…"}
+#   GET /api/v1/status → addrs = Node.DiscoverableAddrs() — адреса, которые узел
+#                        сам себе анонсирует (announce из конфига либо адреса
+#                        интерфейсов), всегда с суффиксом /p2p/<peer id>.
+#
+# Запросы идут с самого хоста к loopback-порту API контейнера, поэтому наружу
+# админ-API не открывается никогда (docs/DEPLOYMENT.md §3).
+#
+# Артефакты на контроллере в collected/:
+#   mesh_nodes.peerids.yml     — {хост: {экземпляр: [multiaddr,…]}}; роль читает
+#                                его через include_vars (zeptomesh_auto_bootstrap)
+#   mesh_nodes.bootstrap.txt   — одна строка через запятую = ZETOMESH_BOOTSTRAP
+#   mesh_nodes.peerids.csv     — хост, экземпляр, peer id, источник адреса
+#
+# Запуск:
+#   ansible-playbook -i inventory.example.yml collect_peerids.yml
+#   ansible-playbook -i inventory.example.yml collect_peerids.yml \
+#       --limit anchor-1,anchor-2                 # только часть группы
+#   cat collected/mesh_nodes.bootstrap.txt        # готовое значение
+#
+# Дальше этим значением разворачивают следующую партию:
+#   ansible-playbook -i inventory.example.yml deploy.yml \
+#       -e zeptomesh_bootstrap="$(cat collected/mesh_nodes.bootstrap.txt)"
+# (или просто оставить zeptomesh_auto_bootstrap=true — роль подставит сама).
+
+- name: Собрать начальные Peer ID узлов ZeptoClaw Agent Mesh (ТЗ 15.4.6)
+  hosts: mesh_nodes
+  gather_facts: true
+  become: true
+  serial: "{{ zeptomesh_serial | default(25) }}"
+  roles:
+    - role: zeptomesh
+      vars:
+        # Только здоровье + Peer ID: узлы не трогаем.
+        zeptomesh_stage: collect
+        zeptomesh_host_group: mesh_nodes
+        # Собранные адреса не должны содержать секретов, а вот вывод health-
+        # задач полезен оператору.
+        zeptomesh_no_log: false
+        # Требование «узел видит соседей» здесь по умолчанию выключено (роль:
+        # zeptomesh_require_peers=false) — первая партия узлов по определению
+        # стоит без соседей, её Peer ID только соберут. Переопределяется снаружи:
+        #   -e zeptomesh_require_peers=true

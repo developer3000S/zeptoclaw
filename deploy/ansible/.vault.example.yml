@@ -1,0 +1,39 @@
+# ШАБЛОН — не рабочий файл. Скопировать в зашифрованный vault и заполнить:
+#
+#   cp deploy/ansible/.vault.example.yml deploy/ansible/group_vars/mesh_nodes/vault.yml
+#   ansible-vault edit deploy/ansible/group_vars/mesh_nodes/vault.yml
+#
+# либо держать секреты в отдельном файле и передавать явно:
+#
+#   ansible-vault create vault.yml
+#   ansible-playbook -i inventory.yml deploy.yml --vault-password-file ~/.vault-pass
+#   ansible-playbook -i inventory.yml deploy.yml -e @vault.yml
+#
+# В git такой файл с реальными значениями попадать не должен: в роли значения
+# уходят только в env-файлы экземпляров (права 0600) и в Env контейнера.
+#
+# Проверить совпадение PSK между узлами до развёртывания: разные PSK = разные
+# сети, узлы не увидят друг друга никогда (docs/RUNBOOK.md §4.3).
+
+# Общий ключ закрытой сети (одинаков у всех узлов одной сети). Формат —
+# swarm.key: «/1/<base32 от 32 байт>» (52 символа + «====»); разбирает его узел
+# в internal/p2p.decodePSK, и ошибка в формате роняет контейнер на старте —
+# роль проверяет формат на этапе preflight. Генерация:
+#   docker run --rm --entrypoint zeptomesh-node zeptomesh-node:0.1.0 psk
+#   (или bin/zeptomesh-node psk)
+zeptomesh_psk: "/1/REPLACE_ME_BASE32_52_CHARS===="
+
+# Bearer-токен админ-API (ZETOMESH_API_TOKEN; читается как api.auth_token_env).
+# Обязательно, если API когда-либо смотрит не на loopback, и при trust_mode=private
+# (иначе узел сам предупреждает: admin_api_unauthenticated).
+zeptomesh_api_token: "REPLACE_ME_long_random_token"
+
+# Токен Pico Protocol для picoclaw.mode=http (PICOCLAW_MESH_PICO_TOKEN).
+# Нужен только в http-режиме адаптера; в stub/binary оставьте пустым.
+zeptomesh_pico_token: ""
+
+# Доступ к реестру образов — только если zeptomesh_image_source=pull.
+# Логин не входит в роль: выполните отдельным шагом/плейбуком, например
+#   ansible -i inventory.yml -m community.docker.docker_login -a \
+#     "registry=<registry> username=<user> password={{ vault_registry_password }}"
+vault_registry_password: ""

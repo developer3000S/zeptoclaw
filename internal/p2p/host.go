@@ -81,16 +81,38 @@ func New(ctx context.Context, opts Options) (*Host, error) {
 	// libp2p.New; the relay peer source captures it and resolves it on use.
 	var dhtInstance *dht.IpfsDHT
 
+	// The PSK must be decoded before the transports are chosen: go-libp2p's
+	// QUIC transport refuses to build at all when a private network is
+	// configured ("QUIC doesn't support private networks yet"), so a node
+	// under PSK serves TCP only and its quic-v1 listen/announce addresses
+	// are dropped instead of killing the host.
+	psk, err := decodePSK(cfg.Node.PrivateNetwork)
+	if err != nil {
+		return nil, fmt.Errorf("p2p: private network: %w", err)
+	}
+	listen := cfg.Node.Listen
+	if psk != nil {
+		listen = tcpOnlyAddrs(listen)
+		if len(listen) == 0 {
+			return nil, fmt.Errorf("p2p: private network needs at least one TCP listen address (all %d configured addresses are QUIC)", len(cfg.Node.Listen))
+		}
+		logger.Warn("quic_disabled_private_network",
+			"reason", "the QUIC transport does not support private networks yet; this node serves TCP only",
+			"dropped", len(cfg.Node.Listen)-len(listen))
+	}
+
 	libopts := []libp2p.Option{
 		libp2p.Identity(opts.Key),
-		libp2p.ListenAddrStrings(cfg.Node.Listen...),
+		libp2p.ListenAddrStrings(listen...),
 		// Noise is the security channel for TCP; QUIC carries its own TLS 1.3
 		// handshake but still authenticates with the same Ed25519 key.
 		libp2p.Security(noise.ID, noise.New),
 		libp2p.Muxer(yamux.ID, yamux.DefaultTransport),
-		libp2p.Transport(quic.NewTransport),
 		libp2p.Transport(tcp.NewTCPTransport),
 		libp2p.UserAgent("zeptomesh/" + version.Version),
+	}
+	if psk == nil {
+		libopts = append(libopts, libp2p.Transport(quic.NewTransport))
 	}
 	// Relay (ТЗ 6.3.3.4). Disabled unless configured: a node only borrows a
 	// peer's circuit when it cannot dial or get dialed directly, and only
@@ -124,14 +146,14 @@ func New(ctx context.Context, opts Options) (*Host, error) {
 		}
 	}
 	if len(cfg.Node.Announce) > 0 {
-		libopts = append(libopts, libp2p.AddrsFactory(staticAddrsFactory(cfg.Node.Announce)))
+		announce := cfg.Node.Announce
+		if psk != nil {
+			announce = tcpOnlyAddrs(announce)
+		}
+		libopts = append(libopts, libp2p.AddrsFactory(staticAddrsFactory(announce)))
 	}
 	if opts.Gater != nil {
 		libopts = append(libopts, libp2p.ConnectionGater(opts.Gater))
-	}
-	psk, err := decodePSK(cfg.Node.PrivateNetwork)
-	if err != nil {
-		return nil, fmt.Errorf("p2p: private network: %w", err)
 	}
 	if psk != nil {
 		libopts = append(libopts, libp2p.PrivateNetwork(psk))
@@ -332,6 +354,38 @@ func decodePSK(s string) (pnet.PSK, error) {
 		return nil, fmt.Errorf("psk must be 32 bytes, got %d", len(raw))
 	}
 	return pnet.PSK(raw), nil
+}
+
+// tcpOnlyAddrs keeps the addresses a private-network host can actually serve:
+// QUIC (and QUIC-based WebTransport) refuse to build under a PSK, so under
+// PSK a host runs TCP only and the rest are dropped rather than crash it.
+func tcpOnlyAddrs(addrs []string) []string {
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		m, err := ma.NewMultiaddr(a)
+		if err != nil {
+			out = append(out, a) // let libp2p report the parse error itself
+			continue
+		}
+		if isQuicBacked(m) {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func isQuicBacked(m ma.Multiaddr) bool {
+	_, err := m.ValueForProtocol(ma.P_QUIC)
+	if err == nil {
+		return true
+	}
+	_, err = m.ValueForProtocol(ma.P_QUIC_V1)
+	if err == nil {
+		return true
+	}
+	_, err = m.ValueForProtocol(ma.P_WEBTRANSPORT)
+	return err == nil
 }
 
 // GeneratePSK builds a fresh private-network key for operators.

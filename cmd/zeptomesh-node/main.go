@@ -25,6 +25,7 @@ import (
 	"github.com/developer3000S/zeptoclaw/internal/node"
 	"github.com/developer3000S/zeptoclaw/internal/p2p"
 	"github.com/developer3000S/zeptoclaw/internal/security"
+	"github.com/developer3000S/zeptoclaw/internal/telemetry"
 	"github.com/developer3000S/zeptoclaw/internal/version"
 )
 
@@ -53,6 +54,9 @@ Commands:
   skill-set   document one advertised skill    (POST /api/v1/skills)
   skill-rm    retire a skill's documentation   (DELETE /api/v1/skills/<name>)
   skills-sync reconcile peer skill descriptors now (POST /api/v1/skills/sync)
+  triggers    list scheduled triggers          (GET /api/v1/triggers)
+  trigger-add create or replace a trigger      (POST /api/v1/triggers)
+  trigger-rm  delete a stored trigger          (DELETE /api/v1/triggers/<id>)
   rebinds     show retired and rotated peer identities (GET /api/v1/rebinds)
   genkey      create an Ed25519 identity key file
   rotate      replace the node key, announcing the handover to the mesh
@@ -117,6 +121,12 @@ func main() {
 		err = clientSkillRm(args)
 	case "skills-sync":
 		err = clientSkillsSync(args)
+	case "triggers":
+		err = clientTriggers(args)
+	case "trigger-add":
+		err = clientTriggerAdd(args)
+	case "trigger-rm":
+		err = clientTriggerRm(args)
 	case "rebinds":
 		err = clientRebinds(args)
 	case "-h", "--help", "help":
@@ -163,6 +173,21 @@ func runNode(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Tracing is installed before the node exists so the very first task this
+	// process submits is already covered. When disabled, Setup returns a no-op
+	// shutdown and links nothing (ТЗ 14.3).
+	tracingShutdown, err := telemetry.Setup(ctx, telemetry.Config{
+		Enabled:     cfg.Telemetry.Tracing.Enabled,
+		Endpoint:    cfg.Telemetry.Tracing.Endpoint,
+		Insecure:    cfg.Telemetry.Tracing.Insecure,
+		SampleRatio: cfg.Telemetry.Tracing.SampleRatio,
+		ServiceName: cfg.Telemetry.Tracing.ServiceName,
+		Environment: cfg.Telemetry.Tracing.Environment,
+	}, logger)
+	if err != nil {
+		logger.Warn("tracing_disabled", "err", err.Error())
+	}
+
 	n, err := node.New(node.Options{
 		Config: cfg, Logger: logger, ConfigPath: *cfgPath, LevelVar: levelVar,
 	})
@@ -193,6 +218,11 @@ func runNode(args []string) error {
 		defer scancel()
 		if err := n.Stop(sctx); err != nil {
 			logger.Error("node_stop", "err", err.Error())
+		}
+		// After the node: the manager's last spans are produced during shutdown,
+		// and flushing them before it stops would drop them.
+		if err := tracingShutdown(sctx); err != nil {
+			logger.Error("tracing_shutdown", "err", err.Error())
 		}
 	}
 

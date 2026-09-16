@@ -1,0 +1,114 @@
+---
+# ТЗ 15.4.3 — «сгенерировать или доставить конфигурацию».
+#
+# Доставка, а не генерация: configs/node.yaml уже параметризован ${VAR:-default},
+# и эти значения раскрывает загрузчик узла (internal/config.expandEnv), поэтому
+# ОДИН файл обслуживает все экземпляры хоста. Различия экземпляров (индекс,
+# порты, PSK, bootstrap, токен) едут в env-файле на экземпляр — ровно как в
+# install.sh (write_instance_env) и в deploy/docker/docker-compose.yml.
+#
+# Файл лежит в zeptomesh_conf_dir, который монтируется в контейнер на чтение по
+# пути из Dockerfile (/etc/zeptomesh) — там же ждёт его ENV ZETOMESH_CONFIG.
+# Read-only важно: процесс узла не должен иметь возможности расширить
+# собственные ограничения (ТЗ 11.4).
+#
+# Перезапуск при смене конфига делает не handler, а метка
+# com.zeptomesh.config-hash (см. run.yml): хэш фактического содержимого файла на
+# хосте попадает в labels контейнера, и docker_container сам пересоздаёт узел
+# при расхождении. Так ловятся и правки, внесённые мимо ansible, и не происходит
+# двойного bounce на свежей установке (handler сработал бы до запуска контейнера
+# и не перезапустил бы ничего).
+
+- name: Конфиг | Доставить шаблон конфигурации узла
+  ansible.builtin.copy:
+    src: "{{ zeptomesh_config_source }}"
+    dest: "{{ zeptomesh_host_config_path }}"
+    owner: "{{ zeptomesh_config_owner }}"
+    group: "{{ zeptomesh_config_group }}"
+    mode: "{{ zeptomesh_config_mode }}"
+    # По умолчанию не перезаписывать: ручные правки на узле дороже, чем «конфиг
+    # сам собой синхронизировался». -e zeptomesh_config_force=true — явное
+    # решение оператора.
+    force: "{{ zeptomesh_config_force | bool }}"
+  when: zeptomesh_config_deliver | bool
+
+- name: Конфиг | Прочитать развёрнутый конфигурационный файл
+  ansible.builtin.slurp:
+    src: "{{ zeptomesh_host_config_path }}"
+  register: zeptomesh_config_slurp
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Конфиг | Вычислить хэш содержимого конфигурации
+  ansible.builtin.set_fact:
+    zeptomesh_config_hash: >-
+      {{- (zeptomesh_config_slurp.content | b64decode | hash('sha256'))[0:16]
+          if (zeptomesh_config_slurp.content is defined) else 'unknown' -}}
+
+# Разрешённые/заблокированные списки пиров (base58 peer id, по строке на пира).
+# Файл опционален: LoadPeerFile молча пропускает отсутствующий путь
+# (internal/security/trust.go), поэтому «пустой список» означает «файла нет»,
+# а не «пустой allow-list = всем отказано».
+- name: Конфиг | Доставить allow-список пиров
+  ansible.builtin.copy:
+    dest: "{{ zeptomesh_conf_dir }}/allowed_peers.txt"
+    owner: "{{ zeptomesh_config_owner }}"
+    group: "{{ zeptomesh_config_group }}"
+    mode: "{{ zeptomesh_config_mode }}"
+    content: |
+      # managed by ansible/zeptomesh — security.allowed_peers_file
+      {% for pid in zeptomesh_allowed_peers %}
+      {{ pid }}
+      {% endfor %}
+  when: zeptomesh_allowed_peers | length > 0
+
+- name: Конфиг | Убрать allow-список, если он больше не задан
+  ansible.builtin.file:
+    path: "{{ zeptomesh_conf_dir }}/allowed_peers.txt"
+    state: absent
+  when: zeptomesh_allowed_peers | length == 0
+
+- name: Конфиг | Доставить block-список пиров
+  ansible.builtin.copy:
+    dest: "{{ zeptomesh_conf_dir }}/blocked_peers.txt"
+    owner: "{{ zeptomesh_config_owner }}"
+    group: "{{ zeptomesh_config_group }}"
+    mode: "{{ zeptomesh_config_mode }}"
+    content: |
+      # managed by ansible/zeptomesh — security.blocked_peers_file
+      {% for pid in zeptomesh_blocked_peers %}
+      {{ pid }}
+      {% endfor %}
+  when: zeptomesh_blocked_peers | length > 0
+
+- name: Конфиг | Убрать block-список, если он больше не задан
+  ansible.builtin.file:
+    path: "{{ zeptomesh_conf_dir }}/blocked_peers.txt"
+    state: absent
+  when: zeptomesh_blocked_peers | length == 0
+
+# Один env-файл на экземпляр, права 0600: внутри PSK закрытой сети и
+# bearer-токен админ-API. Файлы живут ВНЕ монтируемого каталога конфигурации —
+# в контейнер они не попадают, модуль передаёт их содержимое как Env.
+- name: Конфиг | Сгенерировать окружение экземпляров
+  ansible.builtin.template:
+    src: instance.env.j2
+    dest: "{{ item.env_file }}"
+    owner: "{{ zeptomesh_config_owner }}"
+    group: "{{ zeptomesh_config_group }}"
+    mode: "{{ zeptomesh_env_file_mode }}"
+  loop: "{{ zeptomesh_instances }}"
+  loop_control:
+    label: "{{ item.env_file }}"
+  no_log: "{{ zeptomesh_no_log | bool }}"
+
+- name: "Конфиг | Итог: что пошло на хост"
+  ansible.builtin.debug:
+    msg: >-
+      конфиг {{ zeptomesh_host_config_path }} → внутри контейнера
+      {{ zeptomesh_container_config_path }} (хэш {{ zeptomesh_config_hash }});
+      bootstrap '{{ zeptomesh_bootstrap_effective | default('', true) | truncate(110, true) }}';
+      trust={{ zeptomesh_trust_mode }} pico={{ zeptomesh_pico_mode }}
+      dht={{ zeptomesh_dht_mode }} mdns={{ zeptomesh_mdns }}
+      announce_ip='{{ zeptomesh_pub_ip }}';
+      env-файлы: {{ zeptomesh_instances | map(attribute='env_file') | join(', ') }}

@@ -1,0 +1,283 @@
+---
+# ТЗ 15.4.6 — собрать начальные Peer ID и превратить их в bootstrap-список.
+#
+# Источник — только HTTP-API узла (логи не разбираются):
+#   GET /healthz       → {"status":"ok","peer_id":"12D3K…"}      (internal/api/admin.go)
+#   GET /api/v1/status → Node.Status; поле addrs = Node.DiscoverableAddrs()
+#                        (internal/node/node.go) — ровно те multiaddr, которые
+#                        узел сам себе анонсирует, уже с суффиксом /p2p/<peer id>.
+#
+# Берутся addrs, а не «IP хоста + порт»: при wan-профиле там announce из
+# ZETOMESH_PUB_IP, при lan-профиле — адрес интерфейса; в обоих случаях это то,
+# по чему узел реально отвечает соседям. Если анонса нет вовсе — адрес
+# синтезируется из zeptomesh_pub_ip, и источник помечен как «synthesized»,
+# чтобы оператор видел разницу.
+#
+# Артефакты на контроллере (zeptomesh_artifact_dir), по одному на группу:
+#   <группа>.peerids.yml   — {хост: {экземпляр: [multiaddr,…]}}; формат годится
+#                            для include_vars, его читает tasks/preflight.yml
+#                            (zeptomesh_auto_bootstrap) и он же — значение
+#                            ZETOMESH_BOOTSTRAP для следующей партии узлов
+#   <группа>.bootstrap.txt — те же адреса одной строкой через запятую — прямое
+#                            значение ZETOMESH_BOOTSTRAP / discovery.bootstrap
+#   <группа>.peerids.csv   — человекочитаемо: хост, экземпляр, peer id, адреса
+
+- name: Peer ID | Проверить, что есть данные здоровья
+  ansible.builtin.assert:
+    that:
+      - zeptomesh_healthz.results | default([]) | length > 0
+    fail_msg: >-
+      Нет ответов /healthz: плейбук шёл в check-mode (контейнеры не
+      запускались) или health-проверка была пропущена (тег health). Peer ID
+      собираются только с живых узлов.
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Peer ID | Нормализовать ответы /healthz (peer id)
+  ansible.builtin.set_fact:
+    zeptomesh_health_peer_ids: >-
+      {{- (zeptomesh_healthz.results | default([]))
+          | map(attribute='json') | map(attribute='peer_id') | list -}}
+  when: not ansible_check_mode
+
+- name: Peer ID | Нормализовать ответы /api/v1/status
+  ansible.builtin.set_fact:
+    zeptomesh_status_jsons: >-
+      {{- ((zeptomesh_status.results | default([])) | map(attribute='json') | list)
+          if (zeptomesh_query_status | bool and zeptomesh_status.results is defined)
+          else [] -}}
+  when: not ansible_check_mode
+
+# index_var даёт параллельный доступ к спискам ответов: и health-проверка, и
+# сбор идут по одному и тому же zeptomesh_instances, порядок совпадает.
+- name: Peer ID | Собрать запись по каждому экземпляру
+  ansible.builtin.set_fact:
+    zeptomesh_node_records: >-
+      {{ (zeptomesh_node_records | default([])) + [{
+        'host': inventory_hostname,
+        'instance': item.index,
+        'container': item.container,
+        'mesh_port': item.mesh_port,
+        'api_port': item.api_port,
+        'peer_id': peer_id,
+        'version': node_status.version | default('', true),
+        'neighbors_connected': node_status.neighbors_connected | default(0, true),
+        'neighbors_total': node_status.neighbors_total | default(0, true),
+        'addrs': announced,
+        'bootstrap': bootstrap,
+        'source': ('announced' if announced | length > 0
+                   else ('synthesized' if bootstrap | length > 0 else 'missing'))
+      }] }}
+  loop: "{{ zeptomesh_instances }}"
+  loop_control:
+    index_var: i
+    label: "{{ item.container }}"
+  when: not ansible_check_mode
+  vars:
+    node_status: "{{ (zeptomesh_status_jsons | default([]))[i] | default({}, true) }}"
+    peer_id: "{{ (zeptomesh_health_peer_ids | default([]))[i] | default('', true) }}"
+    # Только адреса с /p2p/ (без идентификатора вход невозможен — узел отвергает
+    # такой bootstrap при старте) и без loopback/0.0.0.0. Приватные подсети НЕ
+    # отбрасываем: в LAN это корректный адрес соседа.
+    announced: >-
+      {{- node_status.addrs | default([], true)
+          | select('search', '/p2p/')
+          | reject('match', '^/ip4/(127\.|0\.0\.0\.0)|^/ip6/::1')
+          | list -}}
+    # Приоритет: tcp-адрес с публичным IP хоста → любой tcp → любой анонсированный
+    # → синтез. tcp впереди quic-v1: проходит больше NAT.
+    tcp_pub: >-
+      {{- (announced | select('search', '/tcp/')
+                     | select('search', '^/ip4/' ~ (zeptomesh_pub_ip | default('', true) | regex_escape) ~ '/')
+                     | list | first) | default('', true)
+          if (zeptomesh_pub_ip | default('', true) | length > 0) else '' -}}
+    tcp_any: "{{ (announced | select('search', '/tcp/') | list | first) | default('', true) }}"
+    any_any: "{{ (announced | list | first) | default('', true) }}"
+    synthesized: "/ip4/{{ zeptomesh_pub_ip }}/tcp/{{ item.mesh_port }}/p2p/{{ peer_id }}"
+    candidates: >-
+      {{- [tcp_pub, tcp_any, any_any,
+           (synthesized if (zeptomesh_pub_ip | default('', true) | length > 0 and peer_id | length > 0) else '')]
+          | reject('equalto', '') | unique | list -}}
+    bootstrap: "{{ candidates | first | default('', true) }}"
+
+- name: Peer ID | Проверить, что каждый экземпляр отдал peer id
+  ansible.builtin.assert:
+    that:
+      - item.peer_id | length > 20
+    fail_msg: >-
+      Экземпляр {{ item.container }} не вернул peer_id из /healthz —
+      идентичность узла не собрана.
+    quiet: true
+  loop: "{{ zeptomesh_node_records | default([]) }}"
+  loop_control:
+    label: "{{ item.container }}"
+  when:
+    - not ansible_check_mode
+    - zeptomesh_collect_strict | bool
+
+- name: Peer ID | Проверить, что адрес для bootstrap найден
+  ansible.builtin.assert:
+    that:
+      - item.bootstrap | length > 0
+    fail_msg: >-
+      Экземпляр {{ item.container }} не дал ни одного пригодного адреса:
+      анонс пуст (или состоит из loopback), и zeptomesh_pub_ip не задан. В
+      bootstrap-список он не попадёт, и следующая партия узлов не сможет войти
+      в сеть через него. Задайте zeptomesh_pub_ip или профиль с announce
+      (configs/examples/wan.yaml).
+    quiet: true
+  loop: "{{ zeptomesh_node_records | default([]) }}"
+  loop_control:
+    label: "{{ item.container }}"
+  when:
+    - not ansible_check_mode
+    - zeptomesh_collect_strict | bool
+
+- name: Peer ID | Предупредить об экземплярах без адреса
+  ansible.builtin.debug:
+    msg: >-
+      ВНИМАНИЕ: экземпляр {{ item.container }} без пригодного адреса
+      (peer_id={{ item.peer_id | default('—') }}) — пропущен в артефакте.
+      Задайте zeptomesh_pub_ip или профиль с announce.
+  loop: "{{ zeptomesh_node_records | default([]) }}"
+  loop_control:
+    label: "{{ item.container }}"
+  when:
+    - item.source == 'missing'
+    - not (zeptomesh_collect_strict | bool)
+
+- name: Peer ID | Показать собранные записи хоста
+  ansible.builtin.debug:
+    var: zeptomesh_node_records
+
+# Карта «экземпляр → адреса» для артефакта: ключ — номер экземпляра строкой,
+# значение — список мультиадресов, где предпочтительный для входа стоит первым.
+- name: Peer ID | Собрать карту экземпляров этого хоста
+  ansible.builtin.set_fact:
+    zeptomesh_host_bootstrap_map: >-
+      {{ (zeptomesh_host_bootstrap_map | default({})) | combine({
+        (r.instance | string): ([r.bootstrap] + (r.addrs | default([]) | reject('equalto', r.bootstrap) | list))
+      }) }}
+  loop: "{{ zeptomesh_node_records | default([]) }}"
+  loop_control:
+    loop_var: r
+    label: "{{ r.container }}"
+  when:
+    - not ansible_check_mode
+    - r.bootstrap | length > 0
+
+- name: Peer ID | Итоговая карта этого хоста
+  ansible.builtin.debug:
+    var: zeptomesh_host_bootstrap_map
+
+# ---------------------------------------------------------------------------
+# Агрегация на контроллере: один файл на группу. run_once выбирает первый хост
+# батча — там же считаются и шаблонизируются артефакты, поэтому накопленное
+# значение доступно обоим заданиям.
+#
+# Слияние: карта строится как «ранее собранное (кэш из preflight) → замещение
+# адресами хостов этого прогона». Без этого частичный прогон (--limit, serial)
+# затёр бы артефакт до нескольких узлов, а следующая партия получила бы
+# недостаточный bootstrap-список.
+# ---------------------------------------------------------------------------
+
+- name: Артефакт | Начать карту группы с ранее собранного кэша
+  ansible.builtin.set_fact:
+    zeptomesh_group_peerids: "{{ zeptomesh_peerids_cache | default({}, true) }}"
+  run_once: true
+
+- name: Артефакт | Собрать карту адресов группы (кэш + записи этого прогона)
+  ansible.builtin.set_fact:
+    zeptomesh_group_peerids: >-
+      {{ zeptomesh_group_peerids | combine({zhost: hostvars[zhost].zeptomesh_host_bootstrap_map}) }}
+  loop: "{{ groups[zeptomesh_host_group] | default([]) | sort }}"
+  loop_control:
+    loop_var: zhost
+    label: "{{ zhost }}"
+  run_once: true
+  when: hostvars[zhost].zeptomesh_host_bootstrap_map is defined
+
+- name: Артефакт | Собрать подробные записи группы для csv
+  ansible.builtin.set_fact:
+    zeptomesh_group_records: >-
+      {{ (zeptomesh_group_records | default([]))
+         + hostvars[zhost].zeptomesh_node_records | default([], true) }}
+  loop: "{{ groups[zeptomesh_host_group] | default([]) | sort }}"
+  loop_control:
+    loop_var: zhost
+    label: "{{ zhost }}"
+  run_once: true
+  when: hostvars[zhost].zeptomesh_node_records is defined
+
+- name: Артефакт | Подготовить каталог на контроллере
+  ansible.builtin.file:
+    path: "{{ zeptomesh_artifact_dir }}"
+    state: directory
+    mode: "0750"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Артефакт | Записать peerids.yml (формат для include_vars)
+  ansible.builtin.template:
+    src: peerids.yml.j2
+    dest: "{{ zeptomesh_group_peerids_file }}"
+    mode: "0640"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Артефакт | Записать bootstrap.txt — прямое значение ZETOMESH_BOOTSTRAP
+  ansible.builtin.template:
+    src: bootstrap.txt.j2
+    dest: "{{ zeptomesh_artifact_dir }}/{{ zeptomesh_host_group }}.bootstrap.txt"
+    mode: "0640"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Артефакт | Записать peerids.csv для оператора
+  ansible.builtin.template:
+    src: peerids.csv.j2
+    dest: "{{ zeptomesh_artifact_dir }}/{{ zeptomesh_host_group }}.peerids.csv"
+    mode: "0640"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Артефакт | Итог (check-mode — запись пропущена)
+  ansible.builtin.debug:
+    msg: >-
+      check-mode: артефакты не записывались — ответов /healthz нет, поэтому
+      Peer ID собрать не из чего. bootstrap.txt/peerids.yml создаются только
+      реальным прогоном по живым узлам.
+  run_once: true
+  when: ansible_check_mode
+
+- name: Артефакт | Сколько узлов попало в список
+  ansible.builtin.debug:
+    msg: >-
+      группа '{{ zeptomesh_host_group }}': хостов в артефакте
+      {{ zeptomesh_group_peerids | default({}) | length }}, адресов
+      {{ zeptomesh_group_peerids | default({}) | dict2items | map(attribute='value')
+         | flatten | unique | length }}; записей с деталями
+      {{ zeptomesh_group_records | default([]) | length }}
+  run_once: true
+
+- name: Артефакт | Где лежит результат
+  ansible.builtin.debug:
+    msg: >-
+      {{ zeptomesh_group_peerids_file }},
+      {{ zeptomesh_artifact_dir }}/{{ zeptomesh_host_group }}.bootstrap.txt,
+      {{ zeptomesh_artifact_dir }}/{{ zeptomesh_host_group }}.peerids.csv
+      (в deploy-плейбуке peerids.yml подхватывается автоматически,
+      zeptomesh_auto_bootstrap=true)
+  run_once: true

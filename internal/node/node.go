@@ -19,6 +19,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
 
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
+
 	"github.com/developer3000S/zeptoclaw/internal/config"
 	"github.com/developer3000S/zeptoclaw/internal/discovery"
 	"github.com/developer3000S/zeptoclaw/internal/logging"
@@ -30,6 +32,7 @@ import (
 	"github.com/developer3000S/zeptoclaw/internal/skills"
 	"github.com/developer3000S/zeptoclaw/internal/storage"
 	"github.com/developer3000S/zeptoclaw/internal/tasks"
+	"github.com/developer3000S/zeptoclaw/internal/triggers"
 	"github.com/developer3000S/zeptoclaw/internal/version"
 
 	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
@@ -66,9 +69,21 @@ type Node struct {
 	Bootstrap  *discovery.Bootstrap
 	DHT        *discovery.DHT
 	Membership *discovery.Membership
+	// SearchTopic is the epidemic skill-search plane (ТЗ 6.9.5 п.5): nil unless
+	// tasks.forwarding.search_relay.topic.enabled joined it at startup. It rides
+	// the same pubsub router as Membership — one host, one router.
+	SearchTopic *discovery.SearchTopic
+	// Scheduler runs the cron-declared triggers (ТЗ 6.6.1 п.4), injecting their
+	// jobs as tasks authored by this node.
+	Scheduler *triggers.Scheduler
 
 	log     *slog.Logger
 	started time.Time
+
+	// pubsub is the single gossip router this host speaks. Membership and the
+	// search topic are built over it (a second router would steal the first's
+	// stream handler); the router is closed with the host.
+	pubsub *pubsub.PubSub
 
 	// skipDiscovery makes this node reachable only through explicitly dialed
 	// peers. It exists for air-gapped single-node setups and for integration
@@ -320,8 +335,60 @@ func New(opts Options) (*Node, error) {
 	n.Manager = mgr
 	mgr.SetCapabilitiesFunc(n.Capabilities)
 
+	// Scheduled triggers (ТЗ 6.6.1 п.4): the fourth task source. The store's
+	// "not found" is translated here because the trigger package stays
+	// independent of whichever key-value engine this node uses.
+	sched, err := triggers.New(triggers.Options{
+		Store:  &triggerStore{store: store},
+		Submit: n.submitTrigger,
+		Logger: logging.Component(logger, "triggers"),
+		Config: cfg.ConfigTriggers(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("node: triggers: %w", err)
+	}
+	n.Scheduler = sched
+
 	n.installConnNotifier()
 	return n, nil
+}
+
+// triggerStore adapts the node's key-value store to the narrow Saver the
+// trigger package needs.
+type triggerStore struct{ store *storage.Store }
+
+func (t *triggerStore) PutMeta(key string, val []byte) error { return t.store.PutMeta(key, val) }
+
+func (t *triggerStore) GetMeta(key string) ([]byte, error) {
+	raw, err := t.store.GetMeta(key)
+	if errors.Is(err, storage.ErrNotFound) {
+		return nil, triggers.ErrNoRecord
+	}
+	return raw, err
+}
+
+// submitTrigger turns a scheduled job into a task authored by this node. The
+// manager is resolved lazily (the scheduler is built alongside it), and the
+// origin label makes the journal read as scheduled work.
+func (n *Node) submitTrigger(ctx context.Context, job triggers.Job) (string, error) {
+	if n.Manager == nil {
+		return "", errors.New("node: task manager not ready")
+	}
+	labels := job.Labels
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels["source"] = "trigger"
+	return n.Manager.Submit(ctx, tasks.SubmitRequest{
+		Instruction:    job.Instruction,
+		RequiredSkills: job.RequiredSkills,
+		TTL:            job.TTL,
+		Priority:       job.Priority,
+		TimeoutSeconds: job.TimeoutSeconds,
+		AllowShell:     job.AllowShell,
+		AllowNetwork:   job.AllowNetwork,
+		Labels:         labels,
+	})
 }
 
 // dispatch* forward to the manager; they exist so the service can be built
@@ -357,8 +424,15 @@ func (n *Node) buildDiscovery() error {
 	// separate objects, and an operator reading "peer found" wants to know it came
 	// from the registry rather than gossip (ТЗ 14.1).
 	dlog := logging.Component(n.log, "discovery")
+	wantTopic := cfg.Tasks.Forwarding.SearchRelay.Topic.Enabled
 	if n.skipDiscovery {
 		n.log.Info("discovery_disabled_manual_peers_only")
+		// The search plane is still allowed on a manual topology: pubsub flows
+		// only over the connections that exist, so joining a topic adds signed
+		// skill claims between dialed peers, not new reachability.
+		if wantTopic {
+			return n.buildSearchTopic()
+		}
 		return nil
 	}
 	if cfg.Discovery.LocalRegistry {
@@ -395,8 +469,20 @@ func (n *Node) buildDiscovery() error {
 		n.DHT = discovery.NewDHT(n.Host.DHT(), cfg.EffectiveSkills(), dlog)
 	}
 
+	// One pubsub router per host: a second GossipSub instance would re-register
+	// the same stream protocol id and silently orphan the first router's
+	// subscriptions, so membership and the search topic must share it. Built
+	// lazily — only when at least one topic plane is enabled.
+	if cfg.Discovery.Gossip.Enabled || wantTopic {
+		ps, err := discovery.NewPubSub(context.Background(), n.Host.Underlying(), n.Policy, n.Audit, dlog)
+		if err != nil {
+			return fmt.Errorf("node: pubsub: %w", err)
+		}
+		n.pubsub = ps
+	}
+
 	if cfg.Discovery.Gossip.Enabled {
-		m, err := discovery.NewMembership(context.Background(), n.Host.Underlying(),
+		m, err := discovery.NewMembership(context.Background(), n.Host.Underlying(), n.pubsub,
 			cfg.Discovery.Gossip, n.Policy, n.Audit, dlog)
 		if err != nil {
 			return fmt.Errorf("node: membership: %w", err)
@@ -413,6 +499,44 @@ func (n *Node) buildDiscovery() error {
 		// capabilities, task routing, result relay — keeps working.
 		n.log.Info("gossip_disabled", "hint", "peers are reachable only via discovery.bootstrap or manual dialing")
 	}
+
+	if wantTopic {
+		return n.buildSearchTopic()
+	}
+	return nil
+}
+
+// buildSearchTopic joins the epidemic skill-search plane (ТЗ 6.9.5 п.5). The
+// shared pubsub router is created on demand when it does not already exist: a
+// node that runs the topic without gossip still needs one, and a node that
+// runs both must not build two routers on the same host (the second would
+// silently clobber the first). Membership passes its router in from
+// buildDiscovery, which creates it before calling here.
+func (n *Node) buildSearchTopic() error {
+	if n.pubsub == nil {
+		ps, err := discovery.NewPubSub(context.Background(), n.Host.Underlying(), n.Policy, n.Audit,
+			logging.Component(n.log, "discovery"))
+		if err != nil {
+			return fmt.Errorf("node: pubsub: %w", err)
+		}
+		n.pubsub = ps
+	}
+	st, err := discovery.NewSearchTopic(discovery.SearchTopicParams{
+		Host:      n.Host.Underlying(),
+		PubSub:    n.pubsub,
+		Config:    n.Cfg.Tasks.Forwarding.SearchRelay.Topic,
+		Signer:    security.NewSigner(n.Identity),
+		KeyLookup: n.keyLookup(),
+		Policy:    n.Policy,
+		Audit:     n.Audit,
+		View:      n.searchTopicView,
+		Logger:    logging.Component(n.log, "search"),
+		OnEvent:   n.observeSearchTopic,
+	})
+	if err != nil {
+		return fmt.Errorf("node: search topic: %w", err)
+	}
+	n.SearchTopic = st
 	return nil
 }
 
@@ -431,6 +555,9 @@ func (n *Node) Start(ctx context.Context) error {
 	n.mu.Unlock()
 
 	n.Manager.Start(runCtx)
+	// Started after the manager so the first tick can submit; it sleeps until
+	// the next minute boundary anyway.
+	n.Scheduler.Start(runCtx)
 
 	if n.Registry != nil {
 		if err := n.Registry.Start(runCtx); err != nil {
@@ -469,6 +596,11 @@ func (n *Node) Start(ctx context.Context) error {
 	if n.Membership != nil {
 		if err := n.Membership.Start(runCtx); err != nil {
 			return fmt.Errorf("node: membership start: %w", err)
+		}
+	}
+	if n.SearchTopic != nil {
+		if err := n.SearchTopic.Start(runCtx); err != nil {
+			return fmt.Errorf("node: search topic start: %w", err)
 		}
 	}
 
@@ -526,6 +658,9 @@ func (n *Node) Stop(ctx context.Context) error {
 	if n.Membership != nil {
 		errs = append(errs, n.Membership.Close())
 	}
+	if n.SearchTopic != nil {
+		errs = append(errs, n.SearchTopic.Close())
+	}
 	if n.DHT != nil {
 		errs = append(errs, n.DHT.Close())
 	}
@@ -538,6 +673,15 @@ func (n *Node) Stop(ctx context.Context) error {
 	case <-done:
 	case <-ctx.Done():
 		errs = append(errs, errors.New("node: background work still running"))
+	}
+	// Stopped before the manager: a trigger that fires during shutdown would
+	// otherwise submit into a pipeline that is already draining.
+	if n.Scheduler != nil {
+		sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := n.Scheduler.Stop(sctx); err != nil {
+			errs = append(errs, err)
+		}
+		scancel()
 	}
 	n.Manager.Stop()
 	errs = append(errs, n.Adapter.Close(), n.Host.Close(), n.Store.Close(), n.Audit.Close())
@@ -601,6 +745,9 @@ type Status struct {
 		Peers     int64 `json:"peers"`
 		DedupKeys int64 `json:"dedup_keys"`
 	} `json:"storage"`
+	// Triggers is how many schedules the node knows (config + stored); the
+	// admin API serves their state in full.
+	Triggers int `json:"triggers"`
 }
 
 // Status renders the current node state. It is cheap enough for a 2s poll.
@@ -658,6 +805,13 @@ func (n *Node) Status() Status {
 		st.Storage.Tasks = s.Tasks
 		st.Storage.Peers = s.Peers
 		st.Storage.DedupKeys = s.DedupKeys
+	}
+	if n.Scheduler != nil {
+		// A store read failure must not make the whole status endpoint fail: the
+		// operator needs the rest of the picture even when schedules are unread.
+		if vs, err := n.Scheduler.Views(time.Now().UTC()); err == nil {
+			st.Triggers = len(vs)
+		}
 	}
 	return st
 }
@@ -1638,13 +1792,7 @@ func (n *Node) maintenance(ctx context.Context) {
 			if n.Table.ConnectedCount() < n.Cfg.Neighbors.Min && n.Cfg.Discovery.PeerExchange {
 				n.requestPeerExchange(ctx)
 			}
-			for _, gone := range n.Table.PruneStale(n.Cfg.Discovery.Gossip.FailureTimeout.D() * 3) {
-				if n.Membership != nil {
-					n.Membership.MarkLeft(gone)
-				}
-				n.Skills.DropPeer(gone.String())
-				n.log.Debug("neighbor_dropped", "peer", gone.String())
-			}
+			n.reapSuspects(ctx)
 			n.Metrics.PeersTotal.Set(float64(n.Table.Len()))
 			n.Metrics.PeersConnected.Set(float64(n.Table.ConnectedCount()))
 		case <-full.C:
@@ -1779,6 +1927,77 @@ func (n *Node) measureRTT(ctx context.Context) {
 	}
 }
 
+// suspectAfter is how long a neighbour may stay silent before this node asks it
+// directly. Three heartbeats' worth of lost gossip used to be the point where
+// the entry was deleted; now it is only the point where confirmation is asked.
+func (n *Node) suspectAfter() time.Duration {
+	return n.Cfg.Discovery.Gossip.FailureTimeout.D() * 3
+}
+
+// reapSuspects evicts silent neighbours, but only after asking them directly
+// (ТЗ 6.5.3). Silence is weak evidence: gossip is best-effort, and a peer that
+// is alive but quiet — a delayed pubsub batch, a dropped message, a busy
+// inbound queue on our side — used to be dropped from the routing view, which
+// reached the operator as "no eligible peers reachable" for tasks that had a
+// perfectly good executor. A live libp2p connection makes the question cheap, so
+// each suspect is pinged over it, and only those that answer nothing are removed.
+//
+// A probe is not proof of capacity: answering a ping costs the peer almost
+// nothing. That is deliberate — the mesh protocol has no "are you free to work"
+// message, and inventing one is out of scope here. The probe answers "is this
+// identity reachable at all", which is the question eviction actually asks.
+func (n *Node) reapSuspects(ctx context.Context) {
+	suspects := n.Table.Suspects(n.suspectAfter())
+	// Bound the pass: each probe may wait out its timeout, and the maintenance
+	// loop also carries peer exchange and metric refresh. Oldest first, so the
+	// remainder is confirmed on the next tick rather than starving the loop.
+	if len(suspects) > maxProbesPerPass {
+		suspects = suspects[:maxProbesPerPass]
+	}
+	for _, nb := range suspects {
+		if nb.PeerID == n.ID() {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		if n.probePeer(ctx, nb.PeerID) {
+			// Alive: refresh the sighting so the next pass sees it as healthy.
+			n.Table.Touch(nb.PeerID, n.Host != nil && n.Host.IsConnected(nb.PeerID))
+			n.log.Debug("neighbor_reconfirmed", "peer", nb.PeerID.String())
+			continue
+		}
+		if n.Membership != nil {
+			n.Membership.MarkLeft(nb.PeerID)
+		}
+		n.Table.Remove(nb.PeerID)
+		n.Skills.DropPeer(nb.PeerID.String())
+		n.log.Debug("neighbor_dropped", "peer", nb.PeerID.String(), "reason", "unreachable on probe")
+	}
+}
+
+// maxProbesPerPass bounds one eviction sweep so a partition cannot stall
+// maintenance behind a long row of timeouts.
+const maxProbesPerPass = 8
+
+// probePeer asks one neighbour directly whether it is there. It is bounded so a
+// partition cannot hang the loop, and silent on purpose: the answer decides
+// eviction, and the log line belongs to the caller.
+func (n *Node) probePeer(ctx context.Context, pid peer.ID) bool {
+	if n.Service == nil {
+		// No transport to ask over: keep the entry rather than evict on a guess.
+		return true
+	}
+	pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	resp, err := n.Service.RPC(pctx, pid, &pb.RpcRequest{
+		Kind: &pb.RpcRequest_Ping{Ping: &pb.PingRequest{Nonce: time.Now().UnixNano()}},
+	})
+	return err == nil && resp != nil && resp.GetPing() != nil
+}
+
 // ReloadConfig re-reads the configuration file the node started with and
 // applies the section that live objects own (ТЗ 13.1.1 reload). The config
 // struct itself is left untouched — components that read it without
@@ -1817,6 +2036,14 @@ func (n *Node) ReloadConfig() (config.ReloadDiff, error) {
 	}
 	if n.levelVar != nil {
 		n.levelVar.Set(logging.Level(next.Telemetry.LogLevel))
+	}
+	// Trigger schedules are hot: the scheduler owns a live copy of the
+	// config-declared list. SetConfigTriggers validates the group before
+	// swapping, so a rejected reload leaves the previous schedules running.
+	if n.Scheduler != nil {
+		if err := n.Scheduler.SetConfigTriggers(next.ConfigTriggers()); err != nil {
+			return d, fmt.Errorf("triggers not reloaded (previous schedules stay active): %w", err)
+		}
 	}
 	n.log.Info("config_reloaded", "hot", len(d.Hot), "requires_restart", len(d.RequiresRestart))
 	if n.Audit != nil {
@@ -2083,4 +2310,90 @@ func (s *skillSource) refreshBudget() time.Duration {
 		budget = stream / 2
 	}
 	return budget
+}
+
+// SearchTopic publishes the skills-only lookup on the epidemic search plane and
+// collects candidate records until ctx expires. The records are claims — the
+// caller adopts them through Adopt, which dials and verifies each peer's own
+// signed capabilities before routing to it.
+func (s *skillSource) SearchTopic(ctx context.Context, want []string) []*pb.PeerRecord {
+	if s.n.SearchTopic == nil {
+		return nil
+	}
+	return s.n.SearchTopic.Search(ctx, want)
+}
+
+// searchTopicView renders what this node is willing to sign an answer with:
+// every peer its combined view says covers want, plus itself when it does. The
+// records carry addresses so the requester can dial them; a peer known only by
+// id is still worth disclosing (the requester resolves routes via the table).
+func (n *Node) searchTopicView(want []string) []*pb.PeerRecord {
+	if len(want) == 0 {
+		return nil
+	}
+	covers := func(skills []string) bool {
+		set := make(map[string]bool, len(skills))
+		for _, s := range skills {
+			set[s] = true
+		}
+		for _, w := range want {
+			if !set[w] {
+				return false
+			}
+		}
+		return true
+	}
+	self := n.Identity.PeerID().String()
+	out := make([]*pb.PeerRecord, 0, 8)
+	if covers(n.Cfg.EffectiveSkills()) {
+		out = append(out, &pb.PeerRecord{
+			PeerId: self, Addrs: n.DiscoverableAddrs(),
+			Skills: n.Cfg.EffectiveSkills(), SeenAt: time.Now().UTC().Unix(),
+		})
+	}
+	seen := map[string]bool{self: true}
+	if n.Membership != nil {
+		for _, st := range n.Membership.Snapshot() {
+			if st.GetPeerId() == "" || seen[st.GetPeerId()] {
+				continue
+			}
+			if !covers(st.GetSkills()) {
+				continue
+			}
+			seen[st.GetPeerId()] = true
+			out = append(out, &pb.PeerRecord{
+				PeerId: st.GetPeerId(), Addrs: st.GetAddrs(),
+				Skills: st.GetSkills(), SeenAt: st.GetTimestamp(),
+			})
+		}
+	}
+	for _, nb := range n.Table.List() {
+		if nb.PeerID.String() == "" || seen[nb.PeerID.String()] || nb.Left {
+			continue
+		}
+		if !covers(nb.Skills) {
+			continue
+		}
+		seen[nb.PeerID.String()] = true
+		out = append(out, &pb.PeerRecord{
+			PeerId: nb.PeerID.String(), Addrs: nb.Addrs,
+			Skills: nb.Skills, SeenAt: nb.LastSeen.Unix(),
+		})
+	}
+	return out
+}
+
+// observeSearchTopic maps the topic plane's events onto metrics counters.
+func (n *Node) observeSearchTopic(event string) {
+	if n.Metrics == nil {
+		return
+	}
+	switch event {
+	case "requested":
+		n.Metrics.SearchTopicRequests.Inc()
+	case "answered":
+		n.Metrics.SearchTopicAnswers.Inc()
+	case "rejected":
+		n.Metrics.SearchTopicRejected.Inc()
+	}
 }

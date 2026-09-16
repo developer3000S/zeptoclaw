@@ -27,6 +27,7 @@ import (
 	"github.com/developer3000S/zeptoclaw/internal/node"
 	"github.com/developer3000S/zeptoclaw/internal/skills"
 	"github.com/developer3000S/zeptoclaw/internal/tasks"
+	"github.com/developer3000S/zeptoclaw/internal/triggers"
 
 	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
 )
@@ -67,6 +68,9 @@ func New(n *node.Node, cfg *config.Config, mets *metrics.Collector, logger *slog
 	s.authed(mux, "DELETE /api/v1/tasks/{id}", s.handleCancel)
 	s.authed(mux, "POST /api/v1/tasks/{id}/resubmit", s.handleResubmit)
 	s.authed(mux, "GET /api/v1/config", s.handleConfigView)
+	s.authed(mux, "GET /api/v1/triggers", s.handleListTriggers)
+	s.authed(mux, "POST /api/v1/triggers", s.handleUpsertTrigger)
+	s.authed(mux, "DELETE /api/v1/triggers/{id}", s.handleDeleteTrigger)
 	s.authed(mux, "GET /api/v1/rebinds", s.handleRebinds)
 	s.authed(mux, "POST /api/v1/admin/reload-config", s.handleReloadConfig)
 	s.authed(mux, "POST /api/v1/admin/rotate-key", s.handleRotateKey)
@@ -572,6 +576,73 @@ func (s *Server) handleSyncSkills(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	peers := s.node.SyncSkillsNow(ctx)
 	writeJSON(w, http.StatusOK, map[string]any{"peers_queried": peers})
+}
+
+// ---------- scheduled triggers (ТЗ 6.6.1 п.4) ----------
+
+// handleListTriggers reports every schedule the node knows — stored and
+// config-declared — with the next run time.
+func (s *Server) handleListTriggers(w http.ResponseWriter, r *http.Request) {
+	views, err := s.node.Scheduler.Views(time.Now().UTC())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"count": len(views), "triggers": views})
+}
+
+// handleUpsertTrigger creates or replaces a stored schedule. A schedule whose
+// id is already declared in node.yaml is refused by the scheduler, because the
+// config definition shadows anything written here.
+func (s *Server) handleUpsertTrigger(w http.ResponseWriter, r *http.Request) {
+	var in triggers.Trigger
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request: "+err.Error())
+		return
+	}
+	// Bookkeeping is the scheduler's, never the caller's: a body carrying
+	// last_fire in the future or an inflated run_count would silently disarm the
+	// schedule while reporting a successful write.
+	in.LastFire, in.LastRunAt, in.LastTaskID, in.LastError = time.Time{}, time.Time{}, "", ""
+	in.RunCount = 0
+	in.CreatedAt = time.Now().UTC()
+	if _, err := s.node.Scheduler.Add(&in); err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	views, err := s.node.Scheduler.Views(time.Now().UTC())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var self *triggers.View
+	for i := range views {
+		if views[i].ID == in.ID {
+			self = &views[i]
+		}
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"trigger": self, "count": len(views)})
+}
+
+// handleDeleteTrigger removes a stored schedule. Config-declared schedules are
+// not stored, so removing them means editing node.yaml.
+func (s *Server) handleDeleteTrigger(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if strings.TrimSpace(id) == "" {
+		writeErr(w, http.StatusBadRequest, "trigger id is required")
+		return
+	}
+	removed, err := s.node.Scheduler.Delete(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !removed {
+		writeErr(w, http.StatusNotFound, "no stored trigger with id "+id+
+			" (a schedule declared in node.yaml is removed by editing that file)")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"removed": true, "id": id})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

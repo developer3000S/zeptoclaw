@@ -173,11 +173,12 @@ zeptoclaw/
 │   └── client.go               # CLI админ-API: status|peers|capabilities|submit (--subtask)|
 │                               #                   tasks|get|cancel|resubmit|reload|leave|
 │                               #                   skills|skill-set|skill-rm|skills-sync|
+│                               #                   triggers|trigger-add|trigger-rm|
 │                               #                   rebinds|rotate|revoke
 ├── internal/
 │   ├── api/                    # HTTP/JSON админ-API (+ bearer-токен, /metrics)
 │   ├── config/                 # YAML-конфиг, дефолты, валидация, ${VAR:-default}   + тесты
-│   ├── discovery/              # local.go, mdns.go, bootstrap.go, dht.go, gossip.go
+│   ├── discovery/              # local.go, mdns.go, bootstrap.go, dht.go, gossip.go, searchtopic.go
 │   ├── logging/                # slog + мост для stdlib-логера libp2p
 │   ├── metrics/                # Prometheus (приватный registry) + выделенный слушатель
 │   ├── node/                   # сборка компонентов узла, композитный skill-источник
@@ -187,9 +188,15 @@ zeptoclaw/
 │   ├── security/               # identity.go, signing.go, trust.go, rebind.go, audit.go + тесты
 │   ├── skills/                 # registry.go: версионированные дескрипторы навыков,
 │   │                           #        обмен с соседями, дельта-синхронизация + тесты
+│   ├── simulator/              # модель mesh'а для нагрузочного теста ТЗ 17.3
+│   │                           #        (100/500/1000 узлов, `make test-load`)
 │   ├── storage/                # storage.go: BadgerDB + артефакты sha256
 │   ├── tasks/                  # manager.go (исполнение/делегирование/search-relay),
 │   │                           # decomposition.go (план/агрегация), task.go, disk_unix.go + тесты
+│   ├── telemetry/              # установка SDK OpenTelemetry + OTLP-экспортёр (ТЗ 14.3)
+│   ├── tracing/                # спаны конвейера задач; контекст едет в подписанных labels
+│   ├── triggers/               # cron.go, triggers.go, scheduler.go: плановые задачи
+│   │                           # (ТЗ 6.6.1 п.4) + тесты
 │   ├── version/                # сборочный штамп
 │   └── wire/                   # канонические энкодеры (общие для digest и подписей) + тесты
 ├── configs/
@@ -199,13 +206,16 @@ zeptoclaw/
 │       ├── wan.yaml            # профиль «Интернет / разные хосты»
 │       └── dev-node.yaml       # профиль «несколько узлов на одной машине» (make dev-cluster)
 ├── scripts/
-│   └── dev-cluster.sh          # поднять/остановить отладочный кластер, задачи, ротация
+│   ├── dev-cluster.sh          # поднять/остановить отладочный кластер, задачи, ротация
+│   └── acceptance.sh           # живые приёмочные испытания E.1–E.6 (ТЗ §20) на реальных процессах
 ├── Makefile                    # сборка, проверка, тесты, proto, отладочный кластер
+├── deploy/ansible/             # массовое развёртывание на 100+ хостов (ТЗ 15.4):
+│                               #   роль zeptomesh — шесть шагов ТЗ по отдельным тегам
 ├── deploy/docker/
 │   ├── Dockerfile              # многоэтапная сборка, non-root, HEALTHCHECK
 │   └── docker-compose.yml      # готовая сеть из 3 узлов
 ├── docs/                       # ARCHITECTURE · PROTOCOLS · PICOCLAW-INTEGRATION ·
-│                               # DEPLOYMENT · RUNBOOK · STATUS
+│                               # DEPLOYMENT · RUNBOOK · STATUS · LOADTEST · TESTREPORT
 ├── install.sh                  # установка: локально (systemd) или Docker, N экземпляров, автостарт
 ├── LICENSE                     # Apache License 2.0 (полный текст)
 ├── ТЗ.md                       # исходное техническое задание
@@ -299,7 +309,7 @@ node:
     - /ip4/0.0.0.0/tcp/4001
     - /ip4/0.0.0.0/udp/4001/quic-v1
   announce: []                  # фиксированные публичные адреса (NAT, несколько интерфейсов)
-  private_network_psk: ""       # закрытая сеть libp2p ("приватная сеть")
+  private_network_psk: ""       # закрытая сеть libp2p; с PSK узел работает по TCP (QUIC закрытые сети не поддерживает)
   relay:                        # Circuit relay v2 (ТЗ 6.3.3.4)
     enabled: false              # пользоваться чужими реле
     advertise_as_relay: false   # служить реле (с лимитами ниже)
@@ -355,6 +365,12 @@ tasks:
       fanout: 3
       request_timeout: 8s
       cache_ttl: 60s
+      topic:                    # эпидемический поиск (ТЗ 6.9.5 п.5): подписанный
+        enabled: false          # запрос НАВЫКОВ в общий pubsub-топик, без id/
+        name: "/zeptomesh/skillsearch/0.1.0"  # инструкции задачи. По умолчанию
+        request_ttl: 30s        # выключен; включается только перезапуском.
+        max_answers: 8          # Подробности — configs/node.yaml.
+        answer_cooldown: 10s
 
 capabilities:
   skills: [general]
@@ -407,12 +423,43 @@ telemetry:
   prometheus_listen: ""         # напр. 127.0.0.1:9464 — выделенный /metrics + /healthz
   log_level: info
   structured_logs: true
+  # OpenTelemetry (ТЗ 14.3) — по умолчанию выключена; включается рестартом.
+  # Контекст трейса переносится между узлами внутри подписанных labels задачи,
+  # поэтому переписать его в пути нельзя, а старый сосед просто игнорирует.
+  # tracing:
+  #   enabled: true
+  #   endpoint: "localhost:4318" # host:port OTLP/HTTP, без схемы/пути
+  #   insecure: true             # plaintext-экспорт (локальный Jaeger/Tempo)
+  #   sample_ratio: 1            # вероятность для трейсов, начатых этим узлом
+  #   service_name: zeptomesh-node
+  #   environment: ""
 
 storage:
   engine: badger
   dir: ""                       # пусто → <data_dir>/db
   max_task_records: 100000
+
+# Плановые задачи (ТЗ 6.6.1 п.4) — по умолчанию список пуст; cron по UTC:
+# triggers:
+#   - id: nightly-vacuum        # id обязателен и уникален
+#     schedule: "0 3 * * *"     # minute hour dom month dow
+#     enabled: true             # по умолчанию true
+#     max_runs: 0               # >0 — остановиться после N запусков
+#     job:
+#       instruction: "Удалить файлы старше 7 дней"
+#       required_skills: [general]
+#       ttl: 5                  # 0 → tasks.default_ttl
+#       priority: 0             # 1..9, 0 — по умолчанию
+#       timeout_seconds: 600    # 0 → tasks.default_timeout_seconds
+#       allow_shell: false      # права задачи ⊆ прав узла
+#       allow_network_tools: true
 ```
+
+Расписания из `triggers:` — «закреплённые»: они перечитываются на горячую
+(`reload`) и не могут быть перезаписаны или удалены через API (`POST` с id из
+YAML → 422, `DELETE` → 404). Созданные через API/CLI хранятся в хранилище узла
+и переживают рестарт. Пропущенные во время простоя запуски не доигрываются.
+Подробнее — [docs/RUNBOOK.md](docs/RUNBOOK.md) §1.6.
 
 ---
 
@@ -518,6 +565,8 @@ REST-эндпоинта для задачи, только env-переменны
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Развёртывание: install.sh (локально/Docker, N экземпляров), ручная установка, порты, PSK, bootstrap, LAN/WAN-профили |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Эксплуатация: systemd/Docker, hot-reload конфига и `leave`, метрики и алерты, диагностика отказов, восстановление, бэкап ключей и БД |
 | [docs/STATUS.md](docs/STATUS.md) | Соответствие ТЗ: реализовано / частично / отклонения / не реализовано, план добивания |
+| [docs/LOADTEST.md](docs/LOADTEST.md) | Нагрузочное тестирование (ТЗ 17.3): симуляция 100/500/1000 узлов, метрики, границы модели, вердикт по 16.4 |
+| [docs/TESTREPORT.md](docs/TESTREPORT.md) | Отчёт о тестировании (ТЗ 19.9): инвентарь тестов, маппинг на 17.1–17.4, живая приёмка E.1–E.6, гейты, найденные дефекты, что осталось непроверенным |
 
 ---
 

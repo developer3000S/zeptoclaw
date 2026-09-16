@@ -21,6 +21,7 @@
 | `/zeptomesh/result/0.1.0` | stream | `TaskResult` → `ResultAck` | `handleResult` / `SendResult` |
 | `/zeptomesh/rpc/0.1.0` | stream | `RpcRequest` → `RpcResponse` | `handleRPC` / `RPC` |
 | `/zeptomesh/membership/0.1.0` | pubsub | `MembershipGossip` | `discovery.Membership` |
+| `/zeptomesh/skillsearch/0.1.0` | pubsub (по умолчанию выключен) | `SearchMessage` (`SearchRequest`\|`SearchReply`) | `discovery.SearchTopic` |
 
 ### 1.2. Фрейм
 
@@ -87,6 +88,16 @@
 `TaskPayload` содержит `instruction`, `context_digest`, `attachments`
 (`ArtifactRef{name, hash, size, media_type}`) и `labels`. Большие тела в
 конверт не кладутся: передаётся только content-addressed ссылка.
+
+`labels` — единственное место, куда ложится контекст трассировки OpenTelemetry
+(ТЗ 14.3): инициатор вписывает в них W3C `traceparent`/`tracestate` до
+расчёта `context_digest`, каждый последующий узел читает их обратно и
+продолжает тот же трейс. Отдельного поля в протоколе для этого нет
+намеренно: `labels` входят в `wire.TaskContent`, то есть уже покрыты
+`context_digest` и `origin_signature`, и переписать трейс в пути нельзя —
+ровно как и формулировку задачи. Узел, поднятый до появления этой возможности,
+просто перенесёт два лишних ключа: совместимость `ProtocolVersion` 0.1.0 не
+затронута.
 
 **Конфиденциальность содержимого.** `TaskPayload` на уровне приложения **не
 шифруется**: каждый узел `route_stack` видит инструкцию по определению. Граница
@@ -311,6 +322,58 @@ revocations: KeyRebind[] }`. Авторитетен
 (реализация: `ingestRebinds` вызывается до проверки «не принято ни одного
 состояния»). Собственное эхо publish отбрасывается до подсчёта — GossipSub
 доставляет локально опубливанное сообщение самому хосту.
+
+
+### 3.5. Тема эпидемического поиска навыков (ТЗ 6.9.5 п.5)
+
+`SearchMessage{ request: SearchRequest | reply: SearchReply }` — общий
+pubsub-топик, последний шаг лестницы расширения поиска, когда адресная
+цепочка (локально → таблица → полный refresh → relay RPC) не нашла
+исполнителя. По умолчанию выключен (`tasks.forwarding.search_relay.topic.enabled: false`); включение требует перезапуска — топик join'ится на старте.
+Membership и тема едут на **одном** GossipSub-роутере: второй `NewGossipSub`
+на том же хосте перерегистрирует стрим-протокол и молча отбирает подписки
+первого, поэтому роутер создаётся узлом один раз и передаётся обеим сторонам.
+
+`SearchRequest{ request_id, requester_peer_id, skills[], issued_at, scheme,
+signature }`. **Конфиденциальность по построению:** запрос называет только
+навыки — ни id задачи, ни инструкции, ни label'ов: эпидемический поиск видит
+каждый подписчик, и раскрывать он должен только потребность. `request_id` — 16
+случайных байт; связать ответ с задачей можно только локально (открытый канал
+сам по себе ничего не выдаёт).
+
+`SearchReply{ request_id, responder_peer_id, peers[], issued_at, scheme,
+signature }` — `peers` ≤ `max_answers`, дедуп по id. Записи — **заявления**, а
+не факты: потребитель прогоняет их через `Adopt` (дозвон + проверка подписанных
+Capabilities самого кандидата) до маршрутизации, поэтому лже-резponder может
+лишь заставить просителя потратить неудачный дозвон на пира, которого тот и без
+темы не допустил бы.
+
+Правила приёма (код — `discovery/searchtopic.go`):
+
+1. собственное эхо отбрасывается;
+2. подпись проверяется **по аутентифицированному отправителю pubsub-сообщения**,
+   и заявленный `*_peer_id` обязан совпасть с ним до всякой криптографии (как в
+   membership); схема — `zeptomesh-search-request-v1` /
+   `zeptomesh-search-reply-v1`;
+3. возраст `issued_at` в пределах `request_ttl` + допуск хода часов; запрос
+   старше окна не отвечается (поздняя реплика не должна вечно порождать работу);
+4. ответ засчитывается только если `request_id` совпал с открытым локальным
+   запросом; нераспознанный id — `search_reply_unsolicited` в журнал
+   безопасности;
+5. резponder не раскрывает незнакомцу чужие записи: без task-trust к просителю
+   возвращается только собственная запись резponder'а (если он сам закрывает
+   навык). Blocked-пир не получает ничего (фильтр роутера + `AllowConnection`);
+6. анти-шторм: `answer_cooldown` на набор навыков, `max_answers` на сбор,
+   размер `peers` ограничен на стороне ответа.
+
+Метрики: `search_topic_requests_total`, `search_topic_answers_total`,
+`search_topic_rejected_total`; событие лога `search_topic_answered`, отказы —
+в журнал безопасности (`search_request_*`, `search_reply_*`). Тесты:
+`internal/discovery/searchtopic_test.go` (совместное существование с membership
+на одном роутере, устаревший запрос, поддельный responder id, cooldown) и
+интеграционные `internal/node/integration_test.go::TestIntegrationSearchTopic*`
+(A находит C через B только силой темы; с выключенной темой та же задача
+исполнителя не находит — негативный контроль).
 
 ---
 

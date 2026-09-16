@@ -1,0 +1,73 @@
+---
+# Раскладка экземпляров хоста (ТЗ 15.4.2–15.4.4): сколько узлов на хосте, какие
+# у них порты, имена контейнеров, тома, файлы окружения и монтирования.
+#
+# Нумерация и формула портов совпадают с install.sh и
+# deploy/docker/docker-compose.yml: экземпляр i получает mesh 4001+i (tcp+udp),
+# API 8081+i, метрики 9464+i. Отличия экземпляра живут не в копиях конфига, а в
+# переменных окружения — загрузчик сам раскрывает ${VAR:-default}
+# (internal/config.expandEnv), поэтому один node.yaml обслуживает все N узлов.
+#
+# Этот список — единственный источник правды: конфигурация, запуск, проверка
+# здоровья и сбор Peer ID идут по одним и тем же элементам, поэтому порты, тома
+# и имена не могут разойтись между шагами. Валидация входных значений живёт в
+# tasks/preflight.yml (она дешевле до раскладки и выполняется до изменений).
+#
+# Задачи здесь — только assert/set_fact/debug: хост они не меняют, поэтому
+# раскладку можно считать и на этапе collect.
+
+- name: План | Разложить экземпляры по портам, томам, портам публикации и env-файлам
+  ansible.builtin.set_fact:
+    zeptomesh_instances: >-
+      {{ (zeptomesh_instances | default([])) + [{
+        'index': idx,
+        'name': name,
+        'container': container,
+        'mesh_port': (mesh_base | int) + idx,
+        'api_port': (api_base | int) + idx,
+        'prom_port': (prom_base | int) + idx,
+        'volume': container_data_source,
+        'env_file': '%s/%s-%s.env' | format(zeptomesh_env_dir, zeptomesh_container_prefix, idx),
+        'data_path': '%s/%s' | format(zeptomesh_data_host_root, idx),
+        'api_url': 'http://%s:%s' | format(zeptomesh_health_host, (api_base | int) + idx),
+        'published_ports': published,
+        'volumes': mounted
+      }] }}
+  loop: "{{ range(0, zeptomesh_node_count | int) | list }}"
+  loop_control:
+    loop_var: idx
+    label: "экземпляр {{ idx }} ({{ '%s-%s' | format(zeptomesh_container_prefix, idx) }})"
+  vars:
+    mesh_base: "{{ zeptomesh_base_mesh_port | int }}"
+    api_base: "{{ zeptomesh_base_api_port | int }}"
+    prom_base: "{{ zeptomesh_base_prom_port | int }}"
+    name: "{{ '%s-%s' | format(zeptomesh_name_prefix, idx) }}"
+    container: "{{ '%s-%s' | format(zeptomesh_container_prefix, idx) }}"
+    # Данные экземпляра: именованный docker-том (как в compose) или каталог
+    # хоста (планировка как в локальном режиме install.sh). Внутри контейнера —
+    # всегда /var/lib/zeptomesh: это VOLUME и ENV ZETOMESH_DATA из
+    # deploy/docker/Dockerfile, поэтому один и тот же конфиг работает в обоих
+    # режимах.
+    container_data_source: >-
+      {{- (zeptomesh_data_host_root ~ '/' ~ idx) if zeptomesh_data_bind_mount | bool
+          else ('%s-%s' | format(zeptomesh_volume_prefix, idx)) -}}
+    # mesh — наружу (tcp и udp: QUIC плюс резервный TCP), API и метрики — только
+    # на loopback хоста (docs/DEPLOYMENT.md §3).
+    published: >-
+      {{- [ '%s:%s:%s/tcp' | format(zeptomesh_mesh_bind_ip, (mesh_base | int) + idx, (mesh_base | int) + idx),
+            '%s:%s:%s/udp' | format(zeptomesh_mesh_bind_ip, (mesh_base | int) + idx, (mesh_base | int) + idx),
+            '%s:%s:%s' | format(zeptomesh_api_bind_ip, (api_base | int) + idx, (api_base | int) + idx) ]
+          + (['%s:%s:%s' | format(zeptomesh_api_bind_ip, (prom_base | int) + idx, (prom_base | int) + idx)]
+             if zeptomesh_prometheus_enabled | bool else []) -}}
+    # Конфиг — read-only и всегда по пути из Dockerfile, независимо от того, где
+    # он лежит на хосте. env-файлы экземпляров в zeptomesh_env_dir НЕ
+    # монтируются: модуль читает их на хосте и передаёт значения в Env, а чужие
+    # PSK/токены внутрь контейнера попадать не должны.
+    mounted: >-
+      {{- [ (container_data_source ~ ':/var/lib/zeptomesh' ~ (':rw' if zeptomesh_data_bind_mount | bool else '')) ]
+          + [ zeptomesh_conf_dir ~ ':' ~ zeptomesh_container_conf_dir ~ ':ro' ] -}}
+
+- name: План | Итоговая раскладка хоста
+  ansible.builtin.debug:
+    var: zeptomesh_instances
+    verbosity: 1

@@ -71,8 +71,13 @@ func limitedPolicy() *security.Policy {
 
 func newMembership(t *testing.T, h *p2p.Host, audit string) *Membership {
 	t.Helper()
-	m, err := NewMembership(context.Background(), h.Underlying(), gossipCfg(),
-		limitedPolicy(), openAudit(t, audit), quietLogger())
+	au := openAudit(t, audit)
+	ps, err := NewPubSub(context.Background(), h.Underlying(), limitedPolicy(), au, quietLogger())
+	if err != nil {
+		t.Fatalf("pubsub: %v", err)
+	}
+	m, err := NewMembership(context.Background(), h.Underlying(), ps, gossipCfg(),
+		limitedPolicy(), au, quietLogger())
 	if err != nil {
 		t.Fatalf("membership: %v", err)
 	}

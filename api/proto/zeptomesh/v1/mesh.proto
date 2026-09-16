@@ -15,6 +15,8 @@ option go_package = "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1;zeptom
 //   /zeptomesh/result/0.1.0    stream: TaskResult    -> ResultAck
 //   /zeptomesh/rpc/0.1.0       stream: RpcRequest    -> RpcResponse
 //   /zeptomesh/membership/0.1.0  pubsub (gossip): MembershipGossip
+//   /zeptomesh/skillsearch/0.1.0 pubsub (gossip): SearchMessage
+//                                  (ТЗ 6.9.5 п.5; topic name is configurable)
 // ---------------------------------------------------------------------------
 
 // TaskStatus is the lifecycle state of a task as observed by a node.
@@ -387,4 +389,40 @@ message SkillLookupResponse {
   bool partial = 2;
   // responder_refreshed confirms it honoured full_refresh (reloaded sources).
   bool responder_refreshed = 3;
+}
+
+// SearchRequest is published on the search topic (ТЗ 6.9.5 п.5) when the
+// addressed ladder (local → table → cache → DHT/relay) found no executor.
+// Any subscriber that can cover the skills answers with SearchReply. The
+// request names skills only — never a task id or instruction — so an
+// epidemic lookup cannot leak what is being executed.
+message SearchRequest {
+  string request_id = 1;          // random, chosen by the requester
+  string requester_peer_id = 2;   // must equal the authenticated pubsub sender
+  repeated string skills = 3;
+  int64 issued_at = 4;            // unix seconds; stale requests are not answered
+  string signature_scheme = 5;
+  bytes signature = 6;            // over wire.SearchRequestBody, requester's key
+}
+
+// SearchReply answers a SearchRequest on the same topic. The records are the
+// responder's claim ("these peers cover the skills"); the consumer must still
+// dial and verify each one's signed capabilities before routing to it, which
+// is exactly what tasks.SkillSource.Adopt does.
+message SearchReply {
+  string request_id = 1;
+  string responder_peer_id = 2;   // must equal the authenticated pubsub sender
+  repeated PeerRecord peers = 3;  // bounded by the responder (cap, deduped)
+  int64 issued_at = 4;
+  string signature_scheme = 5;
+  bytes signature = 6;            // over wire.SearchReplyBody, responder's key
+}
+
+// SearchMessage is the envelope published on the search topic: one topic
+// carries both directions, so the kind must be named by the wire itself.
+message SearchMessage {
+  oneof kind {
+    SearchRequest request = 1;
+    SearchReply reply = 2;
+  }
 }

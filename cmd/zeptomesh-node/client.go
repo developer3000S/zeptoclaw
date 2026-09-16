@@ -593,3 +593,110 @@ func clientResubmit(args []string) error {
 	}
 	return printJSON(v)
 }
+
+// clientTriggers lists the node's schedules — stored and config-declared —
+// with their next run (ТЗ 6.6.1 п.4).
+func clientTriggers(args []string) error {
+	fs := flag.NewFlagSet("triggers", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodGet, "/api/v1/triggers", nil, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+// clientTriggerAdd creates or replaces a stored trigger. The body mirrors the
+// admin API document; a schedule whose id is pinned in node.yaml is refused by
+// the node, because the config definition shadows the stored one.
+func clientTriggerAdd(args []string) error {
+	fs := flag.NewFlagSet("trigger-add", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	id := fs.String("id", "", "trigger id (required, unique)")
+	schedule := fs.String("schedule", "", `cron expression, e.g. "0 3 * * *" (required)`)
+	instruction := fs.String("instruction", "", "task instruction to inject (required)")
+	name := fs.String("name", "", "human label for the schedule")
+	ttl := fs.Int("ttl", 0, "task TTL in hops (0 = node default)")
+	priority := fs.Int("priority", 0, "task priority 1..9 (0 = default)")
+	timeout := fs.Int("timeout", 0, "execution timeout, seconds (0 = node default)")
+	maxRuns := fs.Int("max-runs", 0, "stop after this many runs (0 = unlimited)")
+	disabled := fs.Bool("disabled", false, "create the trigger switched off")
+	allowShell := fs.Bool("allow-shell", false, "the scheduled task may use shell tools")
+	allowNetwork := fs.Bool("allow-network", true, "the scheduled task may use network tools")
+	var skills stringList
+	fs.Var(&skills, "skill", "required skill (repeatable)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*id) == "" || strings.TrimSpace(*schedule) == "" || strings.TrimSpace(*instruction) == "" {
+		return fmt.Errorf("trigger-add: -id, -schedule and -instruction are required")
+	}
+	job := map[string]any{
+		"instruction":         *instruction,
+		"allow_network_tools": *allowNetwork,
+	}
+	if len(skills) > 0 {
+		job["required_skills"] = []string(skills)
+	}
+	if *ttl != 0 {
+		job["ttl"] = int32(*ttl)
+	}
+	if *priority != 0 {
+		job["priority"] = int32(*priority)
+	}
+	if *timeout != 0 {
+		job["timeout_seconds"] = int32(*timeout)
+	}
+	if *allowShell {
+		job["allow_shell"] = true
+	}
+	body := map[string]any{"id": *id, "schedule": *schedule, "job": job}
+	if strings.TrimSpace(*name) != "" {
+		body["name"] = *name
+	}
+	if *maxRuns != 0 {
+		body["max_runs"] = *maxRuns
+	}
+	if *disabled {
+		body["enabled"] = false
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodPost, "/api/v1/triggers", body, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+// clientTriggerRm deletes a stored trigger by id. Config-declared schedules
+// live in node.yaml and cannot be removed here.
+func clientTriggerRm(args []string) error {
+	fs := flag.NewFlagSet("trigger-rm", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.Arg(0) == "" {
+		return fmt.Errorf("usage: zeptomesh-node trigger-rm <trigger-id>")
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	path := "/api/v1/triggers/" + url.PathEscape(fs.Arg(0))
+	if err := c.do(context.Background(), http.MethodDelete, path, nil, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}

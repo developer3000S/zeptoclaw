@@ -81,6 +81,41 @@ func (s Status) Terminal() bool {
 	return false
 }
 
+// ParseStatus is the inverse of String for the values the journal stores. An
+// unrecognised spelling maps to Received — deliberately non-terminal, so a
+// writer guarded by Terminal() behaves as it did before the guard existed
+// rather than freezing a record it cannot interpret.
+func ParseStatus(s string) Status {
+	switch s {
+	case "VALIDATING":
+		return Validating
+	case "EVALUATING":
+		return Evaluating
+	case "ACCEPTED":
+		return Accepted
+	case "REJECTED":
+		return Rejected
+	case "FORWARDED":
+		return Forwarded
+	case "RUNNING":
+		return Running
+	case "WAITING_SUBTASKS":
+		return WaitingSubtasks
+	case "AGGREGATING":
+		return Aggregating
+	case "COMPLETED":
+		return Completed
+	case "FAILED":
+		return Failed
+	case "TIMEOUT":
+		return TimedOut
+	case "CANCELED":
+		return Canceled
+	default:
+		return Received
+	}
+}
+
 // ToProto maps to the wire enum.
 func (s Status) ToProto() pb.TaskStatus {
 	switch s {

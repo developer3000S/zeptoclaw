@@ -1,0 +1,289 @@
+---
+# ---------------------------------------------------------------------------
+# roles/zeptomesh — значения по умолчанию. Всё переопределяется в
+# inventory/group_vars/host_vars или `-e NAME=value'.
+#
+# Соответствие шести пунктам ТЗ 15.4:
+#   1 Установить Docker        -> tasks/docker.yml   (tag: docker)
+#   2 Создать каталоги         -> tasks/dirs.yml     (tag: dirs)
+#   3 Сгенерировать/доставить  -> tasks/config.yml   (tag: config)
+#     конфигурацию
+#   4 Запустить контейнер      -> tasks/run.yml      (tag: run)
+#   5 Проверить здоровье узла  -> tasks/health.yml   (tag: health)
+#   6 Собрать начальные PeerID -> tasks/collect.yml  (tag: peerids)
+#   + preflight/image          -> проверки до изменений на хосте (tag: preflight)
+# ---------------------------------------------------------------------------
+
+# Что делать на хосте:
+#   deploy  — шаги 1–5 (+6, если zeptomesh_write_artifact);
+#   collect — только шаги 5–6: проверить здоровье и собрать Peer ID с уже
+#             запущенных узлов, ничего не устанавливая и не перезапуская.
+zeptomesh_stage: deploy
+
+# Имя группы инвентя: нужно для имени артефакта и для агрегации Peer ID по
+# всем хостам группы (а не только обработанным в этом прогоне).
+zeptomesh_host_group: mesh_nodes
+
+# ---------- образ (тег пинируется версией проекта) ----------
+# Makefile: VERSION ?= 0.1.0; deploy/docker/Dockerfile: ARG VERSION=0.1.0.
+# `latest` в развёртывании на 100+ хостов недопустим: повторный прогон не должен
+# менять состав сети, а откат должен быть возможен.
+zeptomesh_image_repository: zeptomesh-node
+zeptomesh_image_tag: "0.1.0"
+zeptomesh_image: "{{ zeptomesh_image_repository }}:{{ zeptomesh_image_tag }}"
+
+# Как получить образ:
+#   build — собрать из исходников на целевом хосте (то же делает
+#           install.sh --mode docker);
+#   pull  — достать из реестра (логин — community.docker.docker_login, см. README);
+#   none  — образ уже на хосте (загружен tar-архивом или CI).
+zeptomesh_image_source: build
+
+# Контекст сборки: по умолчанию корень репозитория (плейбук лежит в
+# deploy/ansible/). Для build на хосте должны лежать исходники.
+zeptomesh_project_root: "{{ playbook_dir }}/../.."
+zeptomesh_build_context: "{{ zeptomesh_src_dir | default(zeptomesh_project_root, true) }}"
+zeptomesh_dockerfile: deploy/docker/Dockerfile
+
+# Исходники на целевом хосте (только для zeptomesh_image_source=build).
+zeptomesh_src_repo: "git@github.com:developer3000S/zeptoclaw.git"
+zeptomesh_src_version: "v{{ zeptomesh_image_tag }}"
+zeptomesh_src_dir: ""
+# true — держать клон через git (на хосте нужен доступ к репозиторию);
+# false — считать, что репозиторий уже разложен в zeptomesh_build_context.
+zeptomesh_src_from_git: false
+# Подпись собираемого образа (ARG GIT_COMMIT в Dockerfile).
+zeptomesh_git_commit: "{{ ansible_date_time.iso8601 | default('unknown') }}"
+# true — при source=pull всегда сверяться с реестром; false — использовать
+# имеющийся на хосте образ с нужным тегом.
+zeptomesh_image_pull: false
+
+# ---------- пути на хосте ----------
+# Каталог конфигурации; он же (read-only) монтируется в контейнер. Пути внутри
+# контейнера фиксированы ниже и совпадают с deploy/docker/Dockerfile.
+zeptomesh_conf_dir: /etc/zeptomesh
+zeptomesh_config_file: node.yaml
+# Источник конфигурации — шаблон репозитория: он параметризован ${VAR:-default}
+# (internal/config.expandEnv), поэтому один файл обслуживает все экземпляры.
+# Для Интернета: ../../configs/examples/wan.yaml, для LAN: ../../configs/examples/lan.yaml.
+zeptomesh_config_source: "{{ playbook_dir }}/../../configs/node.yaml"
+# Каталог env-файлов экземпляров. Специально НЕ внутри zeptomesh_conf_dir:
+# каталог конфигурации монтируется в контейнеры, а в env-файлах лежат PSK и
+# токены — им там делать нечего (модуль docker_container читает их на хосте и
+# передаёт значения в Env контейнера).
+zeptomesh_env_dir: /etc/zeptomesh-env
+# Каталог артефактов на контроллере (Peer ID, bootstrap-списки).
+zeptomesh_artifact_dir: "{{ playbook_dir }}/collected"
+
+# ---------- сколько экземпляров на хосте ----------
+# Нумерация с 0, порты = база + номер (как в install.sh и compose).
+zeptomesh_node_count: 1
+
+# ---------- порты ----------
+zeptomesh_base_mesh_port: 4001   # tcp + udp(quic-v1), публикуется наружу
+zeptomesh_base_api_port: 8081    # админ-API, только loopback хоста
+zeptomesh_base_prom_port: 9464   # Prometheus, только loopback хоста
+zeptomesh_prometheus_enabled: true
+# mesh публикуется на 0.0.0.0 (иначе сосед не подключится); API и метрики —
+# строго на loopback: docs/DEPLOYMENT.md §3 требует не выставлять их наружу,
+# доступ — через SSH-туннель.
+zeptomesh_mesh_bind_ip: "0.0.0.0"
+zeptomesh_api_bind_ip: "127.0.0.1"
+zeptomesh_api_host: 0.0.0.0      # bind внутри контейнера (Docker публикует порт,
+                                 # обращаясь к адресам контейнера, не к loopback)
+# Хост, с которого контроллер-хост опрашивает /healthz и /api/v1/status.
+zeptomesh_health_host: 127.0.0.1
+
+# ---------- имена ----------
+zeptomesh_container_prefix: zeptomesh
+# Имя узла в mesh: экземпляр i получает «<префикс>-<i>» (zepto-0, zepto-1, …),
+# как в deploy/docker/docker-compose.yml.
+zeptomesh_name_prefix: zepto
+# Префикс именованного тома данных. Включает имя хоста, чтобы несколько
+# инстансов, случайно попавших на один docker-демон, не смешали данные.
+zeptomesh_volume_prefix: "{{ 'zeptomesh-' ~ (inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '-')) }}"
+# Альтернатива тому — bind-монтирование каталогов хоста: файлы узлов остаются
+# обычными каталогами (проще бэкап keys/ — RUNBOOK §5), планировка как в
+# локальном режиме install.sh.
+zeptomesh_data_bind_mount: false
+zeptomesh_data_host_root: /var/lib/zeptomesh
+# Владелец каталогов данных при bind-монтировании — uid/gid пользователя внутри
+# образа (USER zeptomesh). Не угадывается: `useradd --system` берёт uid из
+# диапазона system-аккаунтов, и он зависит от базового образа. Узнать:
+#   docker run --rm --entrypoint id zeptomesh-node:<tag>
+# Для именованных томов (по умолчанию) задавать не нужно.
+zeptomesh_data_owner_uid: ""
+zeptomesh_data_owner_gid: ""
+
+# ---------- пути внутри контейнера ----------
+# Фиксированы и повторяют deploy/docker/Dockerfile (VOLUME /var/lib/zeptomesh,
+# ENV ZETOMESH_CONFIG=/etc/zeptomesh/node.yaml). Менять не нужно: источник
+# конфига на хосте задаётся выше, а внутри контейнера путь остаётся привычным.
+zeptomesh_container_data_root: /var/lib/zeptomesh
+zeptomesh_container_conf_dir: /etc/zeptomesh
+
+# ---------- производные пути (хост ↔ контейнер) ----------
+zeptomesh_host_config_path: "{{ zeptomesh_conf_dir }}/{{ zeptomesh_config_file }}"
+zeptomesh_container_config_path: "{{ zeptomesh_container_conf_dir }}/{{ zeptomesh_config_file }}"
+zeptomesh_host_allowed_peers_path: "{{ zeptomesh_conf_dir }}/allowed_peers.txt"
+zeptomesh_host_blocked_peers_path: "{{ zeptomesh_conf_dir }}/blocked_peers.txt"
+zeptomesh_container_allowed_peers_path: "{{ zeptomesh_container_conf_dir }}/allowed_peers.txt"
+zeptomesh_container_blocked_peers_path: "{{ zeptomesh_container_conf_dir }}/blocked_peers.txt"
+# Слушатель метрик внутри контейнера обязан быть 0.0.0.0: docker публикует порт,
+# подключаясь к адресам контейнера в его netns (то же соображение, что и для
+# ENV ZETOMESH_API_HOST в Dockerfile). Наружу порт выходит на loopback хоста.
+zeptomesh_prom_host: 0.0.0.0
+# Файл артефакта группы на контроллере (его же читает include_vars в preflight).
+zeptomesh_group_peerids_file: "{{ zeptomesh_artifact_dir }}/{{ zeptomesh_host_group }}.peerids.yml"
+
+# ---------- права на создаваемые файлы ----------
+zeptomesh_config_owner: root
+zeptomesh_config_group: root
+zeptomesh_config_mode: "0644"
+# env-файл экземпляра: 0600, внутри PSK и bearer-токен.
+zeptomesh_env_file_mode: "0600"
+
+# ---------- сетевой профиль узла ----------
+zeptomesh_trust_mode: limited     # open | limited | private
+zeptomesh_pico_mode: stub         # stub | binary | http
+zeptomesh_pico_model: ""          # пусто → решает конфигурация PicoClaw
+zeptomesh_pico_bin: ""            # пусто → picoclaw (значение по умолчанию конфига)
+zeptomesh_pico_config: ""         # путь к picoclaw.config (внутри контейнера)
+zeptomesh_pico_workspace: ""      # пусто → <data_dir>/picoclaw/workspaces
+zeptomesh_log_level: info
+zeptomesh_dht_mode: auto          # auto | server | client
+# mDNS между контейнерами не работает (разные сетевые имена), поэтому выключен
+# по умолчанию — как в deploy/docker/docker-compose.yml.
+zeptomesh_mdns: false
+# Публичный IPv4 хоста для announce (читает configs/examples/wan.yaml).
+# По умолчанию — адрес по умолчанию на хосте; для NAT/облака укажите явно.
+zeptomesh_pub_ip: "{{ ansible_default_ipv4.address | default('', true) }}"
+zeptomesh_relay_advertise: false
+zeptomesh_relay_1: ""             # ZETOMESH_RELAY_1 в configs/examples/wan.yaml
+# Точки входа существующей сети через запятую
+# (/ip4/203.0.113.10/tcp/4001/p2p/12D3KooW…, …). Если пусто и
+# zeptomesh_auto_bootstrap=true — берутся из собранного peerid-артефакта.
+zeptomesh_bootstrap: ""
+
+# Списки peer-ов (base58 peer id, по строке на пира). Файлы доставляются в
+# zeptomesh_conf_dir, в контейнер попадают через ту же read-only.mount;
+# ZETOMESH_ALLOWED_PEERS/ZETOMESH_BLOCKED_PEERS указывают пути внутри контейнера.
+zeptomesh_allowed_peers: []
+zeptomesh_blocked_peers: []
+
+# ---------- секреты (только из vault / env, в git их нет) ----------
+# Ожидаем значения из ansible-vault: group_vars/mesh_nodes/vault.yml или
+# -e @vault.yml (пример — ../.vault.example.yml).
+zeptomesh_psk: ""              # общий ключ закрытой сети (одинаков у всех узлов!)
+zeptomesh_api_token: ""        # bearer-токен админ-API (ZETOMESH_API_TOKEN)
+zeptomesh_pico_token: ""       # PICOCLAW_MESH_PICO_TOKEN для picoclaw.mode=http
+# true — задачи, которые могут показать секреты (env контейнера), идут с no_log.
+zeptomesh_no_log: true
+
+# ---------- ресурсы и политика запуска контейнера ----------
+# ТЗ 16.2 обещает до 128 МБ на узел без активной задачи; лимит по умолчанию не
+# ставим — не изобретаем ограничение за оператора, но показываем, где оно.
+zeptomesh_memory: ""           # например 512m
+zeptomesh_cpus: ""             # например 2.0
+zeptomesh_restart_policy: unless-stopped
+# 30s: узел при admin/leave выходит кодом 75 и перезапускается (install.sh),
+# graceful shutdown должен успеть объявить об уходе.
+zeptomesh_stop_timeout: 30
+zeptomesh_init: true
+zeptomesh_cap_drop: []         # например [ALL] — ужесточение по ТЗ 11.4
+zeptomesh_security_opts: []
+zeptomesh_extra_volumes: []
+zeptomesh_extra_env: {}
+zeptomesh_labels:
+  com.zeptomesh.managed-by: ansible
+  com.zeptomesh.cluster: "{{ zeptomesh_cluster_name }}"
+zeptomesh_cluster_name: zeptoclaw
+
+# ---------- проверка здоровья (ТЗ 15.4.5) ----------
+# Ждём ответа от /healthz: 12 попыток × 5 с ≈ минута на узел — с запасом по
+# ТЗ 16.2 («запуск узла: до 10 секунд»).
+zeptomesh_health_retries: 12
+zeptomesh_health_delay: 5
+# Таймаут одного HTTP-запроса к локальному API.
+zeptomesh_http_timeout: 20
+# Опросить и /api/v1/status: оттуда берутся анонсированные адреса
+# (DiscoverableAddrs) для bootstrap-списка. false — собирать только peer id из
+# /healthz и синтезировать адрес из zeptomesh_pub_ip.
+zeptomesh_query_status: true
+# Требовать, чтобы каждый узел увидел хотя бы одного соседа. По умолчанию false:
+# самой первой партии узлов соседей взяться не откуда (их Peer ID ещё не
+# собраны), и жёсткая проверка превратила бы первый прогон в гарантированный
+# провал. Изолированные узлы всё равно считаются и выводятся предупреждением.
+# Включайте после того, как bootstrap-список роздан:
+#   -e zeptomesh_require_peers=true
+zeptomesh_require_peers: false
+# start_period healthcheck'а контейнера.
+zeptomesh_start_period: 25
+
+# ---------- Docker (ТЗ 15.4.1) ----------
+zeptomesh_docker_install: true
+# true — официальный репозиторий download.docker.com; false — пакет
+# дистрибутива (docker.io), если у вас свои зеркала.
+zeptomesh_docker_repo_enabled: true
+zeptomesh_docker_repo_baseurl: https://download.docker.com
+zeptomesh_docker_repo_keyring: /etc/apt/keyrings/docker.gpg
+# Каталог репозитория download.docker.com под данную ОС: debian/ubuntu — по
+# дистрибутиву, RedHat-семейство — centos (для Fedora тот же путь). Влияет и на
+# GPG-ключ, и на apt/yum-источник.
+zeptomesh_docker_repo_id: >-
+  {{- 'centos' if ansible_facts['os_family'] | default('') == 'RedHat'
+      else (ansible_facts['distribution'] | default('debian') | lower) -}}
+zeptomesh_docker_repo_gpg_url: "{{ zeptomesh_docker_repo_baseurl }}/linux/{{ zeptomesh_docker_repo_id }}/gpg"
+# apt: deb [arch=<arch> signed-by=<keyring>] <baseurl>/linux/<id> <suite> stable
+zeptomesh_docker_apt_url: "{{ zeptomesh_docker_repo_baseurl }}/linux/{{ zeptomesh_docker_repo_id }}"
+# Кодовое имя выпуска (bookworm / noble). В ansible-core 2.14 facts уже собраны
+# к моменту раскрутки defaults — отложенная шаблонизация это допускает.
+zeptomesh_docker_apt_suite: "{{ ansible_facts['distribution_release'] | default('stable') | lower }}"
+# Архитектура в написании Docker (в Debian-репозитории это не uname -m).
+zeptomesh_docker_arch: >-
+  {{- {'x86_64': 'amd64', 'aarch64': 'arm64', 'armv7l': 'armhf',
+       'ppc64le': 'ppc64el', 's390x': 's390x'}
+      .get(ansible_facts['architecture'] | default('x86_64'),
+           ansible_facts['architecture'] | default('x86_64')) -}}
+zeptomesh_docker_apt_entry: >-
+  deb [arch={{ zeptomesh_docker_arch }} signed-by={{ zeptomesh_docker_repo_keyring }}]
+  {{ zeptomesh_docker_apt_url }} {{ zeptomesh_docker_apt_suite }} stable
+# yum-путь для EL (baseurl дополняется /$basearch/stable модулем yum_repository).
+zeptomesh_docker_yum_url: "{{ zeptomesh_docker_repo_baseurl }}/linux/centos"
+zeptomesh_docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+# Пакеты дистрибутива, когда официальный репозиторий отключён
+# (zeptomesh_docker_repo_enabled=false) — свои зеркала.
+zeptomesh_docker_packages_distroid:
+  - docker.io
+  - containerd
+# Что ставить на самом деле: официальный репозиторий или пакет ОС.
+zeptomesh_docker_effective_packages: >-
+  {{- zeptomesh_docker_packages if zeptomesh_docker_repo_enabled | bool
+      else zeptomesh_docker_packages_distroid -}}
+# true — после установки/обновления пакетов перезапустить демон (handler).
+zeptomesh_docker_daemon_restart: true
+
+# ---------- переключатели поведения роли ----------
+# true — держать конфиг на хосте под управлением ansible; false — только
+# сгенерировать окружение экземпляров (файл конфига готовит оператор).
+zeptomesh_config_deliver: true
+# false (по умолчанию) — не перезаписывать уже правленный на хосте конфиг;
+# true — синхронизировать с источником репозитория.
+zeptomesh_config_force: false
+# true — если zeptomesh_bootstrap пуст, взять точки входа из
+# <artifact_dir>/<группа>.peerids.yml, кроме собственных адресов хоста.
+zeptomesh_auto_bootstrap: true
+# Требовать непустой zeptomesh_pub_ip, когда текст профиля содержит
+# ${ZETOMESH_PUB_IP} (wan.yaml). false — разрешить announce приватного адреса.
+zeptomesh_require_pub_ip: true
+# Пишет ли deploy-плейбук артефакты Peer ID (шаг 6). При serial/limite каждая
+# партия перезаписывает файл всё более полным составом.
+zeptomesh_write_artifact: true
+# Прерывать плейбук, если узел не отдал Peer ID. false — собрать доступное и
+# предупредить о пропущенных.
+zeptomesh_collect_strict: true

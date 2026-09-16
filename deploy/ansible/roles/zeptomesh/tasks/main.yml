@@ -1,0 +1,71 @@
+---
+# ТЗ 15.4 — шесть шагов массового развёртывания узла ZeptoClaw Agent Mesh.
+#
+# Порядок фиксирован: сначала проверки, которые ничего не меняют на хосте, затем
+# Docker, каталоги, конфигурация, образ, контейнер, здоровье и Peer ID.
+#
+# zeptomesh_stage:
+#   deploy  — шаги 1–5 (+6 при zeptomesh_write_artifact);
+#   collect — только шаги 5–6: проверить здоровье и собрать Peer ID с уже
+#             работающих узлов, ничего не устанавливая и не перезапуская
+#             (используется плейбуком collect_peerids.yml).
+
+- name: Шаг 0 | Проверить входные данные до изменений на хосте
+  ansible.builtin.import_tasks: preflight.yml
+  tags: [always, preflight]
+
+# Раскладка экземпляров нужна обоим этапам: и запуск, и сбор адресов идут по
+# одним и тем же портам/именам, поэтому set_fact выполняется до ветвления.
+# Задания в plan.yml — только assert/set_fact/debug, хост они не меняют.
+- name: Раскладка экземпляров хоста (порты, тома, имена, env-файлы)
+  ansible.builtin.import_tasks: plan.yml
+  tags: [always]
+
+- name: Шаг 5 | Проверить здоровье узла
+  ansible.builtin.import_tasks: health.yml
+  tags: [health, collect]
+  when: zeptomesh_stage == 'collect'
+
+- name: Шаг 6 | Собрать начальные Peer ID
+  ansible.builtin.import_tasks: collect.yml
+  tags: [peerids, collect]
+  when:
+    - zeptomesh_stage == 'collect'
+    - zeptomesh_write_artifact | bool
+
+- name: Шаг 1 | Установить Docker
+  ansible.builtin.import_tasks: docker.yml
+  tags: [docker]
+  when: zeptomesh_stage == 'deploy'
+
+- name: Шаг 2 | Создать каталоги
+  ansible.builtin.import_tasks: dirs.yml
+  tags: [dirs]
+  when: zeptomesh_stage == 'deploy'
+
+- name: Шаг 3 | Доставить и сгенерировать конфигурацию
+  ansible.builtin.import_tasks: config.yml
+  tags: [config]
+  when: zeptomesh_stage == 'deploy'
+
+- name: Подготовить образ узла
+  ansible.builtin.import_tasks: image.yml
+  tags: [image]
+  when: zeptomesh_stage == 'deploy'
+
+- name: Шаг 4 | Запустить контейнер
+  ansible.builtin.import_tasks: run.yml
+  tags: [run]
+  when: zeptomesh_stage == 'deploy'
+
+- name: Шаг 5 | Проверить здоровье узла
+  ansible.builtin.import_tasks: health.yml
+  tags: [health]
+  when: zeptomesh_stage == 'deploy'
+
+- name: Шаг 6 | Собрать начальные Peer ID
+  ansible.builtin.import_tasks: collect.yml
+  tags: [peerids]
+  when:
+    - zeptomesh_stage == 'deploy'
+    - zeptomesh_write_artifact | bool

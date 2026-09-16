@@ -2865,6 +2865,267 @@ func (x *SkillLookupResponse) GetResponderRefreshed() bool {
 	return false
 }
 
+// SearchRequest is published on the search topic (ТЗ 6.9.5 п.5) when the
+// addressed ladder (local → table → cache → DHT/relay) found no executor.
+// Any subscriber that can cover the skills answers with SearchReply. The
+// request names skills only — never a task id or instruction — so an
+// epidemic lookup cannot leak what is being executed.
+type SearchRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	RequestId       string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`                     // random, chosen by the requester
+	RequesterPeerId string                 `protobuf:"bytes,2,opt,name=requester_peer_id,json=requesterPeerId,proto3" json:"requester_peer_id,omitempty"` // must equal the authenticated pubsub sender
+	Skills          []string               `protobuf:"bytes,3,rep,name=skills,proto3" json:"skills,omitempty"`
+	IssuedAt        int64                  `protobuf:"varint,4,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"` // unix seconds; stale requests are not answered
+	SignatureScheme string                 `protobuf:"bytes,5,opt,name=signature_scheme,json=signatureScheme,proto3" json:"signature_scheme,omitempty"`
+	Signature       []byte                 `protobuf:"bytes,6,opt,name=signature,proto3" json:"signature,omitempty"` // over wire.SearchRequestBody, requester's key
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *SearchRequest) Reset() {
+	*x = SearchRequest{}
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SearchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SearchRequest) ProtoMessage() {}
+
+func (x *SearchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SearchRequest.ProtoReflect.Descriptor instead.
+func (*SearchRequest) Descriptor() ([]byte, []int) {
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *SearchRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *SearchRequest) GetRequesterPeerId() string {
+	if x != nil {
+		return x.RequesterPeerId
+	}
+	return ""
+}
+
+func (x *SearchRequest) GetSkills() []string {
+	if x != nil {
+		return x.Skills
+	}
+	return nil
+}
+
+func (x *SearchRequest) GetIssuedAt() int64 {
+	if x != nil {
+		return x.IssuedAt
+	}
+	return 0
+}
+
+func (x *SearchRequest) GetSignatureScheme() string {
+	if x != nil {
+		return x.SignatureScheme
+	}
+	return ""
+}
+
+func (x *SearchRequest) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
+// SearchReply answers a SearchRequest on the same topic. The records are the
+// responder's claim ("these peers cover the skills"); the consumer must still
+// dial and verify each one's signed capabilities before routing to it, which
+// is exactly what tasks.SkillSource.Adopt does.
+type SearchReply struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	RequestId       string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	ResponderPeerId string                 `protobuf:"bytes,2,opt,name=responder_peer_id,json=responderPeerId,proto3" json:"responder_peer_id,omitempty"` // must equal the authenticated pubsub sender
+	Peers           []*PeerRecord          `protobuf:"bytes,3,rep,name=peers,proto3" json:"peers,omitempty"`                                              // bounded by the responder (cap, deduped)
+	IssuedAt        int64                  `protobuf:"varint,4,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
+	SignatureScheme string                 `protobuf:"bytes,5,opt,name=signature_scheme,json=signatureScheme,proto3" json:"signature_scheme,omitempty"`
+	Signature       []byte                 `protobuf:"bytes,6,opt,name=signature,proto3" json:"signature,omitempty"` // over wire.SearchReplyBody, responder's key
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *SearchReply) Reset() {
+	*x = SearchReply{}
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SearchReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SearchReply) ProtoMessage() {}
+
+func (x *SearchReply) ProtoReflect() protoreflect.Message {
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SearchReply.ProtoReflect.Descriptor instead.
+func (*SearchReply) Descriptor() ([]byte, []int) {
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *SearchReply) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *SearchReply) GetResponderPeerId() string {
+	if x != nil {
+		return x.ResponderPeerId
+	}
+	return ""
+}
+
+func (x *SearchReply) GetPeers() []*PeerRecord {
+	if x != nil {
+		return x.Peers
+	}
+	return nil
+}
+
+func (x *SearchReply) GetIssuedAt() int64 {
+	if x != nil {
+		return x.IssuedAt
+	}
+	return 0
+}
+
+func (x *SearchReply) GetSignatureScheme() string {
+	if x != nil {
+		return x.SignatureScheme
+	}
+	return ""
+}
+
+func (x *SearchReply) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
+// SearchMessage is the envelope published on the search topic: one topic
+// carries both directions, so the kind must be named by the wire itself.
+type SearchMessage struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Kind:
+	//
+	//	*SearchMessage_Request
+	//	*SearchMessage_Reply
+	Kind          isSearchMessage_Kind `protobuf_oneof:"kind"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SearchMessage) Reset() {
+	*x = SearchMessage{}
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SearchMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SearchMessage) ProtoMessage() {}
+
+func (x *SearchMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_zeptomesh_v1_mesh_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SearchMessage.ProtoReflect.Descriptor instead.
+func (*SearchMessage) Descriptor() ([]byte, []int) {
+	return file_zeptomesh_v1_mesh_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *SearchMessage) GetKind() isSearchMessage_Kind {
+	if x != nil {
+		return x.Kind
+	}
+	return nil
+}
+
+func (x *SearchMessage) GetRequest() *SearchRequest {
+	if x != nil {
+		if x, ok := x.Kind.(*SearchMessage_Request); ok {
+			return x.Request
+		}
+	}
+	return nil
+}
+
+func (x *SearchMessage) GetReply() *SearchReply {
+	if x != nil {
+		if x, ok := x.Kind.(*SearchMessage_Reply); ok {
+			return x.Reply
+		}
+	}
+	return nil
+}
+
+type isSearchMessage_Kind interface {
+	isSearchMessage_Kind()
+}
+
+type SearchMessage_Request struct {
+	Request *SearchRequest `protobuf:"bytes,1,opt,name=request,proto3,oneof"`
+}
+
+type SearchMessage_Reply struct {
+	Reply *SearchReply `protobuf:"bytes,2,opt,name=reply,proto3,oneof"`
+}
+
+func (*SearchMessage_Request) isSearchMessage_Kind() {}
+
+func (*SearchMessage_Reply) isSearchMessage_Kind() {}
+
 var File_zeptomesh_v1_mesh_proto protoreflect.FileDescriptor
 
 const file_zeptomesh_v1_mesh_proto_rawDesc = "" +
@@ -3090,7 +3351,27 @@ const file_zeptomesh_v1_mesh_proto_rawDesc = "" +
 	"\x13SkillLookupResponse\x12.\n" +
 	"\x05peers\x18\x01 \x03(\v2\x18.zeptomesh.v1.PeerRecordR\x05peers\x12\x18\n" +
 	"\apartial\x18\x02 \x01(\bR\apartial\x12/\n" +
-	"\x13responder_refreshed\x18\x03 \x01(\bR\x12responderRefreshed*\x88\x03\n" +
+	"\x13responder_refreshed\x18\x03 \x01(\bR\x12responderRefreshed\"\xd8\x01\n" +
+	"\rSearchRequest\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12*\n" +
+	"\x11requester_peer_id\x18\x02 \x01(\tR\x0frequesterPeerId\x12\x16\n" +
+	"\x06skills\x18\x03 \x03(\tR\x06skills\x12\x1b\n" +
+	"\tissued_at\x18\x04 \x01(\x03R\bissuedAt\x12)\n" +
+	"\x10signature_scheme\x18\x05 \x01(\tR\x0fsignatureScheme\x12\x1c\n" +
+	"\tsignature\x18\x06 \x01(\fR\tsignature\"\xee\x01\n" +
+	"\vSearchReply\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12*\n" +
+	"\x11responder_peer_id\x18\x02 \x01(\tR\x0fresponderPeerId\x12.\n" +
+	"\x05peers\x18\x03 \x03(\v2\x18.zeptomesh.v1.PeerRecordR\x05peers\x12\x1b\n" +
+	"\tissued_at\x18\x04 \x01(\x03R\bissuedAt\x12)\n" +
+	"\x10signature_scheme\x18\x05 \x01(\tR\x0fsignatureScheme\x12\x1c\n" +
+	"\tsignature\x18\x06 \x01(\fR\tsignature\"\x83\x01\n" +
+	"\rSearchMessage\x127\n" +
+	"\arequest\x18\x01 \x01(\v2\x1b.zeptomesh.v1.SearchRequestH\x00R\arequest\x121\n" +
+	"\x05reply\x18\x02 \x01(\v2\x19.zeptomesh.v1.SearchReplyH\x00R\x05replyB\x06\n" +
+	"\x04kind*\x88\x03\n" +
 	"\n" +
 	"TaskStatus\x12\x1b\n" +
 	"\x17TASK_STATUS_UNSPECIFIED\x10\x00\x12\x18\n" +
@@ -3146,7 +3427,7 @@ func file_zeptomesh_v1_mesh_proto_rawDescGZIP() []byte {
 }
 
 var file_zeptomesh_v1_mesh_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_zeptomesh_v1_mesh_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_zeptomesh_v1_mesh_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
 var file_zeptomesh_v1_mesh_proto_goTypes = []any{
 	(TaskStatus)(0),              // 0: zeptomesh.v1.TaskStatus
 	(AckStatus)(0),               // 1: zeptomesh.v1.AckStatus
@@ -3183,12 +3464,15 @@ var file_zeptomesh_v1_mesh_proto_goTypes = []any{
 	(*CancelResponse)(nil),       // 32: zeptomesh.v1.CancelResponse
 	(*SkillLookupRequest)(nil),   // 33: zeptomesh.v1.SkillLookupRequest
 	(*SkillLookupResponse)(nil),  // 34: zeptomesh.v1.SkillLookupResponse
-	nil,                          // 35: zeptomesh.v1.TaskPayload.LabelsEntry
-	nil,                          // 36: zeptomesh.v1.SkillDescriptor.AttributesEntry
+	(*SearchRequest)(nil),        // 35: zeptomesh.v1.SearchRequest
+	(*SearchReply)(nil),          // 36: zeptomesh.v1.SearchReply
+	(*SearchMessage)(nil),        // 37: zeptomesh.v1.SearchMessage
+	nil,                          // 38: zeptomesh.v1.TaskPayload.LabelsEntry
+	nil,                          // 39: zeptomesh.v1.SkillDescriptor.AttributesEntry
 }
 var file_zeptomesh_v1_mesh_proto_depIdxs = []int32{
 	6,  // 0: zeptomesh.v1.TaskPayload.attachments:type_name -> zeptomesh.v1.ArtifactRef
-	35, // 1: zeptomesh.v1.TaskPayload.labels:type_name -> zeptomesh.v1.TaskPayload.LabelsEntry
+	38, // 1: zeptomesh.v1.TaskPayload.labels:type_name -> zeptomesh.v1.TaskPayload.LabelsEntry
 	5,  // 2: zeptomesh.v1.TaskEnvelope.payload:type_name -> zeptomesh.v1.TaskPayload
 	4,  // 3: zeptomesh.v1.TaskEnvelope.constraints:type_name -> zeptomesh.v1.TaskConstraints
 	1,  // 4: zeptomesh.v1.TaskAck.status:type_name -> zeptomesh.v1.AckStatus
@@ -3196,7 +3480,7 @@ var file_zeptomesh_v1_mesh_proto_depIdxs = []int32{
 	6,  // 6: zeptomesh.v1.TaskResult.artifacts:type_name -> zeptomesh.v1.ArtifactRef
 	3,  // 7: zeptomesh.v1.TaskResult.error_class:type_name -> zeptomesh.v1.TaskErrorClass
 	12, // 8: zeptomesh.v1.Capabilities.skill_docs:type_name -> zeptomesh.v1.SkillDescriptor
-	36, // 9: zeptomesh.v1.SkillDescriptor.attributes:type_name -> zeptomesh.v1.SkillDescriptor.AttributesEntry
+	39, // 9: zeptomesh.v1.SkillDescriptor.attributes:type_name -> zeptomesh.v1.SkillDescriptor.AttributesEntry
 	13, // 10: zeptomesh.v1.SkillsSyncRequest.known:type_name -> zeptomesh.v1.SkillVersion
 	12, // 11: zeptomesh.v1.SkillsSyncResponse.skills:type_name -> zeptomesh.v1.SkillDescriptor
 	17, // 12: zeptomesh.v1.MembershipGossip.states:type_name -> zeptomesh.v1.PeerState
@@ -3220,11 +3504,14 @@ var file_zeptomesh_v1_mesh_proto_depIdxs = []int32{
 	11, // 30: zeptomesh.v1.CapabilitiesResponse.capabilities:type_name -> zeptomesh.v1.Capabilities
 	28, // 31: zeptomesh.v1.PeerExchangeResponse.peers:type_name -> zeptomesh.v1.PeerRecord
 	28, // 32: zeptomesh.v1.SkillLookupResponse.peers:type_name -> zeptomesh.v1.PeerRecord
-	33, // [33:33] is the sub-list for method output_type
-	33, // [33:33] is the sub-list for method input_type
-	33, // [33:33] is the sub-list for extension type_name
-	33, // [33:33] is the sub-list for extension extendee
-	0,  // [0:33] is the sub-list for field type_name
+	28, // 33: zeptomesh.v1.SearchReply.peers:type_name -> zeptomesh.v1.PeerRecord
+	35, // 34: zeptomesh.v1.SearchMessage.request:type_name -> zeptomesh.v1.SearchRequest
+	36, // 35: zeptomesh.v1.SearchMessage.reply:type_name -> zeptomesh.v1.SearchReply
+	36, // [36:36] is the sub-list for method output_type
+	36, // [36:36] is the sub-list for method input_type
+	36, // [36:36] is the sub-list for extension type_name
+	36, // [36:36] is the sub-list for extension extendee
+	0,  // [0:36] is the sub-list for field type_name
 }
 
 func init() { file_zeptomesh_v1_mesh_proto_init() }
@@ -3250,13 +3537,17 @@ func file_zeptomesh_v1_mesh_proto_init() {
 		(*RpcResponse_SkillsSync)(nil),
 		(*RpcResponse_Rebind)(nil),
 	}
+	file_zeptomesh_v1_mesh_proto_msgTypes[33].OneofWrappers = []any{
+		(*SearchMessage_Request)(nil),
+		(*SearchMessage_Reply)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_zeptomesh_v1_mesh_proto_rawDesc), len(file_zeptomesh_v1_mesh_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   33,
+			NumMessages:   36,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

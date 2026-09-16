@@ -6,6 +6,21 @@
 # Порты публикуются как base + index: mesh 4001+i (tcp/udp), api 8081+i,
 # metrics 9464+i. mDNS между контейнерами не работает (разные сетевые
 # имена), поэтому узлы знакомятся через bootstrap-адрес первого узла и DHT.
+#
+# Bootstrap обязан содержать /p2p/<peer id> — адрес без идентичности узел
+# отвергает на старте («bad bootstrap addrs: … has no /p2p/<peer id> part»).
+# Peer ID якоря известен только после его первого запуска (он выводится из
+# ключа на томе), поэтому он не зашит в файл, а подаётся переменной:
+#
+#   docker compose -f deploy/docker/docker-compose.yml up -d zepto-0
+#   PEER=$(docker exec zeptomesh-0 sh -c \
+#            'curl -fsS http://127.0.0.1:8081/healthz' \
+#          | sed -nE 's/.*"peer_id":"([^"]+)".*/\1/p')
+#   ZETOMESH_ANCHOR="/dns4/zepto-0/tcp/4001/p2p/$PEER" \
+#     docker compose -f deploy/docker/docker-compose.yml up -d
+#
+# Без ZETOMESH_ANCHOR узлы 1+ стартуют с пустым bootstrap и сходятся через
+# DHT/peer-exchange (медленнее, но работоспособно: DHT в образе включён).
 # ---------------------------------------------------------------------------
 
 x-node-base: &node-base
@@ -58,7 +73,7 @@ services:
       ZETOMESH_MESH_PORT: "4002"
       ZETOMESH_API_PORT: "8082"
       ZETOMESH_PROM_LISTEN: "0.0.0.0:9465"
-      ZETOMESH_BOOTSTRAP: /dns4/zepto-0/tcp/4001
+      ZETOMESH_BOOTSTRAP: ${ZETOMESH_ANCHOR:-}
     ports:
       - "4002:4002/tcp"
       - "4002:4002/udp"
@@ -79,7 +94,7 @@ services:
       ZETOMESH_MESH_PORT: "4003"
       ZETOMESH_API_PORT: "8083"
       ZETOMESH_PROM_LISTEN: "0.0.0.0:9466"
-      ZETOMESH_BOOTSTRAP: /dns4/zepto-0/tcp/4001
+      ZETOMESH_BOOTSTRAP: ${ZETOMESH_ANCHOR:-}
     ports:
       - "4003:4003/tcp"
       - "4003:4003/udp"

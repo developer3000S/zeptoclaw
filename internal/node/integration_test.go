@@ -46,6 +46,11 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/protobuf/proto"
 
 	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
@@ -54,6 +59,8 @@ import (
 	"github.com/developer3000S/zeptoclaw/internal/security"
 	"github.com/developer3000S/zeptoclaw/internal/storage"
 	"github.com/developer3000S/zeptoclaw/internal/tasks"
+	"github.com/developer3000S/zeptoclaw/internal/tracing"
+	"github.com/developer3000S/zeptoclaw/internal/triggers"
 )
 
 // testNode is one live mesh node with the handles assertions need: its key
@@ -487,18 +494,41 @@ func TestIntegrationDelegationThroughIntermediateNode(t *testing.T) {
 		t.Fatalf("worker %s listed itself as a transit hop: %v", c.name, res.GetRouteStack())
 	}
 	// Журнал инициатора помнит, кому он передал задачу, и кто её выполнил.
-	recA := m.waitJournal(a, id, func(r *storage.TaskRecord) bool { return r.WorkerPeerID != "" })
+	// Оба поля пишут разные горутины: worker+статус — обработчик результата,
+	// DelegatedTo — пост-ack бухгалтерия forward'а, и она успевает приземлиться
+	// позже (ack и результат — разные потоки). Ждём осевшее состояние, а не
+	// одно из полей.
+	recA := m.waitJournal(a, id, func(r *storage.TaskRecord) bool {
+		return r.WorkerPeerID != "" && len(r.DelegatedTo) > 0
+	})
 	if recA.Status != tasks.Completed.String() {
 		t.Fatalf("a's journal = %s, want %s", recA.Status, tasks.Completed)
 	}
 	if !contains(recA.DelegatedTo, b.ID().String()) {
 		t.Fatalf("a's journal does not name the relay it delegated to: %+v", recA)
 	}
-	// Ретранслятор записал пересылку и не исполнил ничего сам: журнал остался в
-	// состоянии FORWARDED (исполнение перевело бы его в COMPLETED).
-	recB := m.waitJournal(b, id, func(r *storage.TaskRecord) bool { return r.Status == tasks.Forwarded.String() })
+	// Ретранслятор передал задачу дальше и сам ничего не исполнил. Какое из
+	// двух состояний лежит в журнале, зависит от того, что успеет раньше:
+	// post-ack учёт пишет FORWARDED, а возврат результата от c закрывает запись
+	// как COMPLETED с worker=c. Быстрый исполнитель (stub — единицы миллисекунд)
+	// выигрывает гонку, и транзитного состояния никто не observes: терминальная
+	// запись — истина, и страж в forward её не понижает. Поэтому проверяются
+	// инварианты, общие для обоих исходов, а не преходящий статус.
+	recB := m.waitJournal(b, id, func(r *storage.TaskRecord) bool {
+		return contains(r.DelegatedTo, c.ID().String())
+	})
 	if recB.OriginPeerID != a.ID().String() {
 		t.Fatalf("b's journal lost the origin: %+v", recB)
+	}
+	if recB.WorkerPeerID == b.ID().String() {
+		t.Fatalf("relay b executed the task it should only forward: %+v", recB)
+	}
+	if s := recB.Status; s != tasks.Forwarded.String() && s != tasks.Completed.String() {
+		t.Fatalf("b's journal status = %s, want %s (transit) or %s (result already relayed)",
+			s, tasks.Forwarded, tasks.Completed)
+	}
+	if recB.Status == tasks.Completed.String() && recB.WorkerPeerID != c.ID().String() {
+		t.Fatalf("b closed the record as %s without naming c the worker: %+v", tasks.Completed, recB)
 	}
 	if got := testutil.ToFloat64(b.Metrics.ForwardAttempts.WithLabelValues("accepted")); got < 1 {
 		t.Fatalf("b recorded %v accepted forwards, want ≥1", got)
@@ -1225,6 +1255,164 @@ func (c *countingAdapter) adapter() picoclaw.Adapter {
 	return c.inner
 }
 
+// TestIntegrationScheduledTriggerInjectsATask covers ТЗ 6.6.1 п.4 end to end:
+// a cron schedule declared in the node config runs through the real scheduler,
+// the real submit path and the real router, and comes back as a signed result
+// from the peer that executed it. The firing is driven by an explicit Tick on a
+// "* * * * *" schedule, so the scenario does not race the wall clock.
+func TestIntegrationScheduledTriggerInjectsATask(t *testing.T) {
+	m := newManualMesh(t)
+	// "a" must not be able to run the job itself: its skill set deliberately
+	// excludes "general", which is the wildcard that would keep the task local
+	// and hide the routing leg this scenario is about.
+	a := m.node("a", []string{"ops"}, func(cfg *config.Config) {
+		cfg.Triggers = []config.TriggerConfig{{
+			ID: "sweep", Schedule: "* * * * *",
+			Job: config.JobConfig{
+				Instruction: "scheduled sweep", RequiredSkills: []string{"coding"}, TTL: 3,
+			},
+		}}
+	})
+	b := m.node("b", []string{"coding"}, nil)
+	m.link(a, b)
+
+	// Take the loop out of the picture: from here on every firing is a Tick the
+	// scenario initiates, so the minute boundary cannot race the assertions.
+	sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer scancel()
+	if err := a.Scheduler.Stop(sctx); err != nil {
+		t.Fatalf("stop scheduler: %v", err)
+	}
+
+	views, err := a.Scheduler.Views(time.Now().UTC())
+	if err != nil {
+		t.Fatalf("Views: %v", err)
+	}
+	if len(views) != 1 || views[0].ID != "sweep" || !views[0].Enabled {
+		t.Fatalf("config trigger not visible: %+v", views)
+	}
+
+	// "* * * * *" fires on the next minute boundary as well as here; whichever
+	// pass got there first, exactly one run per minute is the contract, so the
+	// assertion reads the recorded state rather than the return of one tick.
+	a.Scheduler.Tick(context.Background())
+	var run triggers.View
+	m.wait("scheduled run recorded", func() bool {
+		vs, err := a.Scheduler.Views(time.Now().UTC())
+		if err != nil || len(vs) != 1 || vs[0].LastTaskID == "" {
+			return false
+		}
+		run = vs[0]
+		return true
+	})
+	if run.RunCount < 1 || run.LastError != "" {
+		t.Fatalf("trigger state after the run = %+v", run)
+	}
+	completedFrom(t, a, run.LastTaskID, b)
+
+	// A config-declared schedule is YAML's, not the store's: it must not leak
+	// into the persisted list, and it cannot be deleted through the API facade.
+	stored, err := triggers.List(a.Store)
+	if err != nil {
+		t.Fatalf("List(store): %v", err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("config trigger leaked into the store: %+v", stored)
+	}
+	if removed, err := a.Scheduler.Delete("sweep"); err != nil || removed {
+		t.Fatalf("Delete of a config id = %v, %v; want a no-op", removed, err)
+	}
+
+	// A stored trigger created over the API is persisted and shares the listing
+	// with the config one; it may not shadow a config-declared id.
+	if _, err := a.Scheduler.Add(&triggers.Trigger{ID: "manual", Schedule: "0 3 * * *",
+		Job: triggers.Job{Instruction: "nightly", RequiredSkills: []string{"general"}}}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	views, err = a.Scheduler.Views(time.Now().UTC())
+	if err != nil || len(views) != 2 {
+		t.Fatalf("Views after Add = %+v (%v), want sweep+manual", views, err)
+	}
+	if st, err := triggers.List(a.Store); err != nil || len(st) != 1 || st[0].ID != "manual" {
+		t.Fatalf("stored list = %+v (%v), want only the manual schedule", st, err)
+	}
+	if _, err := a.Scheduler.Add(&triggers.Trigger{ID: "sweep", Schedule: "0 4 * * *",
+		Job: triggers.Job{Instruction: "shadow"}}); err == nil {
+		t.Fatal("an API write shadowed a config-declared id")
+	}
+}
+
+// ТЗ 6.5.3 — исключение по молчанию проверено адресным опросом. Сосед, который
+// жив, но ничего не присылает (gossip best-effort, а тут он ещё и выключен), не
+// должен исчезать из вида маршрутизации: раньше он вычёркивался по одному лишь
+// таймауту, и оператор видел «no eligible peers reachable» там, где исполнитель
+// был на месте. Мёртвый сосед при этом обязан быть удалён — иначе таблица
+// набита недосягаемыми записями.
+func TestIntegrationSilentButLivingPeerSurvivesEviction(t *testing.T) {
+	m := newManualMesh(t)
+	// suspectAfter = failure_timeout*3; heartbeat задаёт период прохода.
+	tune := func(cfg *config.Config) {
+		// Validate requires failure_timeout > heartbeat; the product (×3) is the
+		// suspect threshold, the heartbeat is how often the sweep runs.
+		cfg.Discovery.Gossip.FailureTimeout = config.Duration(900 * time.Millisecond)
+		cfg.Discovery.Gossip.Heartbeat = config.Duration(300 * time.Millisecond)
+		// Min=0 — иначе тонкий вид сам вызывает peer exchange, который обновляет
+		// LastSeen, и «молчаливость» соседа перестанет быть тем, что проверяется.
+		cfg.Neighbors.Min = 0
+		cfg.Capabilities.SkillExchange.Enabled = false
+	}
+	a := m.node("a", []string{"ops"}, tune)
+	b := m.node("b", []string{"coding"}, tune)
+	m.link(a, b)
+
+	// Фаза 1: время течёт, записей о b не приходит — он становится suspect'ом,
+	// но отвечает на прямой ping, значит остаётся.
+	isSuspect := func() bool {
+		for _, s := range a.Table.Suspects(a.suspectAfter()) {
+			if s.PeerID == b.ID() {
+				return true
+			}
+		}
+		return false
+	}
+	deadline := time.Now().Add(a.suspectAfter() + 20*time.Second)
+	sawSuspect := false
+	for time.Now().Before(deadline) {
+		if _, ok := a.Table.Get(b.ID()); !ok {
+			t.Fatal("b vanished from a's table while it was still connected and answering")
+		}
+		if isSuspect() {
+			sawSuspect = true
+		} else if sawSuspect {
+			// Suspect-состояние снято: значит опрос прошёл, и запись пережила
+			// молчание. Это и есть проверяемое поведение.
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !sawSuspect {
+		t.Fatalf("b never became a suspect within %v: the probe path was not exercised",
+			a.suspectAfter()+20*time.Second)
+	}
+	nb, ok := a.Table.Get(b.ID())
+	if !ok {
+		t.Fatal("the reconfirmed peer is gone from the table")
+	}
+	if !nb.Connected {
+		t.Fatalf("a peer we just probed over a live connection reads as disconnected: %+v", nb)
+	}
+
+	// Фаза 2: тот же путь, но сосед действительно мёртв — опрос не получает
+	// ответа, и запись обязана уйти.
+	if err := b.Stop(context.Background()); err != nil {
+		t.Fatalf("stop b: %v", err)
+	}
+	m.wait("a evicts the unreachable peer", func() bool {
+		_, still := a.Table.Get(b.ID())
+		return !still
+	})
+}
+
 func contains(hay []string, needle string) bool {
 	for _, h := range hay {
 		if h == needle {
@@ -1232,4 +1420,197 @@ func contains(hay []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestIntegrationTraceContinuesAcrossNodes is the ТЗ 14.3 acceptance shape:
+// a task submitted on A and executed on B produces ONE trace containing A's
+// submit and B's receive/execute spans. The trace context rode the wire inside
+// the signed labels — no protocol field, no side channel — and B's manager
+// joined its spans to A's trace rather than starting its own. Both nodes run
+// in this process, so one recorder sees both halves; the global OTel provider
+// delegates to whoever was installed last, which is why the recorder goes in
+// before the nodes start.
+func TestIntegrationTraceContinuesAcrossNodes(t *testing.T) {
+	prevProvider := otel.GetTracerProvider()
+	prevPropagator := otel.GetTextMapPropagator()
+	sr := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr)))
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		otel.SetTracerProvider(prevProvider)
+		otel.SetTextMapPropagator(prevPropagator)
+	})
+
+	m := newMesh(t)
+	a := m.node("a", []string{"research"}, nil)
+	b := m.node("b", []string{"coding"}, nil)
+	m.link(a, b)
+
+	id := submitTask(t, a, "build the thing", []string{"coding"}, 5)
+	completedFrom(t, a, id, b)
+
+	// AwaitResult returns before the deferred span End()s unwind on either
+	// node: poll until the expected three are in, or say honestly which is
+	// missing.
+	want := map[string]string{
+		tracing.SpanSubmit:  "",
+		tracing.SpanReceive: "",
+		tracing.SpanExecute: "",
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		for _, s := range sr.Ended() {
+			delete(want, s.Name())
+		}
+		if len(want) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			var seen []string
+			for _, s := range sr.Ended() {
+				seen = append(seen, s.Name())
+			}
+			t.Fatalf("missing spans %v; ended so far: %v", want, seen)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	var traceIDs map[string]string
+	byName := map[string]sdktrace.ReadOnlySpan{}
+	for _, s := range sr.Ended() {
+		switch s.Name() {
+		case tracing.SpanSubmit, tracing.SpanReceive, tracing.SpanExecute:
+			byName[s.Name()] = s
+			if tid, seen := traceIDs[s.Name()]; seen && tid != s.SpanContext().TraceID().String() {
+				t.Fatalf("two %s spans in different traces: %s vs %s", s.Name(), tid, s.SpanContext().TraceID())
+			}
+			if traceIDs == nil {
+				traceIDs = map[string]string{}
+			}
+			traceIDs[s.Name()] = s.SpanContext().TraceID().String()
+		}
+	}
+	sub, recv, exec := byName[tracing.SpanSubmit], byName[tracing.SpanReceive], byName[tracing.SpanExecute]
+	if sub.SpanContext().TraceID() != recv.SpanContext().TraceID() ||
+		sub.SpanContext().TraceID() != exec.SpanContext().TraceID() {
+		t.Fatalf("trace broken across the hop: submit=%s receive=%s execute=%s",
+			sub.SpanContext().TraceID(), recv.SpanContext().TraceID(), exec.SpanContext().TraceID())
+	}
+	// The remote parent recorded on B's receive span must be A's submit span:
+	// that link is what a collector uses to stitch the two nodes into one
+	// waterfall.
+	if recv.Parent().SpanID() != sub.SpanContext().SpanID() {
+		t.Fatalf("receive parent = %s, want a's submit span %s", recv.Parent().SpanID(), sub.SpanContext().SpanID())
+	}
+	if exec.Parent().SpanID() != recv.SpanContext().SpanID() {
+		t.Fatalf("execute parent = %s, want b's receive span %s", exec.Parent().SpanID(), recv.SpanContext().SpanID())
+	}
+	// task_id — the cross-cutting identifier ТЗ 14.3 does require — is on all
+	// three, so a journal query and a trace query join on the same key.
+	for _, s := range []sdktrace.ReadOnlySpan{sub, recv, exec} {
+		var got string
+		for _, attr := range s.Attributes() {
+			if attr.Key == attribute.Key("zeptomesh.task_id") {
+				got = attr.Value.AsString()
+			}
+		}
+		if got != id {
+			t.Fatalf("%s span zeptomesh.task_id = %q, want %q", s.Name(), got, id)
+		}
+	}
+}
+
+// TestIntegrationSearchTopicFindsUnacquaintedWorker is the ТЗ 6.9.5 п.5
+// end-to-end shape: the task needs "research"; A cannot serve it, B cannot
+// serve it, and A has never met C — the addressed widening is switched off,
+// which is exactly the hole the epidemic plane exists for. A publishes a
+// signed, skills-only request on the search topic; B (which met C) and C
+// (which is C) can both answer; A adopts the named peer — dial plus verified
+// signed capabilities — and routes the task there.
+func TestIntegrationSearchTopicFindsUnacquaintedWorker(t *testing.T) {
+	m := newManualMesh(t)
+	topic := func(cfg *config.Config) {
+		cfg.Tasks.Forwarding.SearchRelay.Topic.Enabled = true
+		cfg.Tasks.Forwarding.SearchRelay.Topic.AnswerCooldown = config.Duration(2 * time.Second)
+	}
+	a := m.node("search-a", []string{"coding"}, topic)
+	b := m.node("search-b", []string{"coding"}, topic)
+	c := m.node("search-c", []string{"research"}, topic)
+
+	m.link(a, b)
+	m.link(b, c)
+	if m.knows(a, c) {
+		t.Fatal("scenario premise broken: A must not already know C")
+	}
+	// The topic mesh forms by GRAFT at the ~1 s heartbeat, and the first
+	// publish before it lands is silently lost. A fixed sleep passed on an idle
+	// box and flaked when other suites shared the four cores, so wait on the
+	// fact itself: probe the plane with a search until somebody answers. The
+	// probe does not populate the routing table (adoption happens only in the
+	// task path), so the task below still has to discover C through the topic.
+	deadline := time.Now().Add(30 * time.Second)
+	var warm bool
+	for time.Now().Before(deadline) && !warm {
+		sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		for _, rec := range a.SearchTopic.Search(sctx, []string{"research"}) {
+			if rec.GetPeerId() == c.ID().String() {
+				warm = true
+				break
+			}
+		}
+		cancel()
+		if !warm {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+	if !warm {
+		t.Fatal("search topic never grafted: A got no answer for research within 30 s")
+	}
+
+	id := submitTask(t, a, "summarise the paper", []string{"research"}, 4)
+	completedFrom(t, a, id, c)
+
+	// The topic really carried the discovery: A published, somebody answered.
+	if got := testutil.ToFloat64(a.Metrics.SearchTopicRequests); got < 1 {
+		t.Fatalf("A published %v search-topic requests, want >= 1", got)
+	}
+	answered := testutil.ToFloat64(a.Metrics.SearchTopicAnswers) +
+		testutil.ToFloat64(b.Metrics.SearchTopicAnswers) +
+		testutil.ToFloat64(c.Metrics.SearchTopicAnswers)
+	if answered < 1 {
+		t.Fatalf("no node answered the search (a=%v b=%v c=%v), want >= 1",
+			testutil.ToFloat64(a.Metrics.SearchTopicAnswers),
+			testutil.ToFloat64(b.Metrics.SearchTopicAnswers),
+			testutil.ToFloat64(c.Metrics.SearchTopicAnswers))
+	}
+	// A itself must not answer its own request (self-echo is skipped).
+	if got := testutil.ToFloat64(a.Metrics.SearchTopicAnswers); got != 0 {
+		t.Fatalf("A answered its own search %v times, want 0 (self-echo skip)", got)
+	}
+	rec := m.waitJournal(a, id, func(r *storage.TaskRecord) bool { return r.WorkerPeerID == c.ID().String() })
+	if rec == nil {
+		t.Fatal("A's journal never recorded C as the worker")
+	}
+}
+
+// TestIntegrationSearchTopicStaysSilentWhenDisabled is the negative control
+// for the same scenario: with the topic plane off (and no addressed relay),
+// the task must fail with no worker — proving the previous test's success
+// came from the topic rather than from incidental reachability.
+func TestIntegrationSearchTopicStaysSilentWhenDisabled(t *testing.T) {
+	m := newManualMesh(t)
+	a := m.node("silence-a", []string{"coding"}, nil)
+	b := m.node("silence-b", []string{"coding"}, nil)
+	c := m.node("silence-c", []string{"research"}, nil)
+	m.link(a, b)
+	m.link(b, c)
+
+	id := submitTask(t, a, "summarise the paper", []string{"research"}, 4)
+	res := awaitResult(t, a, id)
+	if res.GetStatus() == pb.TaskStatus_TASK_STATUS_COMPLETED {
+		t.Fatalf("task completed without the search plane on a topology that cannot reach C: %+v", res)
+	}
+	if got := testutil.ToFloat64(a.Metrics.SearchTopicRequests); got != 0 {
+		t.Fatalf("disabled topic published %v requests, want 0", got)
+	}
 }

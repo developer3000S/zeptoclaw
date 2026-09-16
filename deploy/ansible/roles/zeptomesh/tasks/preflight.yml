@@ -1,0 +1,278 @@
+---
+# Предварительные проверки: выполняются ДО любых изменений на хосте и ловят
+# ошибки, которые иначе проявились бы только как «контейнер не поднялся» или
+# «mesh не собрался»:
+#   * пересекающиеся диапазоны портов экземпляров;
+#   * отсутствующий на контроллере источник конфигурации (этап deploy);
+#   * пустой zeptomesh_pub_ip при профиле, который анонсирует ${ZETOMESH_PUB_IP}
+#     (иначе узел объявит 127.0.0.1, и соседи до него не достанут);
+#   * bootstrap-адрес без /p2p/<peer id> — с таким списком узел не запускается
+#     вообще (internal/discovery/bootstrap.go отвергает его как негодный к
+#     дозвону), и выглядело бы это как «упал контейнер»;
+#   * битая строка в allow/block-списке (Policy.LoadPeerFile возвращает ошибку).
+
+# ---------------------------------------------------------------------------
+# Проверки, общие для обоих этапов
+# ---------------------------------------------------------------------------
+
+- name: Preflight | Проверить количество экземпляров
+  ansible.builtin.assert:
+    that:
+      - zeptomesh_node_count | int >= 1
+      - zeptomesh_node_count | int <= 64
+    fail_msg: >-
+      zeptomesh_node_count = {{ zeptomesh_node_count }}: должно быть целым от 1
+      до 64 (дальше порты экземпляров начинают пересекаться с другими службами;
+      ограничение унаследовано из install.sh).
+    quiet: true
+
+- name: Preflight | Проверить, что диапазоны портов не пересекаются
+  ansible.builtin.assert:
+    that:
+      - (zeptomesh_base_mesh_port | int) + (zeptomesh_node_count | int) <= (zeptomesh_base_api_port | int)
+      - not (zeptomesh_prometheus_enabled | bool) or (zeptomesh_base_api_port | int) + (zeptomesh_node_count | int) <= (zeptomesh_base_prom_port | int)
+      - (zeptomesh_base_prom_port | int) + (zeptomesh_node_count | int) <= 65535
+    fail_msg: >-
+      Порты экземпляров пересекаются или не влезают в 16-bit: mesh
+      {{ zeptomesh_base_mesh_port }}..{{ (zeptomesh_base_mesh_port | int) + (zeptomesh_node_count | int) - 1 }},
+      API {{ zeptomesh_base_api_port }}..{{ (zeptomesh_base_api_port | int) + (zeptomesh_node_count | int) - 1 }},
+      метрики {{ zeptomesh_base_prom_port }}..{{ (zeptomesh_base_prom_port | int) + (zeptomesh_node_count | int) - 1 }}.
+      Сдвиньте базы zeptomesh_base_*_port так, чтобы интервалы не накладывались.
+    quiet: true
+
+- name: Preflight | Проверить допустимость политик и режима образа
+  ansible.builtin.assert:
+    that:
+      - zeptomesh_trust_mode in ['open', 'limited', 'private']
+      - zeptomesh_pico_mode in ['stub', 'binary', 'http']
+      - zeptomesh_dht_mode in ['auto', 'server', 'client']
+      - zeptomesh_image_source in ['build', 'pull', 'none']
+      - zeptomesh_stage in ['deploy', 'collect']
+    fail_msg: >-
+      Некорректное значение: stage={{ zeptomesh_stage }}
+      trust={{ zeptomesh_trust_mode }} pico={{ zeptomesh_pico_mode }}
+      dht={{ zeptomesh_dht_mode }} image_source={{ zeptomesh_image_source }}.
+    quiet: true
+
+- name: Preflight | Проверить, что префиксы имён пригодны для контейнера/hostname/тома
+  ansible.builtin.assert:
+    that:
+      - zeptomesh_container_prefix is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+      - zeptomesh_name_prefix is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+      - zeptomesh_volume_prefix is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+    fail_msg: >-
+      Префиксы имён должны подходить и для имени контейнера, и для hostname, и
+      для имени docker-тома (буквы, цифры, '.', '-', '_'). Получено:
+      container_prefix='{{ zeptomesh_container_prefix }}'
+      name_prefix='{{ zeptomesh_name_prefix }}'
+      volume_prefix='{{ zeptomesh_volume_prefix }}'.
+    quiet: true
+
+# ---------------------------------------------------------------------------
+# Точки входа: явные из инвентаря либо из собранного артефакта Peer ID
+# ---------------------------------------------------------------------------
+
+# delegate_to: localhost БЕЗ run_once: каждый хост обязан получить собственный
+# экземпляр зарегистрированной переменной, иначе последующие задачи упадут на
+# «undefined attribute» для всех хостов, кроме первого.
+# Артефакт читается и на этапе collect: он нужен не только как bootstrap, но и
+# как основа для слияния при записи (частичный прогон не должен выкидывать
+# адреса узлов, которые в этом прогоне не участвовали).
+- name: Preflight | Проверить наличие peerid-артефакта на контроллере
+  ansible.builtin.stat:
+    path: "{{ zeptomesh_group_peerids_file }}"
+  delegate_to: localhost
+  become: false
+  register: zeptomesh_peerids_artifact
+
+- name: Preflight | Загрузить ранее собранные Peer ID группы
+  ansible.builtin.include_vars:
+    file: "{{ zeptomesh_group_peerids_file }}"
+    name: zeptomesh_peerids_cache
+  when: zeptomesh_peerids_artifact.stat.exists
+
+- name: Preflight | Отметить, возможен ли автоbootstrap
+  ansible.builtin.set_fact:
+    zeptomesh_use_auto_bootstrap: >-
+      {{- (zeptomesh_stage == 'deploy')
+          and (zeptomesh_bootstrap | default('', true) | trim == '')
+          and (zeptomesh_auto_bootstrap | bool)
+          and (zeptomesh_peerids_artifact.stat.exists | default(false)) -}}
+
+# Структура артефакта: { "хост": { "экземпляр": [multiaddr, …] } } — то есть
+# вложенный dict, а не список. Собственные адреса хоста исключаются: узлу некуда
+# звонить «в себя». Берутся все анонсированные адреса чужих экземпляров (tcp и
+# quic-v1): узел сам выбирает, по чему дозвониться, а dht-режим client без
+# внешних точек входа опирается именно на этот список. Повторы снимаются
+# unique ниже.
+#
+# Важно: список разворачивается целиком выражением, без map(attribute='value')
+# по внешнему dict — иначе элементом цепочки остаётся dict {экземпляр: [адреса]},
+# join() печатает его как «{'0': [...]}», а native-типы Ansible разбирают эту
+# строку обратно в dict, и все последующие фильтры падают с
+# "descriptor 'split' for 'str' objects doesn't apply to a 'dict' object".
+- name: Preflight | Развернуть адреса группы (кроме собственных)
+  ansible.builtin.set_fact:
+    zeptomesh_group_bootstrap_addrs: >-
+      {{- ((zeptomesh_peerids_cache | default({}, true) | dict2items
+            | rejectattr('key', 'equalto', inventory_hostname)
+            | map(attribute='value') | list
+            | map('dict2items') | flatten
+            | map(attribute='value') | flatten
+            | select('search', '/p2p/') | list)
+          if zeptomesh_use_auto_bootstrap | bool else []) -}}
+
+- name: Preflight | Вычислить effective bootstrap для этого хоста
+  ansible.builtin.set_fact:
+    zeptomesh_bootstrap_effective: >-
+      {{- zeptomesh_bootstrap | default('', true) | trim
+          if (zeptomesh_bootstrap | default('', true) | trim != '')
+          else (zeptomesh_group_bootstrap_addrs | default([]) | unique | sort | join(',')) -}}
+
+- name: Preflight | Проверить формат bootstrap-адресов
+  ansible.builtin.assert:
+    that:
+      - zeptomesh_bootstrap_entry | regex_search('/p2p/1[A-Za-z0-9]{20,}$')
+    fail_msg: >-
+      Точка входа '{{ zeptomesh_bootstrap_entry }}' не оканчивается валидным
+      /p2p/<peer id>. Узел с таким списком НЕ запустится:
+      internal/discovery/bootstrap.go отвергает адреса без идентификатора, и
+      ошибка проявится как упавший контейнер. Правильный формат:
+      /ip4/<адрес>/tcp/<порт>/p2p/<peer id> (его и печатает collect_peerids.yml).
+    quiet: true
+  loop: >-
+    {{- zeptomesh_bootstrap_effective | default('', true) | split(',')
+        | map('trim') | reject('equalto', '') | list -}}
+  loop_control:
+    loop_var: zeptomesh_bootstrap_entry
+    label: "{{ zeptomesh_bootstrap_entry }}"
+
+# PSK узел разбирает строго как swarm.key: "/1/<base32 от 32 байт>"
+# (internal/p2p.decodePSK). Ошибка в формате — контейнер падает сразу, и без
+# этой проверки это выглядело бы как «заговорил неверный ключ».
+- name: Preflight | Проверить формат PSK
+  ansible.builtin.assert:
+    that:
+      - (zeptomesh_psk | trim) is match('^/1/[A-Z2-7]{52}====$')
+    # Содержимое ключа в вывод не печатается — только признаки, по которым
+    # оператор поймёт ошибку: префикс и длина.
+    fail_msg: >-
+      zeptomesh_psk не подходит: префикс
+      '{{ (zeptomesh_psk | trim)[:3] | default('', true) }}', длина
+      {{ zeptomesh_psk | trim | length }} (нужно 59). Формат закрытой сети —
+      «/1/<base32 от 32 байт>»: 52 символа base32 и «====» на конце. Получить
+      значение:
+      `docker run --rm --entrypoint zeptomesh-node zeptomesh-node:0.1.0 psk`
+      или `bin/zeptomesh-node psk`. Пустое значение допустимо — тогда сеть без
+      PSK. Ключ обязан быть одинаковым у всех узлов одной сети.
+    quiet: true
+  when: zeptomesh_psk | default('', true) | trim | length > 0
+
+- name: Preflight | Проверить, что списки peer-ов содержат корректные peer id
+  ansible.builtin.assert:
+    that:
+      - zeptomesh_peer_entry is match('^1[A-Za-z0-9]{30,70}$')
+    fail_msg: >-
+      '{{ zeptomesh_peer_entry }}' не похоже на peer id (base58, 30–70 символов,
+      для Ed25519 начинается с «1»). Узел не запустится с битой строкой в
+      allow/block-файле.
+    quiet: true
+  loop: "{{ (zeptomesh_allowed_peers | default([])) + (zeptomesh_blocked_peers | default([])) }}"
+  loop_control:
+    loop_var: zeptomesh_peer_entry
+    label: "{{ zeptomesh_peer_entry }}"
+
+# ---------------------------------------------------------------------------
+# Только этап deploy: источник конфигурации и публичный адрес профиля
+# ---------------------------------------------------------------------------
+
+- name: Preflight | Найти источник конфигурации на контроллере
+  ansible.builtin.stat:
+    path: "{{ zeptomesh_config_source }}"
+  delegate_to: localhost
+  become: false
+  register: zeptomesh_config_src_stat
+  when:
+    - zeptomesh_stage == 'deploy'
+    - zeptomesh_config_deliver | bool
+
+- name: Preflight | Остановиться, если источника конфигурации нет
+  ansible.builtin.assert:
+    that:
+      - zeptomesh_config_src_stat.stat.exists
+    fail_msg: >-
+      Не найден источник конфигурации '{{ zeptomesh_config_source }}' (путь
+      разрешается относительно каталога плейбука). Для сети поверх Интернета
+      укажите ../../configs/examples/wan.yaml, для LAN —
+      ../../configs/examples/lan.yaml; либо отключите доставку
+      (-e zeptomesh_config_deliver=false), если файл на хосте готовит кто-то
+      другой.
+    quiet: true
+  when:
+    - zeptomesh_stage == 'deploy'
+    - zeptomesh_config_deliver | bool
+
+# Текст конфига читается на контроллере: нужно лишь определить, анонсирует ли
+# профиль ${ZETOMESH_PUB_IP}. На хост за этим никто не ходит.
+- name: Preflight | Определить, анонсирует ли профиль публичный адрес
+  ansible.builtin.set_fact:
+    zeptomesh_config_announces_pub_ip: >-
+      {{- ('ZETOMESH_PUB_IP' in lookup('ansible.builtin.file', zeptomesh_config_source))
+          if (zeptomesh_stage == 'deploy' and zeptomesh_config_deliver | bool
+              and zeptomesh_config_src_stat.stat.exists | default(false))
+          else false -}}
+
+- name: Preflight | Проверить zeptomesh_pub_ip для профиля с announce
+  ansible.builtin.assert:
+    that:
+      - zeptomesh_pub_ip | default('', true) | length > 0
+      - zeptomesh_pub_ip | default('', true) is match('^[0-9a-fA-F:.]+$')
+    fail_msg: >-
+      zeptomesh_pub_ip='{{ zeptomesh_pub_ip | default('', true) }}' пуст или не
+      похож на адрес, а профиль '{{ zeptomesh_config_source | basename }}'
+      анонсирует ${ZETOMESH_PUB_IP}: узел объявил бы 127.0.0.1, и соседи до него
+      не достучались бы. Задайте публичный IPv4 хоста (для облака — внешний
+      адрес, а не ansible_default_ipv4 при NAT). Отключить проверку:
+      -e zeptomesh_require_pub_ip=false; взять профиль без announce —
+      configs/node.yaml.
+    quiet: true
+  when:
+    - zeptomesh_stage == 'deploy'
+    - zeptomesh_require_pub_ip | bool
+    - zeptomesh_config_announces_pub_ip | bool
+
+- name: Preflight | Проверить, что контекст сборки доступен на хосте
+  ansible.builtin.stat:
+    path: "{{ zeptomesh_build_context }}/{{ zeptomesh_dockerfile }}"
+  register: zeptomesh_dockerfile_stat
+  when:
+    - zeptomesh_stage == 'deploy'
+    - zeptomesh_image_source == 'build'
+
+- name: Preflight | Остановиться, если Dockerfile не найден на хосте
+  ansible.builtin.assert:
+    that:
+      - zeptomesh_dockerfile_stat.stat.exists
+    fail_msg: >-
+      На {{ inventory_hostname }} не найден
+      {{ zeptomesh_build_context }}/{{ zeptomesh_dockerfile }}. Для
+      zeptomesh_image_source=build исходники должны лежать на хосте:
+      zeptomesh_src_from_git=true (клон в zeptomesh_build_context) либо
+      распакуйте репозиторий и укажите zeptomesh_build_context. Альтернативы —
+      zeptomesh_image_source=pull (реестр) или none (образ уже на хосте).
+    quiet: true
+  when:
+    - zeptomesh_stage == 'deploy'
+    - zeptomesh_image_source == 'build'
+
+- name: Preflight | Итог проверки входных данных
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: этап={{ zeptomesh_stage }}
+      экземпляров={{ zeptomesh_node_count }}
+      профиль={{ zeptomesh_config_source | basename }}
+      (announce pub_ip: {{ zeptomesh_config_announces_pub_ip | default(false) }})
+      образ={{ zeptomesh_image }} ({{ zeptomesh_image_source }})
+      bootstrap='{{ zeptomesh_bootstrap_effective | default('', true) | truncate(80, true) }}'
+      секреты: psk={{ 'задан' if zeptomesh_psk | default('', true) | length > 0 else 'не задан' }}
+      api_token={{ 'задан' if zeptomesh_api_token | default('', true) | length > 0 else 'не задан' }}

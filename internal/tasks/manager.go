@@ -16,6 +16,9 @@ import (
 	ic "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/developer3000S/zeptoclaw/internal/config"
@@ -25,6 +28,7 @@ import (
 	"github.com/developer3000S/zeptoclaw/internal/routing"
 	"github.com/developer3000S/zeptoclaw/internal/security"
 	"github.com/developer3000S/zeptoclaw/internal/storage"
+	"github.com/developer3000S/zeptoclaw/internal/tracing"
 	"github.com/developer3000S/zeptoclaw/internal/wire"
 
 	pb "github.com/developer3000S/zeptoclaw/gen/zeptomesh/v1"
@@ -47,6 +51,13 @@ type SkillSource interface {
 	// must dial each peer and verify its signed capabilities before trusting
 	// the advertised skills. It returns how many peers became routable.
 	Adopt(ctx context.Context, recs []*pb.PeerRecord) int
+	// SearchTopic runs the epidemic lookup of the last resort: a signed,
+	// skills-only request on the shared search topic (ТЗ 6.9.5 п.5), answering
+	// until ctx is done. It returns candidate records — claims that still go
+	// through Adopt — or nil when the plane is not enabled. Naming no task id
+	// or instruction keeps a lookup on a shared channel from disclosing what
+	// is being executed.
+	SearchTopic(ctx context.Context, want []string) []*pb.PeerRecord
 }
 
 // SkillView is the manager's window onto the node's own skill registry, used
@@ -85,6 +96,7 @@ type Manager struct {
 	mets    *metrics.Collector
 	log     *slog.Logger
 	caps    func() *pb.Capabilities
+	tracer  oteltrace.Tracer
 
 	slots  chan struct{}
 	queued chan struct{} // bounds queue depth beyond running slots
@@ -93,6 +105,13 @@ type Manager struct {
 	inflight map[string]*handle
 	canceled map[string]bool
 	wg       sync.WaitGroup
+
+	// journalMu serialises the read-modify-write on a task journal record made
+	// by forward's post-ack accounting, updateStatus and recordOutcome. Without
+	// it the Terminal() guards are check-then-write across a window: a result
+	// landing inside that window got its COMPLETED overwritten by a stale
+	// FORWARDED read taken before it.
+	journalMu sync.Mutex
 }
 
 // handle is the manager's bookkeeping for one task this node is responsible
@@ -180,6 +199,7 @@ func NewManager(opts Options) (*Manager, error) {
 		rebind:   opts.OnRebind,
 		mets:     opts.Metrics,
 		log:      logger,
+		tracer:   tracing.Tracer("tasks"),
 		slots:    make(chan struct{}, slots),
 		queued:   make(chan struct{}, slots*4),
 		inflight: make(map[string]*handle),
@@ -225,6 +245,43 @@ type SubmitRequest struct {
 	Subtasks []*SubtaskRequest
 }
 
+// ---------- tracing (ТЗ 14.3) ----------
+
+// startTaskSpan opens one span of a task's lifecycle, tagged with the
+// cross-cutting task identifiers. When tracing is not installed the API's no-op
+// tracer hands back an inert span and every call below costs an interface check.
+func (m *Manager) startTaskSpan(ctx context.Context, name string, env *pb.TaskEnvelope) (context.Context, oteltrace.Span) {
+	return m.tracer.Start(ctx, name, oteltrace.WithAttributes(tracing.TaskAttrs(env)...))
+}
+
+// injectTraceContext stamps the active span's W3C trace context into the
+// envelope's labels. The caller must recompute the content digest afterwards:
+// labels are author-signed content, so stamping them after the digest would
+// break verification on every hop. This is why only the author of an envelope
+// can carry a trace into it — and why a relay cannot splice its own trace into
+// someone else's task.
+func injectTraceContext(ctx context.Context, env *pb.TaskEnvelope) {
+	payload := env.GetPayload()
+	if payload == nil {
+		return
+	}
+	labels := make(map[string]string, len(payload.GetLabels())+2)
+	for k, v := range payload.GetLabels() {
+		labels[k] = v
+	}
+	tracing.Inject(ctx, labels)
+	env.Payload.Labels = labels
+}
+
+// spanOnly keeps the trace of ctx while dropping its cancellation and deadline:
+// a task lives in the mesh far longer than the HTTP request that submitted it,
+// and its routing is bounded by the envelope deadline, not by a caller context.
+func spanOnly(ctx context.Context) context.Context {
+	return oteltrace.ContextWithSpan(context.Background(), oteltrace.SpanFromContext(ctx))
+}
+
+// ---------- submission ----------
+
 // Submit injects a root task authored by this node, starts routing it and
 // returns its id.
 func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (string, error) {
@@ -260,8 +317,15 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (string, error)
 		AllowSubtasks:  req.AllowSubtasks,
 		Labels:         req.Labels,
 	}, time.Now().UTC())
+	// The trace starts here, at the author, and rides to every later hop inside
+	// the signed labels — hence the digest recomputation right after the stamp.
+	sctx, submitSpan := m.startTaskSpan(ctx, tracing.SpanSubmit, env)
+	defer submitSpan.End()
+	injectTraceContext(sctx, env)
 	env.ContextDigest = ContentDigest(env)
 	if err := Validate(env, m.cfg.Tasks.MaxPayloadBytes, time.Now().UTC()); err != nil {
+		submitSpan.RecordError(err)
+		submitSpan.SetStatus(codes.Error, err.Error())
 		return "", err
 	}
 	if err := m.signer.SignTask(env); err != nil {
@@ -286,7 +350,7 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (string, error)
 
 	if fan != nil {
 		go func() {
-			if err := m.decompose(fan); err != nil {
+			if err := m.decompose(spanOnly(sctx), fan); err != nil {
 				// The plan never got off the ground (bad ttl, rejected child):
 				// fail the parent instead of leaving a task that waits forever.
 				res := m.errorResult(env, "decomposition: "+err.Error(), pb.TaskStatus_TASK_STATUS_FAILED)
@@ -299,7 +363,7 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (string, error)
 		}()
 		return env.GetTaskId(), nil
 	}
-	go m.routeOrigin(env, deadline)
+	go m.routeOrigin(spanOnly(sctx), env, deadline)
 	return env.GetTaskId(), nil
 }
 
@@ -499,10 +563,17 @@ func (m *Manager) Prune(ctx context.Context) (int, error) {
 func (m *Manager) OnTask(ctx context.Context, remote peer.ID, env *pb.TaskEnvelope) (*pb.TaskAck, error) {
 	m.countReceived()
 
+	// A hop that cannot even validate the envelope produces no span: rejected
+	// traffic must not be able to grow a collector's storage.
 	if err := Validate(env, m.cfg.Tasks.MaxPayloadBytes, time.Now().UTC()); err != nil {
 		m.securityEvent("task_invalid", remote, env.GetTaskId(), err.Error())
 		return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_REJECTED, "validation: "+err.Error()), nil
 	}
+	// The trace continues from the author's labels, not from this stream's own
+	// context (each libp2p request is a trace of its own).
+	rctx, recvSpan := m.startTaskSpan(tracing.Extract(ctx, env), tracing.SpanReceive, env)
+	defer recvSpan.End()
+	rctx = spanOnly(rctx)
 	if env.GetSenderPeerId() != remote.String() {
 		m.securityEvent("task_sender_mismatch", remote, env.GetTaskId(), env.GetSenderPeerId())
 		return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_REJECTED, "sender_peer_id does not match stream identity"), nil
@@ -555,13 +626,13 @@ func (m *Manager) OnTask(ctx context.Context, remote peer.ID, env *pb.TaskEnvelo
 	m.recordJournal(env, Evaluating, false)
 
 	if m.canExecute(env) {
-		go m.runLocal(env, deadline)
+		go m.runLocal(rctx, env, deadline)
 		return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_QUEUED, ""), nil
 	}
 	// A relay node gets one attempt: if this hop cannot place the task, the
 	// upstream is better placed to retry than we are, so no exclusion set is
 	// carried.
-	ok, reason := m.forward(env, deadline, nil)
+	ok, reason := m.forward(rctx, env, deadline, nil)
 	if ok {
 		return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_FORWARDED, ""), nil
 	}
@@ -1074,9 +1145,18 @@ func (m *Manager) relayTargets(want []string, fanout int, visited map[peer.ID]bo
 // It returns true when the widened view yielded at least one routable peer.
 // taskID names the task the search is for, so a widening can be tied back to the
 // journal record that provoked it.
+//
+// The widening is a ladder, and each rung has its own switch: the addressed
+// part (full refresh + bounded relay RPC) belongs to search_relay.enabled;
+// the epidemic topic is search_relay.topic.enabled and runs even when the
+// addressed part is off — its absence is exactly the case the topic plane is
+// for (nobody reachable knows where the executor is).
 func (m *Manager) searchRelay(ctx context.Context, want []string, deadline time.Time, taskID string) bool {
 	sr := m.cfg.Tasks.Forwarding.SearchRelay
-	if !sr.Enabled || m.known == nil || len(want) == 0 {
+	if m.known == nil || len(want) == 0 {
+		return false
+	}
+	if !sr.Enabled && !sr.Topic.Enabled {
 		return false
 	}
 	remaining := time.Until(deadline)
@@ -1087,20 +1167,42 @@ func (m *Manager) searchRelay(ctx context.Context, want []string, deadline time.
 	if budget <= 0 || budget > remaining {
 		budget = remaining
 	}
-	rctx, cancel := context.WithTimeout(ctx, budget)
-	defer cancel()
-
-	// Start from our own complete view: a refresh may be all that is missing.
 	adopted := 0
-	found, authoritative := m.known.Refresh(rctx, want)
-	if m.mets != nil {
-		m.mets.FullRefreshes.Inc()
-	}
-	if found == 0 && !authoritative {
-		recs, _ := m.relaySkillLookup(rctx, want, sr.MaxDepth, map[peer.ID]bool{}, true)
-		adopted = m.known.Adopt(rctx, recs)
+	found := 0
+	if sr.Enabled {
+		rctx, cancel := context.WithTimeout(ctx, budget)
+		// Start from our own complete view: a refresh may be all that is missing.
+		var authoritative bool
+		found, authoritative = m.known.Refresh(rctx, want)
+		if m.mets != nil {
+			m.mets.FullRefreshes.Inc()
+		}
+		if found == 0 && !authoritative {
+			recs, _ := m.relaySkillLookup(rctx, want, sr.MaxDepth, map[peer.ID]bool{}, true)
+			adopted = m.known.Adopt(rctx, recs)
+		}
+		cancel()
 	}
 	ok := m.table.AnyWithSkills(want)
+	// The epidemic plane is the last widening step, taken only when the
+	// addressed ladder came up empty (ТЗ 6.9.5 п.5). Publishing on a shared
+	// topic reaches every subscriber, so the request names skills and nothing
+	// else; answers stay claims until Adopt dials and verifies each peer.
+	if !ok && sr.Topic.Enabled {
+		if remaining := time.Until(deadline); remaining > 0 {
+			tb := budget
+			if sr.Topic.RequestTTL.D() > 0 && sr.Topic.RequestTTL.D() < tb {
+				tb = sr.Topic.RequestTTL.D()
+			}
+			tctx, tcancel := context.WithTimeout(ctx, tb)
+			recs := m.known.SearchTopic(tctx, want)
+			if len(recs) > 0 {
+				adopted += m.known.Adopt(tctx, recs)
+			}
+			tcancel()
+			ok = m.table.AnyWithSkills(want)
+		}
+	}
 	if m.mets != nil && ok {
 		m.mets.SearchRelayHits.Inc()
 	}
@@ -1116,9 +1218,9 @@ func (m *Manager) searchRelay(ctx context.Context, want []string, deadline time.
 
 // routeOrigin is the origin-side decision loop: execute if we can, delegate
 // with bounded retries otherwise.
-func (m *Manager) routeOrigin(env *pb.TaskEnvelope, deadline time.Time) {
+func (m *Manager) routeOrigin(ctx context.Context, env *pb.TaskEnvelope, deadline time.Time) {
 	if m.canExecute(env) {
-		m.runLocal(env, deadline)
+		m.runLocal(ctx, env, deadline)
 		return
 	}
 	retries := m.cfg.Tasks.Forwarding.MaxRetries
@@ -1141,7 +1243,7 @@ func (m *Manager) routeOrigin(env *pb.TaskEnvelope, deadline time.Time) {
 		if time.Now().UTC().After(deadline) {
 			break
 		}
-		ok, reason := m.forward(env, deadline, excluded)
+		ok, reason := m.forward(ctx, env, deadline, excluded)
 		if ok {
 			return
 		}
@@ -1180,13 +1282,19 @@ func (m *Manager) routeOrigin(env *pb.TaskEnvelope, deadline time.Time) {
 // exclude, when non-nil, is both read and written: it keeps the candidates this
 // call asked and could not hand the task to out of the next attempt's selection
 // (ТЗ 6.12.1). Callers that make a single attempt pass nil.
-func (m *Manager) forward(env *pb.TaskEnvelope, deadline time.Time, exclude map[peer.ID]bool) (bool, string) {
+func (m *Manager) forward(ctx context.Context, env *pb.TaskEnvelope, deadline time.Time, exclude map[peer.ID]bool) (bool, string) {
+	fctx, fwdSpan := m.startTaskSpan(ctx, tracing.SpanForward, env)
+	fwdCtx := spanOnly(fctx)
+	defer fwdSpan.End()
+	fwdSpan.SetAttributes(attribute.String("zeptomesh.self_peer_id", m.self.String()))
 	if env.GetTtl() <= 1 {
+		fwdSpan.SetAttributes(attribute.String("zeptomesh.forward.outcome", "ttl_exhausted"))
 		return false, "ttl exhausted: one more hop would spend it"
 	}
 	// The origin's right to keep the task local is binding (ТЗ 6.4.3): a node
 	// that cannot execute a no-delegation task must refuse it, not forward it.
 	if !env.GetConstraints().GetAllowDelegation() {
+		fwdSpan.SetAttributes(attribute.String("zeptomesh.forward.outcome", "delegation_forbidden"))
 		return false, "delegation not allowed by task constraints"
 	}
 	fanout := m.cfg.Tasks.Forwarding.MaxFanout
@@ -1194,7 +1302,7 @@ func (m *Manager) forward(env *pb.TaskEnvelope, deadline time.Time, exclude map[
 	if len(cands) == 0 {
 		// The local neighbour view is not enough: widen it with a bounded
 		// skill-lookup relay before giving up (ТЗ 6.5.3, multi-hop delegation).
-		relayCtx, cancel := context.WithDeadline(context.Background(), deadline)
+		relayCtx, cancel := context.WithDeadline(fwdCtx, deadline)
 		widened := m.searchRelay(relayCtx, env.GetRequiredSkills(), deadline, env.GetTaskId())
 		cancel()
 		if !widened {
@@ -1230,6 +1338,11 @@ func (m *Manager) forward(env *pb.TaskEnvelope, deadline time.Time, exclude map[
 		}
 	}
 	m.mu.Unlock()
+	asked := make([]string, 0, parallel)
+	for _, c := range cands[:parallel] {
+		asked = append(asked, c.Neighbor.PeerID.String())
+	}
+	fwdSpan.SetAttributes(attribute.StringSlice("zeptomesh.candidates", asked))
 
 	type outcome struct {
 		to  peer.ID
@@ -1262,9 +1375,9 @@ func (m *Manager) forward(env *pb.TaskEnvelope, deadline time.Time, exclude map[
 					ai.Addrs = append(ai.Addrs, parsed)
 				}
 			}
-			fctx, cancel := context.WithTimeout(context.Background(), m.svc.Timeout())
+			dctx, cancel := context.WithTimeout(context.Background(), m.svc.Timeout())
 			defer cancel()
-			ack, err := m.svc.SendTask(fctx, ai, hop)
+			ack, err := m.svc.SendTask(dctx, ai, hop)
 			if err != nil {
 				m.table.RecordFailure(cand.Neighbor.PeerID)
 				m.countForward("error")
@@ -1309,8 +1422,16 @@ func (m *Manager) forward(env *pb.TaskEnvelope, deadline time.Time, exclude map[
 		h.downstream = first.to
 	}
 	m.mu.Unlock()
+	m.journalMu.Lock()
+	defer m.journalMu.Unlock()
 	if rec, err := m.store.GetTask(env.GetTaskId()); err == nil {
-		rec.Status = Forwarded.String()
+		// A fast candidate can complete before this accounting write lands (the
+		// stub does it in single-digit ms). The terminal record is the truth:
+		// downgrade it to FORWARD and A's journal contradicts the result it
+		// already holds. The delegation itself is still recorded in DelegatedTo.
+		if !ParseStatus(rec.Status).Terminal() {
+			rec.Status = Forwarded.String()
+		}
 		rec.DelegatedTo = append(rec.DelegatedTo, first.to.String())
 		rec.Attempts++
 		_ = m.store.PutTask(rec)
@@ -1379,7 +1500,7 @@ func (m *Manager) canExecute(env *pb.TaskEnvelope) bool {
 
 // runLocal executes the task through the PicoClaw adapter and delivers the
 // signed result: to the local waiter when we originated it, upstream otherwise.
-func (m *Manager) runLocal(env *pb.TaskEnvelope, deadline time.Time) {
+func (m *Manager) runLocal(ctx context.Context, env *pb.TaskEnvelope, deadline time.Time) {
 	// Bounded queueing: a slot token first, then the semaphore itself.
 	select {
 	case m.queued <- struct{}{}:
@@ -1407,11 +1528,19 @@ func (m *Manager) runLocal(env *pb.TaskEnvelope, deadline time.Time) {
 		m.fail(env, "deadline passed before execution", pb.TaskStatus_TASK_STATUS_TIMEOUT)
 		return
 	}
+	// The span opens once a slot is in hand: queueing behind a busy adapter is
+	// the node's backlog, not this task's execution, and conflating the two
+	// would make a saturated worker look like slow agents. The execution
+	// context is derived from it, so a timeout shows inside the span too.
+	xctx, execSpan := m.startTaskSpan(ctx, tracing.SpanExecute, env)
+	xctx = spanOnly(xctx)
+	defer execSpan.End()
+	execSpan.SetAttributes(attribute.String("zeptomesh.worker_peer_id", m.self.String()))
 	timeout := time.Duration(timeoutSeconds(env, m.cfg)) * time.Second
 	if timeout > remaining {
 		timeout = remaining
 	}
-	ectx, cancel := context.WithTimeout(context.Background(), timeout)
+	ectx, cancel := context.WithTimeout(xctx, timeout)
 	defer cancel()
 
 	m.mu.Lock()
@@ -1461,6 +1590,7 @@ func (m *Manager) runLocal(env *pb.TaskEnvelope, deadline time.Time) {
 	}
 	switch {
 	case execErr != nil:
+		execSpan.RecordError(execErr)
 		if m.mets != nil {
 			m.mets.PicoClawErrors.Inc()
 		}
@@ -1469,6 +1599,7 @@ func (m *Manager) runLocal(env *pb.TaskEnvelope, deadline time.Time) {
 			res.Status = pb.TaskStatus_TASK_STATUS_TIMEOUT
 		}
 		res.ErrorMessage = sanitizeErr(execErr)
+		execSpan.SetStatus(codes.Error, res.ErrorMessage)
 		if resp != nil && strings.TrimSpace(resp.Text) != "" {
 			res.Text = capText(resp.Text, halfMax(m.cfg))
 		}
@@ -1559,6 +1690,8 @@ func (m *Manager) recordOutcome(res *pb.TaskResult) {
 		m.mu.Unlock()
 	}
 	_ = m.store.PutResult(rr)
+	m.journalMu.Lock()
+	defer m.journalMu.Unlock()
 	rec, err := m.store.GetTask(res.GetTaskId())
 	if err != nil {
 		return
@@ -1787,9 +1920,15 @@ func (m *Manager) resolve(taskID string) {
 }
 
 func (m *Manager) updateStatus(taskID string, s Status) {
+	m.journalMu.Lock()
+	defer m.journalMu.Unlock()
 	if rec, err := m.store.GetTask(taskID); err == nil {
-		rec.Status = s.String()
-		_ = m.store.PutTask(rec)
+		// Same rule as forward's accounting: a non-terminal update must not
+		// resurrect a record a concurrent cancel or fast result already closed.
+		if !ParseStatus(rec.Status).Terminal() {
+			rec.Status = s.String()
+			_ = m.store.PutTask(rec)
+		}
 	}
 }
 
