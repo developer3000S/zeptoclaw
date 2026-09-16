@@ -1,5 +1,7 @@
 # ZeptoClaw Agent Mesh (`zeptomesh`)
 
+[![CI](https://github.com/developer3000S/zeptoclaw/actions/workflows/ci.yml/badge.svg)](https://github.com/developer3000S/zeptoclaw/actions/workflows/ci.yml)
+
 Полностью децентрализованная P2P-сеть автономных AI-агентов на базе
 [PicoClaw](https://github.com/sipeed/picoclaw). Узлы образуют сеть без
 обязательного центрального координатора и без общей базы данных: задача может
@@ -286,6 +288,15 @@ protoc --proto_path=api/proto --go_out=gen --go_opt=paths=source_relative \
 ```
 
 Покрытие тестов и его границы — таблица в [docs/STATUS.md](docs/STATUS.md#тесты-покрытие-текущее).
+Отчёт о тестировании целиком (инвентарь, маппинг на ТЗ §17, живая приёмка
+E.1–E.6, найденные дефекты, что не проверено) — [docs/TESTREPORT.md](docs/TESTREPORT.md).
+
+CI-конвейер (ТЗ 15.1) — GitHub Actions, `.github/workflows/ci.yml`: статика
+(fmt/vet/proto-check), сборка + cross linux/{amd64,arm64}, юнит-набор под
+`-race`, интеграционные сценарии (race + стресс `-count=2`), живые приёмочные
+испытания `scripts/acceptance.sh`, родной arm64-раннер и сборка Docker-образа.
+Гейты совпадают с разделом 5 TESTREPORT; `make ci` — локальный эквивалент
+быстрого подмножества.
 
 ---
 

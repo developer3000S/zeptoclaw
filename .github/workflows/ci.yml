@@ -1,0 +1,142 @@
+name: CI
+
+# Приёмочные гейты проекта (см. docs/TESTREPORT.md §5) в виде конвейера.
+# Запускается на push и pull_request в main; параллельные прогоны одной ветки
+# отменяются, чтобы не жечь таймер.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOFLAGS: -mod=mod
+
+jobs:
+  # Статика: формат, vet (включая build-теги тестов), соответствие gen/ протоколу.
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt + go vet
+        run: |
+          make fmt-check
+          go vet ./...
+          go vet -tags=integration ./internal/node/... ./internal/security/...
+          go vet -tags=integration,load ./...
+      # protoc фиксируется на версии из заголовка gen/ (3.21.12 == релиз v21.12),
+      # иначе перегенерация даст иной комментарий версии и diff не сойдётся.
+      - name: Install protoc 3.21.12 + protoc-gen-go
+        run: |
+          set -euo pipefail
+          zip=protoc-21.12-linux-x86_64.zip
+          curl -sSLo "$zip" "https://github.com/protocolbuffers/protobuf/releases/download/v21.12/$zip"
+          sudo unzip -o "$zip" -d /usr/local
+          protoc --version
+          make toolchain
+      - name: gen/ matches mesh.proto
+        run: make proto-check
+
+  # Сборка: обычный бинарь + кросс-сборка linux/{amd64,arm64} (ТЗ 15.1).
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go build ./...
+        run: go build ./...
+      - name: Cross-build linux/{amd64,arm64} (ТЗ 15.1)
+        run: |
+          make cross
+          file bin/zeptomesh-node-linux-amd64 | grep -q 'x86-64'
+          file bin/zeptomesh-node-linux-arm64 | grep -q 'ARM aarch64'
+
+  # Юнит-набор целиком под -race (ТЗ 17.1) + покрытие.
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Unit tests under -race
+        run: go test -race -timeout 20m -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: ignore
+
+  # Интеграционные сценарии ТЗ 17.2/17.4 под -race; -count=2 — намеренный
+  # стресс повторов: ровно так в проекте поймали две переходные гонки журнала.
+  integration:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Integration (race) x2
+        run: |
+          make test-integration
+          # Повтор без -race — ровно так, как прогон проверялся локально
+          # (TESTREPORT §5): цель стресса — поимка переходных состояний,
+          # а не детектор гонок (он уже в первом шаге).
+          go test -tags=integration -timeout 25m -count=2 ./internal/node/... ./internal/security/...
+
+  # Живые приёмочные испытания E.1–E.6 (ТЗ §20) на реальных процессах.
+  acceptance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build daemon
+        run: make build
+      - name: Run acceptance E.1–E.6
+        run: ./scripts/acceptance.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acceptance-protocol
+          path: .dev/acceptance/PROTOCOL.txt
+          if-no-files-found: ignore
+
+  # Родная arm64-проверка (закрывает зазор «arm64 hardware» из TESTREPORT §7):
+  # hosted-раннер ubuntu-24.04-arm бесплатен для публичных репозиториев.
+  arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build & unit tests on native arm64
+        run: |
+          go build ./...
+          go test -timeout 20m ./...
+
+  # Сборка Docker-образа (ТЗ 15.2) — проверка, что Dockerfile не сломан.
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -f deploy/docker/Dockerfile -t zeptomesh-node:ci .
