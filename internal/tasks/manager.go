@@ -602,6 +602,22 @@ func (m *Manager) OnTask(ctx context.Context, remote peer.ID, env *pb.TaskEnvelo
 	if m.limiter != nil && !m.limiter.Allow(remote.String()) {
 		return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_REJECTED, "rate limit exceeded"), nil
 	}
+	// Active defense: quarantine monitoring is local; do not modify peer agency,
+	// but refuse task admission to peers under sustained quarantine.
+	if m.policy != nil {
+		if d := m.policy.DefenseOf(remote); d != nil {
+			switch d.GetQuarantine() {
+			case security.QuarantineBlocked:
+				m.securityEvent("task_quarantine_blocked", remote, env.GetTaskId(), d.GetQuarantine().String())
+				return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_REJECTED, "peer under quarantine block"),
+					nil
+			case security.QuarantineIsolated:
+				m.securityEvent("task_quarantine_isolated", remote, env.GetTaskId(), d.GetQuarantine().String())
+				return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_REJECTED, "peer under quarantine isolate"),
+					nil
+			}
+		}
+	}
 	// Per-sender concurrency cap (tasks.max_parallel_tasks_per_peer): one busy
 	// origin must not occupy every local slot. Checked before registration so a
 	// refused task never occupies the inflight map or the dedup claim.

@@ -58,6 +58,42 @@ func (g *Gater) allow(p peer.ID, dir string) bool {
 	if g == nil || g.policy == nil {
 		return true
 	}
+
+	// Quarantine check: local defense mechanism that restricts connections
+	// to monitored/challenged peers without affecting their autonomy.
+	if defense := g.policy.DefenseOf(p); defense != nil {
+		// Expired quarantine TTL is ignored (state reverts to None)
+		if defense.IsExpired() {
+			// Log and treat as no quarantine
+			if g.audit != nil {
+				g.audit.Log(security.AuditEvent{Event: "connection_gated", PeerID: p.String(), Reason: "quarantine_expired", Detail: dir})
+			}
+		} else {
+			level := defense.GetQuarantine()
+			switch level {
+			case security.QuarantineBlocked:
+				if g.audit != nil {
+					g.audit.Log(security.AuditEvent{Event: "connection_gated", PeerID: p.String(), Reason: "quarantine_blocked", Detail: dir})
+				}
+				return false
+			case security.QuarantineIsolated:
+				if g.audit != nil {
+					g.audit.Log(security.AuditEvent{Event: "connection_gated", PeerID: p.String(), Reason: "quarantine_isolated", Detail: dir})
+				}
+				// Isolated peers can only accept from specific protocols; basic dial rejected
+				return false
+			case security.QuarantineChallenged:
+				if dir == "secured" {
+					return true
+				}
+				if g.audit != nil {
+					g.audit.Log(security.AuditEvent{Event: "connection_gated", PeerID: p.String(), Reason: "quarantine_challenged", Detail: dir})
+				}
+				return false
+			}
+		}
+	}
+
 	if g.policy.AllowConnection(p) {
 		return true
 	}

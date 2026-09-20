@@ -232,10 +232,10 @@ func (t *Table) RecordRTT(p peer.ID, rtt time.Duration) {
 	n.RTT = time.Duration(float64(n.RTT)*0.7 + float64(rtt)*0.3)
 }
 
-// RecordSuccess credits a peer with a completed task.
+// RecordSuccess credits a peer with a completed task and decays local suspicion.
 func (t *Table) RecordSuccess(p peer.ID) { t.record(p, true) }
 
-// RecordFailure debits a peer.
+// RecordFailure debits a peer and increases local suspicion.
 func (t *Table) RecordFailure(p peer.ID) { t.record(p, false) }
 
 func (t *Table) record(p peer.ID, ok bool) {
@@ -251,6 +251,18 @@ func (t *Table) record(p peer.ID, ok bool) {
 		n.Failures++
 	}
 	t.persistLocked(n)
+
+	// Active defense is local policy: successful interactions decay suspicion,
+	// failures escalate it. This does not change the remote peer's behavior.
+	if t.policy != nil {
+		if defense := t.policy.DefenseOf(p); defense != nil {
+			if ok {
+				defense.ReduceSuspicion(20)
+			} else {
+				defense.AddSuspicion(20)
+			}
+		}
+	}
 }
 
 // RecordProtocolError counts a malformed or policy-violating message.

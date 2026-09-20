@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -21,6 +22,40 @@ const (
 	TrustLimited
 	TrustUntrusted
 	TrustBlocked
+)
+
+// QuarantineLevel is the active defense isolation level applied to a peer.
+type QuarantineLevel int
+
+const (
+	// QuarantineNone means no active defense is in effect.
+	QuarantineNone QuarantineLevel = iota
+	// QuarantineMonitored: peer connections observed but limited rate/suspicion score.
+	QuarantineMonitored
+	// QuarantineChallenged: peer must complete a challenge-response to progress.
+	QuarantineChallenged
+	// QuarantineIsolated: peer connections are throttled; only probe traffic allowed.
+	QuarantineIsolated
+	// QuarantineBlocked: same as TrustBlocked but may auto-expire with TTL.
+	QuarantineBlocked
+)
+
+// AttackDefenseLevel defines the active defense posture applied to hostile peers.
+type AttackDefenseLevel int
+
+const (
+	// AttackDefenseNone means no active defense against hostile peers.
+	AttackDefenseNone AttackDefenseLevel = iota
+	// AttackDefenseMonitor: monitor hostile peer behavior for intelligence gathering.
+	AttackDefenseMonitor
+	// AttackDefenseChallenge: issue cryptographic challenges to hostile peers.
+	AttackDefenseChallenge
+	// AttackDefenseReformat: attempt to reprogram hostile peer behavior.
+	AttackDefenseReformat
+	// AttackDefenseIntegrate: attempt to integrate hostile peer as a friend.
+	AttackDefenseIntegrate
+	// AttackDefenseCoerce: force hostile peer to cooperate through strategic pressure.
+	AttackDefenseCoerce
 )
 
 // String implements fmt.Stringer.
@@ -61,6 +96,200 @@ func ParseTrust(s string) (Trust, error) {
 
 // AtLeast reports whether t is at least as trusted as want.
 func (t Trust) AtLeast(want Trust) bool { return t <= want }
+
+// String implements fmt.Stringer for QuarantineLevel.
+func (q QuarantineLevel) String() string {
+	switch q {
+	case QuarantineMonitored:
+		return "monitored"
+	case QuarantineChallenged:
+		return "challenged"
+	case QuarantineIsolated:
+		return "isolated"
+	case QuarantineBlocked:
+		return "blocked"
+	default:
+		return "none"
+	}
+}
+
+// String implements fmt.Stringer for AttackDefenseLevel.
+func (d AttackDefenseLevel) String() string {
+	switch d {
+	case AttackDefenseMonitor:
+		return "monitor"
+	case AttackDefenseChallenge:
+		return "challenge"
+	case AttackDefenseReformat:
+		return "reformat"
+	case AttackDefenseIntegrate:
+		return "integrate"
+	case AttackDefenseCoerce:
+		return "coerce"
+	default:
+		return "none"
+	}
+}
+
+// PeerDefenseState tracks the active defense posture for a single peer.
+// It is purely LOCAL state — no peer can be forced to change its behavior.
+// The local node decides how much to restrict, challenge, or monitor based on
+// observed behavior. All levels are opt-in by the local operator's policy.
+type PeerDefenseState struct {
+	mu sync.RWMutex
+
+	// Current quarantine level applied to this peer.
+	QuarantineLevel QuarantineLevel
+	// Current attack defense posture.
+	AttackDefenseLevel AttackDefenseLevel
+	// Suspicion score accumulates on failures, decays on success.
+	SuspicionScore int
+	// Challenge nonce for the current challenge round (if challenged).
+	ChallengeNonce []byte
+	// Consecutive failure streak for the challenge.
+	FailureStreak int
+	// When the current state auto-expires (0 = no expiry).
+	ExpiresAt time.Time
+	// Timestamp of the last state change (for debugging/audit).
+	UpdatedAt time.Time
+}
+
+// NewPeerDefenseState creates a clean defense state for a peer.
+func NewPeerDefenseState() *PeerDefenseState {
+	return &PeerDefenseState{
+		QuarantineLevel:    QuarantineNone,
+		AttackDefenseLevel: AttackDefenseNone,
+		UpdatedAt:          time.Now().UTC(),
+	}
+}
+
+// SetQuarantine applies a quarantine level with an optional TTL.
+func (d *PeerDefenseState) SetQuarantine(level QuarantineLevel, ttl time.Duration) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.QuarantineLevel = level
+	d.UpdatedAt = time.Now().UTC()
+	if ttl > 0 {
+		d.ExpiresAt = d.UpdatedAt.Add(ttl)
+	} else {
+		d.ExpiresAt = time.Time{}
+	}
+}
+
+// SetAttackDefense applies an attack defense posture.
+func (d *PeerDefenseState) SetAttackDefense(level AttackDefenseLevel) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.AttackDefenseLevel = level
+	d.UpdatedAt = time.Now().UTC()
+}
+
+// AddSuspicion increments the suspicion score and checks for escalation.
+// Returns true if the quarantine level should escalate.
+func (d *PeerDefenseState) AddSuspicion(delta int) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.SuspicionScore += delta
+	d.UpdatedAt = time.Now().UTC()
+
+	// Escalation thresholds (local policy, not forced on peer)
+	oldLevel := d.QuarantineLevel
+	switch {
+	case d.SuspicionScore >= 100 && d.QuarantineLevel < QuarantineBlocked:
+		d.QuarantineLevel = QuarantineBlocked
+	case d.SuspicionScore >= 50 && d.QuarantineLevel < QuarantineIsolated:
+		d.QuarantineLevel = QuarantineIsolated
+	case d.SuspicionScore >= 20 && d.QuarantineLevel < QuarantineChallenged:
+		d.QuarantineLevel = QuarantineChallenged
+	case d.SuspicionScore >= 5 && d.QuarantineLevel < QuarantineMonitored:
+		d.QuarantineLevel = QuarantineMonitored
+	}
+	return d.QuarantineLevel != oldLevel
+}
+
+// ReduceSuspicion decays the suspicion score on successful interactions.
+func (d *PeerDefenseState) ReduceSuspicion(delta int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.SuspicionScore -= delta
+	if d.SuspicionScore < 0 {
+		d.SuspicionScore = 0
+	}
+	d.UpdatedAt = time.Now().UTC()
+	// De-escalation (only if no explicit TTL pinning the level)
+	if d.ExpiresAt.IsZero() {
+		switch {
+		case d.SuspicionScore < 5 && d.QuarantineLevel > QuarantineNone:
+			d.QuarantineLevel = QuarantineNone
+		case d.SuspicionScore < 20 && d.QuarantineLevel > QuarantineMonitored:
+			d.QuarantineLevel = QuarantineMonitored
+		case d.SuspicionScore < 50 && d.QuarantineLevel > QuarantineChallenged:
+			d.QuarantineLevel = QuarantineChallenged
+		case d.SuspicionScore < 100 && d.QuarantineLevel > QuarantineIsolated:
+			d.QuarantineLevel = QuarantineIsolated
+		}
+	}
+}
+
+// SetChallenge starts a new challenge round for this peer.
+func (d *PeerDefenseState) SetChallenge(nonce []byte) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.ChallengeNonce = nonce
+	d.FailureStreak = 0
+	d.AttackDefenseLevel = AttackDefenseChallenge
+	d.UpdatedAt = time.Now().UTC()
+}
+
+// RecordChallengeFailure increments the failure streak.
+func (d *PeerDefenseState) RecordChallengeFailure() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.FailureStreak++
+	d.UpdatedAt = time.Now().UTC()
+	return d.FailureStreak
+}
+
+// ClearChallenge resets the challenge state.
+func (d *PeerDefenseState) ClearChallenge() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.ChallengeNonce = nil
+	d.FailureStreak = 0
+	d.AttackDefenseLevel = AttackDefenseNone
+	d.UpdatedAt = time.Now().UTC()
+}
+
+// IsExpired reports whether a TTL-pinned state has expired.
+func (d *PeerDefenseState) IsExpired() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.ExpiresAt.IsZero() {
+		return false
+	}
+	return time.Now().UTC().After(d.ExpiresAt)
+}
+
+// GetQuarantine returns the current quarantine level (thread-safe).
+func (d *PeerDefenseState) GetQuarantine() QuarantineLevel {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.QuarantineLevel
+}
+
+// GetAttackDefense returns the current attack defense level (thread-safe).
+func (d *PeerDefenseState) GetAttackDefense() AttackDefenseLevel {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.AttackDefenseLevel
+}
+
+// GetSuspicion returns the current suspicion score (thread-safe).
+func (d *PeerDefenseState) GetSuspicion() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.SuspicionScore
+}
 
 // Mode is the node-wide trust posture.
 type Mode int
@@ -109,6 +338,51 @@ type Policy struct {
 	// id resolves to its successor's trust, and an id revoked by its own key is
 	// blocked everywhere without editing files on every node.
 	rebinds *RebindStore
+	// defense holds per-peer active defense state (quarantine, suspicion,
+	// challenge). It is purely LOCAL: the node decides how to protect itself,
+	// never what another peer must do.
+	defense *DefenseStore
+}
+
+// DefenseStore holds per-peer active defense state. It is purely LOCAL:
+// each node decides how to protect itself (quarantine, suspicion, challenge)
+// without forcing any behavior on the remote peer.
+type DefenseStore struct {
+	mu   sync.RWMutex
+	slot map[peer.ID]*PeerDefenseState
+}
+
+// NewDefenseStore creates an empty defense store.
+func NewDefenseStore() *DefenseStore {
+	return &DefenseStore{
+		slot: make(map[peer.ID]*PeerDefenseState),
+	}
+}
+
+// Get returns the defense state for a peer, creating it if missing.
+func (s *DefenseStore) Get(p peer.ID) *PeerDefenseState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if st := s.slot[p]; st != nil {
+		return st
+	}
+	st := NewPeerDefenseState()
+	s.slot[p] = st
+	return st
+}
+
+// Delete removes the defense state for a peer (e.g. on permanent ban).
+func (s *DefenseStore) Delete(p peer.ID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.slot, p)
+}
+
+// Len returns the number of tracked peers.
+func (s *DefenseStore) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.slot)
 }
 
 // NewPolicy builds a policy from configuration values.
@@ -119,6 +393,7 @@ func NewPolicy(mode Mode, minTrustForTasks Trust) *Policy {
 		allow:            make(map[peer.ID]bool),
 		deny:             make(map[peer.ID]bool),
 		observed:         make(map[peer.ID]Trust),
+		defense:          NewDefenseStore(),
 	}
 }
 
@@ -358,6 +633,14 @@ func (p *Policy) MinTrustForTasks() Trust {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.minTrustForTasks
+}
+
+// DefenseOf returns the active defense state for a peer.
+func (p *Policy) DefenseOf(pid peer.ID) *PeerDefenseState {
+	if p == nil || p.defense == nil {
+		return nil
+	}
+	return p.defense.Get(pid)
 }
 
 // String implements fmt.Stringer for log and status output.

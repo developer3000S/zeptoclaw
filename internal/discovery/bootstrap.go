@@ -70,13 +70,41 @@ func NewBootstrap(h host.Host, addrs []string, interval, dialTimeout time.Durati
 	return b, nil
 }
 
+// hasDialablePort reports whether m carries a transport port (tcp, udp with
+// quic, etc.). A multiaddr without one — e.g. bare "/ip4/1.2.3.4" — is not
+// dialable by libp2p: the port is mandatory on every reliable transport, and
+// there is no safe way to guess it. Such an entry is rejected here rather than
+// silently accepted, because a portless bootstrap never connects and otherwise
+// reads as an unreachable host instead of a malformed entry.
+func hasDialablePort(m ma.Multiaddr) bool {
+	if m == nil {
+		return false
+	}
+	for _, c := range m {
+		switch c.Protocol().Code {
+		case ma.P_TCP, ma.P_UDP, ma.P_QUIC_V1:
+			return true
+		}
+	}
+	return false
+}
+
 // ParseAddrInfo accepts "/ip4/1.2.3.4/tcp/4001/p2p/12D3KooW…" and the shorter
 // "/dns4/host/tcp/4001" form (the latter yields no peer id, which is fine for
 // dialing but means identity is only confirmed by the Noise handshake).
+//
+// An address without a transport port is rejected: libp2p cannot dial it, and
+// there is no safe default port to guess — mesh ports are per-instance
+// (4001+i). Callers that learn a peer solely by id must supply a port-bearing
+// multiaddr from a discovery source (mDNS, DHT, peer-exchange, registry) rather
+// than rely on one being synthesized here.
 func ParseAddrInfo(s string) (*peer.AddrInfo, error) {
 	m, err := ma.NewMultiaddr(s)
 	if err != nil {
 		return nil, fmt.Errorf("discovery: %q is not a multiaddr: %w", s, err)
+	}
+	if !hasDialablePort(m) {
+		return nil, fmt.Errorf("discovery: %q has no transport port and cannot be dialed", s)
 	}
 	ai, err := peer.AddrInfoFromP2pAddr(m)
 	if err != nil {

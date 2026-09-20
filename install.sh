@@ -12,11 +12,10 @@
 # compose-стек. В обоих случаях узлы стартуют сразу и стартуют при каждой
 # загрузке системы.
 #
-# Экземпляры нумеруются с 0; порты каждого следующего = базовый + номер,
-# поэтому N узлов на одном хосте не конфликтуют:
-#   mesh    4001+i (tcp и quic-v1 udp)
-#   admin   8081+i (только loopback)
-#   metrics 9464+i
+# Экземпляры нумеруются с 0; по умолчанию каждому выбирается случайный
+# свободный пятизначный порт (10000–65535). Если заданы переменные
+# ZETOMESH_BASE_MESH_PORT, ZETOMESH_BASE_API_PORT или ZETOMESH_BASE_PROM_PORT,
+# порты назначаются последовательно от указанной базы (base + index).
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -26,6 +25,13 @@ readonly REPO_DIR
 MESH_BASE_PORT="${ZETOMESH_BASE_MESH_PORT:-4001}"
 API_BASE_PORT="${ZETOMESH_BASE_API_PORT:-8081}"
 PROM_BASE_PORT="${ZETOMESH_BASE_PROM_PORT:-9464}"
+
+# Если ни один базовый порт не задан явно — используем автоматический поиск
+# свободных случайных пятизначных портов (10000–65535).
+AUTO_PORTS=1
+if [[ -n "${ZETOMESH_BASE_MESH_PORT:-}" || -n "${ZETOMESH_BASE_API_PORT:-}" || -n "${ZETOMESH_BASE_PROM_PORT:-}" ]]; then
+  AUTO_PORTS=0
+fi
 
 MODE=""                 # local | docker
 NODES=""                # количество экземпляров
@@ -43,6 +49,76 @@ RUN_USER=""             # от имени кого запускать (local, sy
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m!!\033[0m %s\n' "$*" >&2; exit 1; }
+
+# ---------- поиск свободных портов ----------
+
+# Массив уже зарезервированных портов в текущем запуске.
+_RESERVED_PORTS=()
+
+# Массивы выделенных портов (индекс = номер экземпляра).
+MESH_PORTS=()
+API_PORTS=()
+PROM_PORTS=()
+
+# _port_in_use PORT — проверяет, занят ли порт (tcp или udp) на хосте или
+# уже зарезервирован в текущем запуске.
+_port_in_use() {
+  local port="$1" p
+  for p in "${_RESERVED_PORTS[@]+"${_RESERVED_PORTS[@]}"}"; do
+    [[ "$p" == "$port" ]] && return 0
+  done
+  if command -v ss >/dev/null 2>&1; then
+    ss -tuln 2>/dev/null | awk '{print $5}' | grep -qE "(^|[^0-9])${port}$" && return 0
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -tuln 2>/dev/null | awk '{print $4}' | grep -qE "(^|[^0-9])${port}$" && return 0
+  fi
+  if command -v docker >/dev/null 2>&1; then
+    docker ps --format '{{.Ports}}' 2>/dev/null | grep -qE "(^|[^0-9])${port}->" && return 0
+  fi
+  return 1
+}
+
+# find_free_port — возвращает случайный свободный пятизначный порт (10000–65535).
+find_free_port() {
+  local attempts=0 port
+  while (( attempts < 200 )); do
+    if command -v shuf >/dev/null 2>&1; then
+      port=$(shuf -i 10000-65535 -n 1)
+    else
+      port=$(( RANDOM + 10000 ))
+    fi
+    if ! _port_in_use "$port"; then
+      _RESERVED_PORTS+=("$port")
+      printf '%s' "$port"
+      return 0
+    fi
+    (( attempts++ ))
+  done
+  die "не удалось найти свободный порт за 200 попыток"
+}
+
+# allocate_ports — выделяет mesh/api/prom порты для всех экземпляров.
+# При AUTO_PORTS=1 ищет случайные свободные, иначе — последовательные от базы.
+allocate_ports() {
+  local i
+  for ((i = 0; i < NODES; i++)); do
+    if [[ $AUTO_PORTS -eq 1 ]]; then
+      MESH_PORTS[$i]=$(find_free_port)
+      API_PORTS[$i]=$(find_free_port)
+      PROM_PORTS[$i]=$(find_free_port)
+    else
+      local mesh=$((MESH_BASE_PORT + i)) api=$((API_BASE_PORT + i)) prom=$((PROM_BASE_PORT + i))
+      MESH_PORTS[$i]=$mesh
+      API_PORTS[$i]=$api
+      PROM_PORTS[$i]=$prom
+      _RESERVED_PORTS+=("$mesh" "$api" "$prom")
+    fi
+  done
+  log "порты выделены ($([ $AUTO_PORTS -eq 1 ] && echo 'случайные свободные' || echo 'последовательные от базы')):"
+  for ((i = 0; i < NODES; i++)); do
+    log "  экземпляр $i: mesh=${MESH_PORTS[$i]} api=${API_PORTS[$i]} prom=${PROM_PORTS[$i]}"
+  done
+}
 
 usage() {
   cat <<'EOF'
@@ -192,7 +268,7 @@ primary_ip() {
 # configs/node.yaml, поэтому файл конфигурации на индекс не плодится.
 write_instance_env() {
   local dir="$1" idx="$2"
-  local mesh=$((MESH_BASE_PORT + idx)) api=$((API_BASE_PORT + idx)) prom=$((PROM_BASE_PORT + idx))
+  local mesh="${MESH_PORTS[$idx]}" api="${API_PORTS[$idx]}" prom="${PROM_PORTS[$idx]}"
   mkdir -p "$dir"
   ( umask 077
     cat > "$dir/instance.env" <<EOF
@@ -259,6 +335,7 @@ install_local() {
   local cfg_file="$DATA_DIR/etc/node.yaml"
   mkdir -p "$(dirname "$cfg_file")"
   install_config "$cfg_file" "$template"
+  allocate_ports
   log "создание $NODES экземпляр(ов) в $DATA_DIR"
 
   local i
@@ -284,7 +361,7 @@ install_local() {
     first_id="$(cat "$DATA_DIR/0/peer_id.txt")"
     first_ip="$(primary_ip || true)"
     [[ -n "$first_ip" ]] || warn "не определён адрес хоста: узлы найдут друг друга по mDNS"
-    first_addr="/ip4/${first_ip:-127.0.0.1}/tcp/$MESH_BASE_PORT/p2p/$first_id"
+    first_addr="/ip4/${first_ip:-127.0.0.1}/tcp/${MESH_PORTS[0]}/p2p/$first_id"
     for ((i = 1; i < NODES; i++)); do
       sed -i -E "s|^ZETOMESH_BOOTSTRAP=.*|ZETOMESH_BOOTSTRAP=$first_addr|" "$DATA_DIR/$i/instance.env"
       chmod 0600 "$DATA_DIR/$i/instance.env"
@@ -364,9 +441,9 @@ report_local() {
   echo
   log "готово: $NODES экземпляр(ов) запущены, автостарт включён ($kind systemd)"
   for ((i = 0; i < NODES; i++)); do
-    printf '  %-3s peer ID %-53s API http://%s:%s\n' \
+    printf '  %-3s peer ID %-53s mesh tcp+udp/%s  API http://%s:%s  metrics %s:%s\n' \
       "$i" "$(cat "$DATA_DIR/$i/peer_id.txt" 2>/dev/null || echo '-')" \
-      "$API_HOST" "$((API_BASE_PORT + i))"
+      "${MESH_PORTS[$i]}" "$API_HOST" "${API_PORTS[$i]}" "$API_HOST" "${PROM_PORTS[$i]}"
   done
   cat <<EOF
 
@@ -388,6 +465,8 @@ install_docker() {
   local stack_dir="$DATA_DIR/docker"
   mkdir -p "$stack_dir" || die "не могу создать $stack_dir"
 
+  allocate_ports
+
   log "сборка образа zeptomesh-node:latest"
   docker build -f "$REPO_DIR/deploy/docker/Dockerfile" \
     --build-arg GIT_COMMIT="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
@@ -408,13 +487,13 @@ install_docker() {
     local zp="" tries=0
     while (( tries < 30 )); do
       zp="$(docker exec zeptomesh-0 sh -c \
-              "curl -fsS http://127.0.0.1:${API_BASE_PORT}/healthz" 2>/dev/null \
+              "curl -fsS http://127.0.0.1:${API_PORTS[0]}/healthz" 2>/dev/null \
             | sed -nE 's/.*"peer_id":"([^"]+)".*/\1/p')"
       [[ -n "$zp" ]] && break
       sleep 2; (( tries++ ))
     done
     if [[ -n "$zp" ]]; then
-      local addr="/dns4/zepto-0/tcp/$MESH_BASE_PORT/p2p/$zp"
+      local addr="/dns4/zepto-0/tcp/${MESH_PORTS[0]}/p2p/$zp"
       log "точка входа для узлов 1..$((NODES-1)): $addr"
       sed -i -E "s|%%ANCHOR%%|$addr|g" "$compose_file"
     else
@@ -432,13 +511,13 @@ install_docker() {
   log "готово: $NODES экземпляр(ов), автостарт — restart: unless-stopped"
   for ((i = 0; i < NODES; i++)); do
     printf '  %-3s mesh tcp+udp/%s  API http://127.0.0.1:%s  metrics http://127.0.0.1:%s\n' \
-      "$i" "$((MESH_BASE_PORT + i))" "$((API_BASE_PORT + i))" "$((PROM_BASE_PORT + i))"
+      "$i" "${MESH_PORTS[$i]}" "${API_PORTS[$i]}" "${PROM_PORTS[$i]}"
   done
   cat <<EOF
 
 Точки входа для других хостов (нужен p2p-адрес узла, без /p2p/… адрес не принимается):
-  docker exec zeptomesh-0 sh -c 'curl -fsS http://127.0.0.1:${API_BASE_PORT}/healthz'
-  # или с хоста:  curl -fsS http://127.0.0.1:${API_BASE_PORT}/healthz
+  docker exec zeptomesh-0 sh -c 'curl -fsS http://127.0.0.1:${API_PORTS[0]}/healthz'
+  # или с хоста:  curl -fsS http://127.0.0.1:${API_PORTS[0]}/healthz
 Управление: ./install.sh status|start|stop|uninstall
 EOF
 }
@@ -451,7 +530,7 @@ write_compose() {
     echo "name: zeptomesh"
     echo "services:"
     for ((i = 0; i < NODES; i++)); do
-      local mesh=$((MESH_BASE_PORT + i)) api=$((API_BASE_PORT + i)) prom=$((PROM_BASE_PORT + i))
+      local mesh="${MESH_PORTS[$i]}" api="${API_PORTS[$i]}" prom="${PROM_PORTS[$i]}"
       local boot="$BOOTSTRAP"
       # Внутри compose-сети узлы видны по dns-именам, но точка входа обязана
       # содержать /p2p/<peer id> якоря — а он известен только после его первого
