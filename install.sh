@@ -97,8 +97,28 @@ find_free_port() {
   die "не удалось найти свободный порт за 200 попыток"
 }
 
+# next_free_from PORT — первый свободный порт, начиная с PORT (сам PORT
+# включительно). Используется в режиме последовательного распределения от
+# базы: если базовый порт занят, сдвигаемся вверх, пока не найдём свободный.
+# Результат — в глобальной RET_PORT (не stdout): функцию нельзя вызывать в
+# командной подстановке — подоболочка потеряет резервирование.
+RET_PORT=""
+next_free_from() {
+  local p="$1"
+  while (( p < 65536 )); do
+    if ! _port_in_use "$p"; then
+      _RESERVED_PORTS+=("$p")
+      RET_PORT="$p"
+      return 0
+    fi
+    (( p++ ))
+  done
+  die "не найдено свободного порта начиная с $1"
+}
+
 # allocate_ports — выделяет mesh/api/prom порты для всех экземпляров.
-# При AUTO_PORTS=1 ищет случайные свободные, иначе — последовательные от базы.
+# При AUTO_PORTS=1 ищет случайные свободные, иначе — последовательные от базы
+# с проверкой занятости: занятый базовый порт сдвигается на первый свободный.
 allocate_ports() {
   local i
   for ((i = 0; i < NODES; i++)); do
@@ -107,14 +127,18 @@ allocate_ports() {
       API_PORTS[$i]=$(find_free_port)
       PROM_PORTS[$i]=$(find_free_port)
     else
-      local mesh=$((MESH_BASE_PORT + i)) api=$((API_BASE_PORT + i)) prom=$((PROM_BASE_PORT + i))
+      # next_free_from вызывается напрямую (не через $()): командная подстановка
+      # запускает подоболочку, и резервирование в _RESERVED_PORTS потеряется.
+      local mesh api prom
+      next_free_from $((MESH_BASE_PORT + i)); mesh="$RET_PORT"
+      next_free_from $((API_BASE_PORT + i));  api="$RET_PORT"
+      next_free_from $((PROM_BASE_PORT + i)); prom="$RET_PORT"
       MESH_PORTS[$i]=$mesh
       API_PORTS[$i]=$api
       PROM_PORTS[$i]=$prom
-      _RESERVED_PORTS+=("$mesh" "$api" "$prom")
     fi
   done
-  log "порты выделены ($([ $AUTO_PORTS -eq 1 ] && echo 'случайные свободные' || echo 'последовательные от базы')):"
+  log "порты выделены ($([ $AUTO_PORTS -eq 1 ] && echo 'случайные свободные' || echo 'последовательные от базы, с проверкой занятости')):"
   for ((i = 0; i < NODES; i++)); do
     log "  экземпляр $i: mesh=${MESH_PORTS[$i]} api=${API_PORTS[$i]} prom=${PROM_PORTS[$i]}"
   done
@@ -492,8 +516,16 @@ install_docker() {
 
   allocate_ports
 
-  log "сборка образа zeptomesh-node:latest"
-  docker build -f "$REPO_DIR/deploy/docker/Dockerfile" \
+  # Удаляем старый образ, чтобы пересборка без кэша не тащила слои предыдущей
+  # версии; при первой установке образа нет — это не ошибка.
+  if docker image inspect zeptomesh-node:latest >/dev/null 2>&1; then
+    log "удаление старого образа zeptomesh-node:latest"
+    docker image rm zeptomesh-node:latest >/dev/null 2>&1 \
+      || warn "не удалось удалить образ zeptomesh-node:latest (возможно, используется контейнером)"
+  fi
+
+  log "сборка образа zeptomesh-node:latest (без кэша)"
+  docker build --no-cache -f "$REPO_DIR/deploy/docker/Dockerfile" \
     --build-arg GIT_COMMIT="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
     --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     -t zeptomesh-node:latest "$REPO_DIR"

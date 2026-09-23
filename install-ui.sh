@@ -134,6 +134,41 @@ done
 
 compose_file() { printf '%s' "${DATA_DIR}/docker/docker-compose.yml"; }
 
+# ---------- проверка порта ----------
+
+# port_in_use PORT — занят ли порт на хосте (внешние подключения, не loopback-
+# Only биндинг тоже считается: панель слушает 0.0.0.0).
+port_in_use() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -tuln 2>/dev/null | awk '{print $5}' | grep -qE "(^|[^0-9])${port}$" && return 0
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -tuln 2>/dev/null | awk '{print $4}' | grep -qE "(^|[^0-9])${port}$" && return 0
+  fi
+  if command -v docker >/dev/null 2>&1; then
+    docker ps --format '{{.Ports}}' 2>/dev/null | grep -qE "(^|[^0-9])${port}->" && return 0
+  fi
+  return 1
+}
+
+# ensure_free_port — если порт занят, перебирает следующий свободный
+# (старший), чтобы панель всегда запускалась. Изменённый порт печатается.
+ensure_free_port() {
+  if ! port_in_use "$UI_PORT"; then
+    log "порт панели: $UI_PORT (свободен)"
+    return 0
+  fi
+  local p
+  for (( p = UI_PORT + 1; p < 65536; p++ )); do
+    if ! port_in_use "$p"; then
+      warn "порт $UI_PORT занят — панель переходит на порт $p"
+      UI_PORT="$p"
+      return 0
+    fi
+  done
+  die "не найдено свободного порта начиная с $UI_PORT"
+}
+
 # ---------- обнаружение узлов ----------
 
 # agent_containers — имена работающих контейнеров стека агентов по порядку.
@@ -193,7 +228,9 @@ write_compose() {
       ZETOMESH_UI_DATA: "/var/lib/zeptomesh-ui"
       TZ: "${TZ:-UTC}"
     ports:
-      - "127.0.0.1:${UI_PORT}:${UI_PORT}"
+      # 0.0.0.0: доступ с других машин (панель слушает 0.0.0.0 внутри контейнера).
+      # Для loopback-only замените на 127.0.0.1: и перезапустите стек.
+      - "0.0.0.0:${UI_PORT}:${UI_PORT}"
     volumes:
       - zeptomesh-ui-data:/var/lib/zeptomesh-ui
 EOF
@@ -228,8 +265,17 @@ build_image() {
   local dockerfile="$REPO_DIR/deploy/ui/Dockerfile"
   [[ -f "$dockerfile" ]] \
     || die "нет $dockerfile — выполните §6.1 docs/UI-ТЗ.md ('make docker-build-ui')"
-  log "сборка образа ${IMAGE}"
-  docker build -f "$dockerfile" \
+
+  # Удаляем старый образ, чтобы сборка без кэша не оставила слои от предыдущей
+  # версии, а отстуствие образа не было ошибкой при первой установке.
+  if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    log "удаление старого образа ${IMAGE}"
+    docker image rm "$IMAGE" >/dev/null 2>&1 \
+      || warn "не удалось удалить образ $IMAGE (возможно, используется контейнером)"
+  fi
+
+  log "сборка образа ${IMAGE} (без кэша)"
+  docker build --no-cache -f "$dockerfile" \
     --build-arg GIT_COMMIT="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
     --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     -t "$IMAGE" "$REPO_DIR"
@@ -252,6 +298,9 @@ install_ui() {
   require_docker
   DATA_DIR="${DATA_DIR:-$(default_data_dir)}"
   mkdir -p "$DATA_DIR/docker" || die "не могу создать $DATA_DIR/docker"
+
+  # Проверяем порт до сборки и генерации compose: занятый порт => следующий свободный.
+  ensure_free_port
 
   local nodes=""
   if [[ -n "$NODES_ARG" ]]; then

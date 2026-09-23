@@ -185,10 +185,10 @@ install-docker: ## Собрать образ и поднять сеть из 3 �
 	./install.sh --mode docker --nodes 3
 
 docker-build: ## Только сборка образа
-	docker build -f deploy/docker/Dockerfile -t zeptomesh-node:$(VERSION) .
+	docker build --no-cache -f deploy/docker/Dockerfile -t zeptomesh-node:$(VERSION) .
 
 docker-build-ui: ## Только сборка образа панели
-	docker build -f deploy/ui/Dockerfile \
+	docker build --no-cache -f deploy/ui/Dockerfile \
 	  --build-arg VERSION=$(VERSION) \
 	  --build-arg GIT_COMMIT=$(GIT_COMMIT) \
 	  --build-arg BUILD_DATE=$(BUILD_DATE) \
