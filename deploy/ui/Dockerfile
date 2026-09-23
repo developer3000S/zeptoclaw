@@ -61,7 +61,7 @@ VOLUME ["/var/lib/zeptomesh-ui"]
 # host. install-ui.sh sets it explicitly, but the default keeps the image
 # usable on its own.
 ENV ZETOMESH_UI_DATA=/var/lib/zeptomesh-ui \
-    ZETOMESH_UI_LISTEN=0.0.0.0:8090 \
+    ZETOMESH_UI_LISTEN=0.0.0.0:28090 \
     ZETOMESH_UI_POLL_INTERVAL=5s \
     ZETOMESH_UI_LOG_LEVEL=info \
     TZ=UTC
@@ -69,9 +69,9 @@ ENV ZETOMESH_UI_DATA=/var/lib/zeptomesh-ui \
 USER zeptomesh
 WORKDIR /var/lib/zeptomesh-ui
 
-EXPOSE 8090/tcp
+EXPOSE 28090/tcp
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:8090/healthz" || exit 1
+  CMD curl -fsS "http://127.0.0.1:28090/healthz" || exit 1
 
 ENTRYPOINT ["/usr/local/bin/zeptomesh-ui"]

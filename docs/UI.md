@@ -71,7 +71,7 @@ install-ui.sh                         # независимый инсталля�
 
 | Env | Назначение | По умолчанию |
 |---|---|---|
-| `ZETOMESH_UI_LISTEN` | адрес слушателя | `127.0.0.1:8090` |
+| `ZETOMESH_UI_LISTEN` | адрес слушателя | `127.0.0.1:28090` |
 | `ZETOMESH_UI_NODES` | seed-список узлов через запятую (`http://zepto-0:33498,...`) | пусто |
 | `ZETOMESH_UI_NODES_FILE` | persistent-список узлов (JSON: `[{name,url,token?}]`), пишется из UI | `<data>/nodes.json` |
 | `ZETOMESH_UI_TOKEN` | токен доступа к UI (пусто — без авторизации) | пусто |
@@ -185,10 +185,11 @@ Live-обновления: поллинг `GET /api/v1/mesh` раз в `poll_int
 `golang:1.26-bookworm` собирает `cmd/zeptomesh-ui` (CGO_ENABLED=0, `-trimpath`,
 ldflags как у агентов) → `debian:bookworm-slim` + ca-certificates/curl/tzdata,
 non-root пользователь `zeptomesh`, `VOLUME /var/lib/zeptomesh-ui` (nodes.json),
-`EXPOSE 8090`, `HEALTHCHECK` по `/healthz`.
+`EXPOSE 28090`, `HEALTHCHECK` по `/healthz`.
 
 `deploy/ui/docker-compose.yml` — отдельный проект `name: zeptomesh-ui`, сервис
-`zeptomesh-ui`, порт `127.0.0.1:${ZETOMESH_UI_PORT:-8090}:8090`, volume и
+`zeptomesh-ui`, порт `0.0.0.0:${ZETOMESH_UI_PORT:-28090}:28090` (контейнер
+слушает `ZETOMESH_UI_LISTEN=0.0.0.0:28090`), volume и
 подключение к сети агентов как `external: name: zeptomesh_default`.
 
 `install-ui.sh` (инсталлятор, независимый от `install.sh`):
@@ -200,7 +201,7 @@ non-root пользователь `zeptomesh`, `VOLUME /var/lib/zeptomesh-ui` (n
 - **автоконфигурация адресов узлов** из работающего стека: для каждого
   контейнера `zeptomesh-*` читает env `ZETOMESH_API_PORT` через `docker inspect`
   и формирует `ZETOMESH_UI_NODES=http://zepto-0:<порт>,…`;
-- собирает образ и поднимает стек; печатает URL `http://127.0.0.1:8090`;
+- собирает образ и поднимает стек; печатает URL `http://127.0.0.1:28090`;
 - управление: `install-ui.sh status|start|stop|uninstall` — трогает только
   UI-контейнер, агенты не затрагивает.
 
@@ -239,7 +240,7 @@ non-root пользователь `zeptomesh`, `VOLUME /var/lib/zeptomesh-ui` (n
 ```bash
 make build-ui
 ZETOMESH_UI_NODES=http://127.0.0.1:8081,http://127.0.0.1:8082 ./bin/zeptomesh-ui
-# UI: http://127.0.0.1:8090
+# UI: http://127.0.0.1:28090
 ```
 
 ## 11. Что НЕ входит в v1

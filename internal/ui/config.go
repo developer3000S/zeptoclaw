@@ -17,7 +17,7 @@ import (
 // Defaults match the agent's admin API conventions (loopback-first, short
 // timeouts); every one of them is overridable through the environment.
 const (
-	defaultListen     = "127.0.0.1:8090"
+	defaultListen     = "127.0.0.1:28090"
 	defaultDataDir    = "./zeptomesh-ui-data"
 	defaultNodesFile  = "nodes.json"
 	defaultPollString = "5s"

@@ -240,14 +240,15 @@ internal/ui/static/
 - Stage 2: `debian:bookworm-slim` + `ca-certificates`, `curl` (HEALTHCHECK),
   `tzdata`; non-root пользователь `zeptomesh`;
   `VOLUME /var/lib/zeptomesh-ui` (там живёт `nodes.json`);
-  `EXPOSE 8090`; `HEALTHCHECK` по `curl -fsS http://127.0.0.1:8090/healthz`.
+  `EXPOSE 28090`; `HEALTHCHECK` по `curl -fsS http://127.0.0.1:28090/healthz`.
 - Рантайм-настройка только через env; конфигурационных файлов на образе нет.
 
 ### 6.2 `deploy/ui/docker-compose.yml` (отдельный проект)
 
 - `name: zeptomesh-ui`, сервис `zeptomesh-ui`, образ `zeptomesh-ui:latest`.
-- Порт `127.0.0.1:${ZETOMESH_UI_PORT:-8090}:8090` — только с хоста (как админ-API
-  агентов); volume `zeptomesh-ui-data:/var/lib/zeptomesh-ui`.
+- Порт `0.0.0.0:${ZETOMESH_UI_PORT:-28090}:28090` — контейнер слушает
+  `ZETOMESH_UI_LISTEN=0.0.0.0:28090`, доступ с других машин; volume
+  `zeptomesh-ui-data:/var/lib/zeptomesh-ui`.
 - Подключение к сети агентов: `networks: default: external: true,
   name: zeptomesh_default` (стек агентов — проект `zeptomesh`, контейнеры
   `zeptomesh-N`, API-порты в env `ZETOMESH_API_PORT` каждого контейнера).
@@ -265,7 +266,7 @@ internal/ui/static/
   `extra_hosts: host-gateway`, узлы задаются как
   `http://host.docker.internal:<порт>` (для локальной/systemd установки
   агентов; порты оператор указывает сам или через `ZETOMESH_UI_NODES`).
-- Собирает образ и поднимает стек; печатает URL `http://127.0.0.1:8090`.
+- Собирает образ и поднимает стек; печатает URL `http://127.0.0.1:28090`.
 - Команды управления: `install-ui.sh status|start|stop|uninstall` — трогает
   **только** UI-контейнер и его образ/стек; установку агентов не затрагивает.
 

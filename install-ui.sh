@@ -33,7 +33,7 @@ COMPOSE_PROJECT="zeptomesh-ui"
 AGENT_NETWORK="zeptomesh_default"   # сеть стека агентов (проект zeptomesh)
 CONTAINER="zeptomesh-ui"
 
-UI_PORT="${ZETOMESH_UI_PORT:-8090}"
+UI_PORT="${ZETOMESH_UI_PORT:-28090}"
 NODES_ARG=""                        # --nodes / ZETOMESH_UI_NODES
 GATEWAY_MODE=0
 DATA_DIR=""
@@ -91,7 +91,7 @@ usage() {
                       (для local/systemd установки агентов)
   --nodes URLS        список адресов админ-API узлов через запятую
                       (иначе env ZETOMESH_UI_NODES, иначе автоопределение)
-  --port N            порт панели на хосте (default: 8090, env ZETOMESH_UI_PORT)
+  --port N            порт панели на хосте (default: 28090, env ZETOMESH_UI_PORT)
   --data-dir DIR      каталог для стека (default: /var/lib/zeptomesh-ui для root)
   --poll-interval D   интервал опроса узлов (default: 5s)
   --log-level L       trace|debug|info|warn|error (default: info)

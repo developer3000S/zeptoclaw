@@ -63,7 +63,7 @@ const usage = `zeptomesh-ui — ZeptoClaw mesh dashboard backend
 
 Configuration is entirely environmental (like the agent):
 
-  ZETOMESH_UI_LISTEN        listen address        (default 127.0.0.1:8090)
+  ZETOMESH_UI_LISTEN        listen address        (default 127.0.0.1:28090)
   ZETOMESH_UI_NODES         comma-separated agent admin API URLs (seed list)
   ZETOMESH_UI_NODES_FILE    persistent node list  (default <data>/nodes.json)
   ZETOMESH_UI_TOKEN         access token for this UI's own API (default: none)

@@ -29,7 +29,7 @@ services:
     environment:
       # 0.0.0.0 is required inside a container: a published port reaches the
       # container's routable address, not its loopback.
-      ZETOMESH_UI_LISTEN: "0.0.0.0:8090"
+      ZETOMESH_UI_LISTEN: "0.0.0.0:28090"
       # Seed list only; nodes.json in the volume is the source of truth and is
       # edited from the UI's "Агенты" tab afterwards.
       ZETOMESH_UI_NODES: "${ZETOMESH_UI_NODES:-http://zepto-0:8081}"
@@ -40,15 +40,16 @@ services:
       ZETOMESH_UI_DATA: "/var/lib/zeptomesh-ui"
       TZ: "${TZ:-UTC}"
     ports:
-      # Loopback-only, like the agents' admin API: the dashboard is not meant
-      # to be exposed directly. Use a reverse proxy with auth in front of it.
-      - "127.0.0.1:${ZETOMESH_UI_PORT:-8090}:8090"
+      # Контейнер слушает 0.0.0.0:28090 (ZETOMESH_UI_LISTEN); проброска на тот
+      # же порт. 0.0.0.0 на хосте — доступ с других машин; для loopback-only
+      # перезапустите install-ui.sh или смените биндинг здесь.
+      - "0.0.0.0:${ZETOMESH_UI_PORT:-28090}:28090"
     volumes:
       - zeptomesh-ui-data:/var/lib/zeptomesh-ui
     networks:
       - agents
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:28090/healthz"]
       interval: 30s
       timeout: 5s
       start_period: 20s
