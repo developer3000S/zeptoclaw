@@ -3,13 +3,15 @@ package node
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
 
 	"github.com/developer3000S/zeptoclaw/internal/discovery"
-	"github.com/developer3000S/zeptoclaw/internal/picoclaw"
+	"github.com/developer3000S/zeptoclaw/internal/logging"
 	"github.com/developer3000S/zeptoclaw/internal/routing"
 	"github.com/developer3000S/zeptoclaw/internal/security"
 	"github.com/developer3000S/zeptoclaw/internal/skills"

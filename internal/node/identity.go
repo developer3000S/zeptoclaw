@@ -10,7 +10,6 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
-	"github.com/developer3000S/zeptoclaw/internal/logging"
 	"github.com/developer3000S/zeptoclaw/internal/routing"
 	"github.com/developer3000S/zeptoclaw/internal/security"
 	"github.com/developer3000S/zeptoclaw/internal/skills"
@@ -20,10 +19,10 @@ import (
 
 // RotateKeyResult describes a completed identity rotation.
 type RotateKeyResult struct {
-	OldPeerID peer.ID       `json:"old_peer_id"`
-	NewPeerID peer.ID       `json:"new_peer_id"`
-	Rebind    *pb.KeyRebind `json:"-"`
-	AnnouncedTo []string    `json:"announced_to,omitempty"`
+	OldPeerID   peer.ID       `json:"old_peer_id"`
+	NewPeerID   peer.ID       `json:"new_peer_id"`
+	Rebind      *pb.KeyRebind `json:"-"`
+	AnnouncedTo []string      `json:"announced_to,omitempty"`
 	Restart     bool          `json:"restart_required"`
 }
 

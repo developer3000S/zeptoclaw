@@ -11,9 +11,6 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
-	pubsub "github.com/libp2p/go-libp2p-pubsub"
-
-	"github.com/developer3000S/zeptoclaw/internal/config"
 	"github.com/developer3000S/zeptoclaw/internal/discovery"
 	"github.com/developer3000S/zeptoclaw/internal/logging"
 	"github.com/developer3000S/zeptoclaw/internal/metrics"
