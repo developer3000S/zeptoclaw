@@ -18,6 +18,9 @@ import (
 //go:embed all:static
 var staticFS embed.FS
 
+// StaticFS is the embedded filesystem for the static assets. Exported for testing.
+var StaticFS = staticFS
+
 // Server is the dashboard backend: static UI + mesh snapshot + node action
 // proxy. It is loopback-first like the agent admin API; the auth gate only
 // activates when ZETOMESH_UI_TOKEN is set.

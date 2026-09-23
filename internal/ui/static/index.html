@@ -7,7 +7,34 @@
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
-  <div id="app">ZeptoClaw Mesh UI — загрузка…</div>
+  <header class="topbar">
+    <div class="brand">ZeptoClaw <span>Mesh UI</span></div>
+    <nav class="tabs" id="tabs"></nav>
+    <div class="topbar-right">
+      <span id="refresh-indicator" class="refresh" title="Время последнего обновления снимка сети"></span>
+      <button id="pause-btn" class="btn btn-ghost" title="Пауза автообновления">⏸</button>
+      <button id="token-btn" class="btn btn-ghost" title="Токен доступа">🔑</button>
+    </div>
+  </header>
+
+  <main id="view" class="view"></main>
+
+  <!-- Форма токена: показывается при 401 или по кнопке -->
+  <div id="token-modal" class="modal hidden">
+    <div class="modal-card">
+      <h3>Токен доступа</h3>
+      <p class="hint">Сервер требует <code>Authorization: Bearer</code>. Токен хранится только в этом браузере (localStorage).</p>
+      <input id="token-input" type="password" placeholder="ZETOMESH_UI_TOKEN" autocomplete="off">
+      <div class="modal-actions">
+        <button id="token-save" class="btn btn-primary">Сохранить</button>
+        <button id="token-clear" class="btn btn-ghost">Выйти</button>
+        <button id="token-close" class="btn btn-ghost">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
   <script src="/static/js/main.js" type="module"></script>
 </body>
 </html>

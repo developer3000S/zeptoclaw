@@ -12,6 +12,8 @@ GOFLAGS    ?= -mod=mod
 BIN_DIR    := bin
 BIN        := zeptomesh-node
 PKG        := ./cmd/$(BIN)
+UI_BIN     := zeptomesh-ui
+UI_PKG     := ./cmd/$(UI_BIN)
 MOD        := github.com/developer3000S/zeptoclaw
 PROTO_DIR  := api/proto
 PROTO_OUT  := gen
@@ -59,6 +61,11 @@ build: ## Собрать демон в bin/$(BIN)
 
 build-race: ## Собрать с детектором гонок
 	CGO_ENABLED=1 $(GO) build $(GOFLAGS) -race -o $(BIN_DIR)/$(BIN)-race $(PKG)
+
+build-ui: ## Собрать BFF панели в bin/$(UI_BIN)
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/$(UI_BIN) $(UI_PKG)
+	@echo "built $(BIN_DIR)/$(UI_BIN) ($(VERSION) $(GIT_COMMIT))"
 
 cross: ## Собрать linux/{amd64,arm64} (ТЗ 15.1)
 	@mkdir -p $(BIN_DIR)
@@ -180,14 +187,25 @@ install-docker: ## Собрать образ и поднять сеть из 3 �
 docker-build: ## Только сборка образа
 	docker build -f deploy/docker/Dockerfile -t zeptomesh-node:$(VERSION) .
 
+docker-build-ui: ## Только сборка образа панели
+	docker build -f deploy/ui/Dockerfile \
+	  --build-arg VERSION=$(VERSION) \
+	  --build-arg GIT_COMMIT=$(GIT_COMMIT) \
+	  --build-arg BUILD_DATE=$(BUILD_DATE) \
+	  -t zeptomesh-ui:latest .
+
+install-ui: docker-build-ui ## Поднять панель в Docker (агенты должны быть запущены)
+	./install-ui.sh
+
 ##—— Очистка ---------------------------------------------------------------
 
 clean: ## Удалить артефакты сборки и покрытия
 	rm -rf $(BIN_DIR) coverage.out coverage.html .dev
 	$(GO) clean -cache -testcache 2>/dev/null || true
 
-.PHONY: deps toolchain build build-race cross fmt fmt-check vet tidy \
+.PHONY: deps toolchain build build-ui build-race cross fmt fmt-check vet tidy \
         proto proto-check test test-race test-cover test-unit test-integration \
         test-load bench lint static-check ci run-1 dev-cluster dev-status dev-rotate \
         dev-cluster-down \
-        install-local install-docker docker-build clean help
+        install-local install-docker docker-build docker-build-ui install-ui \
+        clean help

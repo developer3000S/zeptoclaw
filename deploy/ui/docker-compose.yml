@@ -1,0 +1,63 @@
+# ---------------------------------------------------------------------------
+# ZeptoClaw Mesh UI — reference compose stack.
+#
+# Independent from the agent stack (project "zeptomesh"): it only attaches to
+# the agents' network and talks to their admin API. Start the mesh first:
+#
+#   ./install.sh --mode docker --nodes 3
+#   ./install-ui.sh          # builds the image and generates a matching stack
+#
+# or run this file directly after building the image:
+#
+#   make docker-build-ui
+#   ZETOMESH_UI_NODES=http://zepto-0:8081 docker compose -f deploy/ui/docker-compose.yml up -d
+#
+# install-ui.sh auto-detects ZETOMESH_API_PORT of the zeptomesh-* containers;
+# this file is the documented static equivalent.
+# ---------------------------------------------------------------------------
+
+name: zeptomesh-ui
+
+services:
+  zeptomesh-ui:
+    image: zeptomesh-ui:latest
+    container_name: zeptomesh-ui
+    hostname: zeptomesh-ui
+    restart: unless-stopped
+    stop_grace_period: 15s
+    init: true
+    environment:
+      # 0.0.0.0 is required inside a container: a published port reaches the
+      # container's routable address, not its loopback.
+      ZETOMESH_UI_LISTEN: "0.0.0.0:8090"
+      # Seed list only; nodes.json in the volume is the source of truth and is
+      # edited from the UI's "Агенты" tab afterwards.
+      ZETOMESH_UI_NODES: "${ZETOMESH_UI_NODES:-http://zepto-0:8081}"
+      ZETOMESH_UI_TOKEN: "${ZETOMESH_UI_TOKEN:-}"
+      ZETOMESH_UI_API_TOKEN: "${ZETOMESH_UI_API_TOKEN:-${ZETOMESH_API_TOKEN:-}}"
+      ZETOMESH_UI_POLL_INTERVAL: "${ZETOMESH_UI_POLL_INTERVAL:-5s}"
+      ZETOMESH_UI_LOG_LEVEL: "${ZETOMESH_UI_LOG_LEVEL:-info}"
+      ZETOMESH_UI_DATA: "/var/lib/zeptomesh-ui"
+      TZ: "${TZ:-UTC}"
+    ports:
+      # Loopback-only, like the agents' admin API: the dashboard is not meant
+      # to be exposed directly. Use a reverse proxy with auth in front of it.
+      - "127.0.0.1:${ZETOMESH_UI_PORT:-8090}:8090"
+    volumes:
+      - zeptomesh-ui-data:/var/lib/zeptomesh-ui
+    networks:
+      - agents
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+networks:
+  agents:
+    name: zeptomesh_default
+    external: true
+
+volumes:
+  zeptomesh-ui-data:
