@@ -617,9 +617,13 @@ install_docker() {
       || die "compose up zepto-0: docker compose -f $compose_file ps"
     local zp="" tries=0
     while (( tries < 30 )); do
+      # curl падает, пока якорь ещё поднимается (exit 7 — нет соединения).
+      # При set -euo pipefail этот статус вырывается из конвейера и убивает
+      # скрипт, оставляя единственный контейнер якоря. || true гасит его:
+      # пустой zp просто означает «повторить».
       zp="$(docker exec zeptomesh-0 sh -c \
               "curl -fsS http://127.0.0.1:${API_PORTS[0]}/healthz" 2>/dev/null \
-            | sed -nE 's/.*"peer_id":"([^"]+)".*/\1/p')"
+            | sed -nE 's/.*"peer_id":"([^"]+)".*/\1/p' || true)"
       [[ -n "$zp" ]] && break
       sleep 2; tries=$((tries + 1))
     done
