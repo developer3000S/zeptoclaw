@@ -452,6 +452,8 @@ install_ui() {
   echo
   log "готово: панель Mesh UI запущена (автостарт — restart: unless-stopped)"
   printf '  URL:   http://127.0.0.1:%s\n' "$UI_PORT"
+  printf '  токен: %s\n' "$UI_TOKEN"
+  printf '         доступ к API панели; сохранён в %s\n' "$(token_file)"
   printf '  стек:  %s\n' "$(compose_file)"
   if [[ $GATEWAY_MODE -eq 0 && -n "$nodes" ]]; then
     printf '  узлы:  %s\n' "$nodes"
@@ -476,6 +478,11 @@ cmd_status() {
   [[ -n "$DATA_DIR" && -f "$(compose_file)" ]] \
     || die "установка панели не найдена (укажите --data-dir)"
   docker compose -f "$(compose_file)" ps
+  if [[ -f "$(token_file)" ]]; then
+    echo
+    log "токен доступа к API панели ($(token_file)):"
+    printf '  %s\n' "$(tr -d '[:space:]' < "$(token_file)")"
+  fi
 }
 
 cmd_start() {
