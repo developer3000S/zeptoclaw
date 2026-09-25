@@ -60,6 +60,16 @@ discovery:
   dht_mode: server              # WAN-узлы держат DHT-таблицу для остальных
   peer_exchange: true
   bootstrap_interval: 30s
+  # Активный обход окружения (`zeptomesh-node scan` / POST /api/v1/admin/scan);
+  # выключен по умолчанию. В WAN обзор опирается на DHT/bootstrap/peer-exchange,
+  # а subnet_scan бессмысленен за NAT: перебирать пришлось бы чужие /24.
+  scan:
+    enabled: ${ZETOMESH_SCAN_ENABLED:-false}
+    interval: 30m               # реже: внешние поискы дороже по трафику
+    subnet_scan: ${ZETOMESH_SCAN_SUBNET:-false}
+    dial_timeout: 8s            # WAN-RTT выше
+    timeout: 60s
+    max_candidates: 64
   gossip:
     enabled: true
     topic: /zeptomesh/membership/0.1.0

@@ -54,6 +54,17 @@ discovery:
   dht_mode: ${ZETOMESH_DHT_MODE:-auto}
   peer_exchange: true
   bootstrap_interval: 30s
+  # scan — активное прощупывание окружения агентом: локальные источники +
+  # внешние (DHT, bootstrap, peer-exchange, search topic) и, при включении,
+  # перебор локальной подсети. По умолчанию выключено — скан запускается
+  # вручную через `zeptomesh-node scan` / POST /api/v1/admin/scan.
+  scan:
+    enabled: ${ZETOMESH_SCAN_ENABLED:-false}
+    interval: 15m
+    subnet_scan: ${ZETOMESH_SCAN_SUBNET:-false}
+    dial_timeout: 6s
+    timeout: 45s
+    max_candidates: 64
   gossip:
     enabled: true
     topic: /zeptomesh/membership/0.1.0

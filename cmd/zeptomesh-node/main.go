@@ -58,6 +58,7 @@ Commands:
   trigger-add create or replace a trigger      (POST /api/v1/triggers)
   trigger-rm  delete a stored trigger          (DELETE /api/v1/triggers/<id>)
   rebinds     show retired and rotated peer identities (GET /api/v1/rebinds)
+  scan        probe the environment for agents and befriend them (POST /api/v1/admin/scan)
   genkey      create an Ed25519 identity key file
   rotate      replace the node key, announcing the handover to the mesh
   revoke      retire a peer id with a self-signed revocation
@@ -129,6 +130,8 @@ func main() {
 		err = clientTriggerRm(args)
 	case "rebinds":
 		err = clientRebinds(args)
+	case "scan":
+		err = clientScan(args)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:

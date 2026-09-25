@@ -164,6 +164,40 @@ type DiscoveryConfig struct {
 	PeerExchange      bool         `yaml:"peer_exchange"`
 	Gossip            GossipConfig `yaml:"gossip"`
 	BootstrapInterval Duration     `yaml:"bootstrap_interval"`
+	// Scan is the agent's active environment sweep: on request (CLI/admin API)
+	// and, when enabled, on a slow background cadence it probes the local host,
+	// the LAN subnet and the external sources (DHT, bootstrap, peer-exchange,
+	// search topic), then dials and verifies any agent it finds so the peer
+	// becomes a working neighbour.
+	Scan ScanConfig `yaml:"scan"`
+}
+
+// ScanConfig bounds the active agent-discovery sweep. It complements the
+// passive layered discovery (registry, mDNS, DHT, gossip) with an operator- or
+// timer-driven probe that reaches sources the background loop would not touch
+// on its own: a full LAN subnet sweep and a forced re-query of the external
+// finders.
+type ScanConfig struct {
+	// Enabled turns on the slow background scan: the node periodically sweeps
+	// its environment and dials newly discovered agents on its own. When
+	// disabled, scans still work but only when triggered manually.
+	Enabled bool `yaml:"enabled"`
+	// Interval is how often the background scan runs. Zero means "never" even
+	// when Enabled is true (a manual scan is still possible).
+	Interval Duration `yaml:"interval"`
+	// SubnetScan toggles the active LAN subnet sweep: probing the local
+	// interfaces' subnets on the mesh TCP port for peers that libp2p can dial.
+	// This is the only truly "probing" mechanism — the rest of discovery is
+	// announcement-based — so it defaults off: it sends traffic across the
+	// whole private LAN.
+	SubnetScan bool `yaml:"subnet_scan"`
+	// DialTimeout bounds one connection attempt to a candidate agent.
+	DialTimeout Duration `yaml:"dial_timeout"`
+	// Timeout bounds one whole scan pass (manual or background).
+	Timeout Duration `yaml:"timeout"`
+	// MaxCandidates caps how many candidate agents one pass will dial, so a
+	// large subnet or a chatty search plane cannot stall the node.
+	MaxCandidates int `yaml:"max_candidates"`
 }
 
 // GossipConfig tunes the membership gossip protocol.
@@ -440,6 +474,14 @@ func Default() *Config {
 			DHTMode:           "auto",
 			PeerExchange:      true,
 			BootstrapInterval: Duration(30 * time.Second),
+			Scan: ScanConfig{
+				Enabled:       false, // the sweep is opt-in: default off
+				Interval:      Duration(15 * time.Minute),
+				SubnetScan:    false,
+				DialTimeout:   Duration(6 * time.Second),
+				Timeout:       Duration(45 * time.Second),
+				MaxCandidates: 64,
+			},
 			Gossip: GossipConfig{
 				Enabled:        true,
 				Topic:          "/zeptomesh/membership/0.1.0",
@@ -776,6 +818,19 @@ func (c *Config) Validate() error {
 	}
 	if c.Discovery.Gossip.FailureTimeout.D() <= c.Discovery.Gossip.Heartbeat.D() {
 		errs = append(errs, errors.New("discovery.gossip.failure_timeout must exceed heartbeat"))
+	}
+	sc := c.Discovery.Scan
+	if sc.Timeout.D() < 0 || sc.DialTimeout.D() < 0 || sc.Interval.D() < 0 {
+		errs = append(errs, errors.New("discovery.scan durations must be >= 0"))
+	}
+	if sc.Enabled && sc.Interval.D() <= 0 {
+		errs = append(errs, errors.New("discovery.scan.interval must be > 0 when discovery.scan.enabled"))
+	}
+	if sc.MaxCandidates < 0 {
+		errs = append(errs, errors.New("discovery.scan.max_candidates must be >= 0"))
+	}
+	if sc.Timeout.D() > 0 && sc.DialTimeout.D() > sc.Timeout.D() {
+		errs = append(errs, errors.New("discovery.scan.dial_timeout must not exceed discovery.scan.timeout"))
 	}
 	if c.API.Enabled && c.API.Listen == "" {
 		errs = append(errs, errors.New("api.listen is required when api.enabled"))

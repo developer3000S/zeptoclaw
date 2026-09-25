@@ -76,6 +76,10 @@ func New(n *node.Node, cfg *config.Config, mets *metrics.Collector, logger *slog
 	s.authed(mux, "POST /api/v1/admin/rotate-key", s.handleRotateKey)
 	s.authed(mux, "POST /api/v1/admin/revoke", s.handleRevoke)
 	s.authed(mux, "POST /api/v1/admin/leave", s.handleLeave)
+	// Agent environment scan: probe the local host, the LAN and the Internet
+	// for other agents, dial them and verify their capabilities.
+	s.authed(mux, "POST /api/v1/admin/scan", s.handleScan)
+	s.authed(mux, "GET /api/v1/admin/scan", s.handleScanLast)
 	if mets != nil {
 		mux.Handle("GET /metrics", promhttp.HandlerFor(mets.Registry(), promhttp.HandlerOpts{}))
 	}
@@ -447,6 +451,39 @@ func (s *Server) handleLeave(w http.ResponseWriter, r *http.Request) {
 		f.Flush()
 	}
 	s.node.Leave(r.Context())
+}
+
+// handleScan runs one agent environment sweep: the local host, the LAN and the
+// Internet are probed for other agents; each one found is dialed and its
+// signed capabilities verified, so it becomes a working neighbour. The body
+// optionally narrows the scopes and the candidate cap.
+func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Scopes        []string `json:"scopes,omitempty"`
+		MaxCandidates int      `json:"max_candidates,omitempty"`
+		Timeout       int      `json:"timeout_seconds,omitempty"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&in)
+	}
+	// A scan dials strangers, which is exactly what the gater and the policy
+	// exist to bound: the scan honours AllowConnection for every candidate, so
+	// an operator can safely widen scopes without weakening the mesh.
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+	res := s.node.ScanNetwork(ctx, node.ScanRequest{
+		Scopes:        in.Scopes,
+		MaxCandidates: in.MaxCandidates,
+		Timeout:       time.Duration(in.Timeout) * time.Second,
+	})
+	s.node.SetLastScan(res)
+	writeJSON(w, http.StatusOK, res)
+}
+
+// handleScanLast returns the most recent scan report, whether it came from the
+// admin API or from the background sweep.
+func (s *Server) handleScanLast(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.node.LastScan())
 }
 
 // handleRotateKey replaces the node identity key and announces the handover

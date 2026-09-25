@@ -1614,3 +1614,88 @@ func TestIntegrationSearchTopicStaysSilentWhenDisabled(t *testing.T) {
 		t.Fatalf("disabled topic published %v requests, want 0", got)
 	}
 }
+
+// TestIntegrationScanLocal verifies the agent's environment sweep end to end:
+// A scans its local scope, discovers B through the shared registry, dials it
+// and verifies its signed capabilities, so B becomes a routable neighbour.
+func TestIntegrationScanLocal(t *testing.T) {
+	m := newMesh(t)
+	a := m.node("scan-a", []string{"coding"}, nil)
+	b := m.node("scan-b", []string{"research"}, nil)
+
+	// A's registry is the source of truth on one host: it lists B once B has
+	// published, so wait for that before scanning.
+	m.wait("registry lists b", func() bool {
+		recs, err := a.Registry.List()
+		if err != nil {
+			return false
+		}
+		for _, r := range recs {
+			if r.PeerID == b.ID().String() {
+				return true
+			}
+		}
+		return false
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res := a.ScanNetwork(ctx, ScanRequest{Scopes: []string{"local"}})
+
+	if res.Candidates == 0 {
+		t.Fatalf("scan found no agents; report: %+v", res)
+	}
+	var found bool
+	for _, ag := range res.Agents {
+		if ag.PeerID == b.ID().String() {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("scan did not list B: %+v", res.Agents)
+	}
+	// The scan must do more than enumerate: B ends up connected and
+	// capabilities-verified, exactly like any other discovery path.
+	m.wait("a connected to b after scan", func() bool { return m.handshook(a, b) })
+	if !m.knows(a, b) {
+		t.Fatalf("A's table does not know B after a successful scan")
+	}
+}
+
+// TestIntegrationScanBlockedPeer checks the sweep honours the security policy:
+// a blocked peer is never dialed, even though the scan finds it.
+func TestIntegrationScanBlockedPeer(t *testing.T) {
+	m := newMesh(t)
+	a := m.node("scan-block-a", []string{"coding"}, nil)
+	b := m.node("scan-block-b", []string{"research"}, nil)
+
+	m.wait("registry lists b", func() bool {
+		recs, err := a.Registry.List()
+		if err != nil {
+			return false
+		}
+		for _, r := range recs {
+			if r.PeerID == b.ID().String() {
+				return true
+			}
+		}
+		return false
+	})
+
+	// A blocked peer is refused in every trust mode (AllowConnection treats
+	// TrustBlocked as fatal), so the scan must leave it untouched.
+	a.Policy.SetListed(b.ID(), false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res := a.ScanNetwork(ctx, ScanRequest{Scopes: []string{"local"}})
+
+	for _, ag := range res.Agents {
+		if ag.PeerID == b.ID().String() && ag.Connected {
+			t.Fatalf("blocked peer B was connected by the scan: %+v", res.Agents)
+		}
+	}
+	if a.Host.IsConnected(b.ID()) {
+		t.Fatalf("blocked peer B is connected after the scan")
+	}
+}

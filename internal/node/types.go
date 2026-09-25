@@ -62,6 +62,11 @@ type Node struct {
 	log     *slog.Logger
 	started time.Time
 
+	// lastScan keeps the most recent environment-sweep report (manual or
+	// background) for the admin API's GET /api/v1/admin/scan.
+	scanMu   sync.Mutex
+	lastScan *ScanResult
+
 	// pubsub is the single gossip router this host speaks. Membership and the
 	// search topic are built over it (a second router would steal the first's
 	// stream handler); the router is closed with the host.

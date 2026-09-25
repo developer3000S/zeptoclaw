@@ -304,6 +304,16 @@ func (n *Node) maintenance(ctx context.Context) {
 		skillEvery = 30 * time.Second
 	}
 	skillTick := time.NewTicker(skillEvery)
+	// Optional proactive environment sweep: a slow, periodic scan so a newly
+	// added neighbour is found without waiting for an operator command. The
+	// ticker only exists when discovery.scan.enabled is set.
+	var scanTick <-chan time.Time
+	scanEvery := n.Cfg.Discovery.Scan.Interval.D()
+	if n.Cfg.Discovery.Scan.Enabled && scanEvery > 0 {
+		st := time.NewTicker(scanEvery)
+		scanTick = st.C
+		defer st.Stop()
+	}
 	defer t.Stop()
 	defer full.Stop()
 	defer local.Stop()
@@ -314,6 +324,8 @@ func (n *Node) maintenance(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-scanTick:
+			n.runBackgroundScan(ctx)
 		case <-local.C:
 			n.syncLocalRegistry(ctx)
 			n.syncDHT(ctx)

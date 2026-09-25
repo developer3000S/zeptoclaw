@@ -54,6 +54,17 @@ discovery:
   # /p2p/<id> узел отвергает при старте — such a line can never connect.
   bootstrap: [${ZETOMESH_BOOTSTRAP:-}]
   bootstrap_interval: 3s
+  # Активный обход окружения (`zeptomesh-node scan` / POST /api/v1/admin/scan);
+  # выключен по умолчанию, чтобы dev-cluster и acceptance-тест оставались
+  # детерминированными. ZETOMESH_SCAN_ENABLED=true — и обход крутится в фоне
+  # каждые 20 c: удобно следить за ним глазами.
+  scan:
+    enabled: ${ZETOMESH_SCAN_ENABLED:-false}
+    interval: 20s               # отладочный кластер — обратная связь быстрая
+    subnet_scan: ${ZETOMESH_SCAN_SUBNET:-false}
+    dial_timeout: 3s
+    timeout: 20s
+    max_candidates: 16
   gossip:
     enabled: true
     topic: /zeptomesh/dev/0.1.0

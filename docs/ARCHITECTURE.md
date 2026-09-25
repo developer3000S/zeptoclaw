@@ -23,6 +23,7 @@ mesh продолжает работать.
 | Узлы через Интернет | Bootstrap-адреса, Kademlia DHT, Peer Exchange | `discovery/bootstrap.go`, `dht.go` |
 | Поддержание членства | GossipSub, эпидемическая рассылка `PeerState` | `discovery/gossip.go` |
 | Поиск исполнителя вне видимости | эпидемический topic с подписанным запросом навыков (ТЗ 6.9.5 п.5, по умолчанию выключен) | `discovery/searchtopic.go` |
+| Активный скан окружения | Ручной (`POST /api/v1/admin/scan`, CLI `scan`) или медленный фоновый: переспрашивает локальный реестр, mDNS, DHT, peer-exchange, bootstrap и search-topic, опционально перебирает локальную подсеть (`discovery/scan.go`); найденные агенты проходят dial + проверка подписанных capabilities и становятся соседями | `internal/node/scan.go`, `discovery/scan.go` |
 
 Узел знает только часть соседей (`neighbors.min/target/max` = 8/16/64), что и
 делает сеть одноранговой, а не «звездой».

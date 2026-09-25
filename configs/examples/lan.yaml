@@ -35,6 +35,17 @@ discovery:
   dht_mode: auto
   peer_exchange: true
   bootstrap_interval: 30s
+  # Активный обход окружения (`zeptomesh-node scan` / POST /api/v1/admin/scan);
+  # выключен по умолчанию. В LAN включать безопасно — subnet_scan здесь как
+  # раз полезен: перебирает TCP-порты mesh локальной /24 и находит узлы,
+  # которых mDNS и реестр не увидели.
+  scan:
+    enabled: ${ZETOMESH_SCAN_ENABLED:-false}
+    interval: 15m
+    subnet_scan: ${ZETOMESH_SCAN_SUBNET:-true}
+    dial_timeout: 6s
+    timeout: 45s
+    max_candidates: 64
   gossip:
     enabled: true
     topic: /zeptomesh/membership/0.1.0

@@ -700,3 +700,45 @@ func clientTriggerRm(args []string) error {
 	}
 	return printJSON(v)
 }
+
+// clientScan probes the environment for other agents: the local host, the LAN
+// and the Internet. Every agent found is dialed and its capabilities verified,
+// so it becomes a neighbour. With -last it prints the previous report instead
+// of running a new sweep.
+func clientScan(args []string) error {
+	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	var scopes stringList
+	fs.Var(&scopes, "scope", "source to probe (repeatable: local, subnet, wan; default: all enabled)")
+	maxCand := fs.Int("max-candidates", 0, "cap on peers dialed in one pass (0 = node default)")
+	timeout := fs.Int("timeout", 0, "whole-pass budget, seconds (0 = node default)")
+	last := fs.Bool("last", false, "print the most recent scan report instead of scanning")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if *last {
+		if err := c.do(context.Background(), http.MethodGet, "/api/v1/admin/scan", nil, &v); err != nil {
+			return err
+		}
+		return printJSON(v)
+	}
+	body := map[string]any{}
+	if len(scopes) > 0 {
+		body["scopes"] = []string(scopes)
+	}
+	if *maxCand > 0 {
+		body["max_candidates"] = *maxCand
+	}
+	if *timeout > 0 {
+		body["timeout_seconds"] = *timeout
+	}
+	if err := c.do(context.Background(), http.MethodPost, "/api/v1/admin/scan", body, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}

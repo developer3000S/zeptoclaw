@@ -56,6 +56,12 @@ ZETOMESH_DATA=./n1 ZETOMESH_INDEX=1 ZETOMESH_MESH_PORT=4002 \
 bin/zeptomesh-node status -addr http://127.0.0.1:8081
 bin/zeptomesh-node peers  -addr http://127.0.0.1:8081
 bin/zeptomesh-node submit -addr http://127.0.0.1:8081 -i "hello" -w
+
+# Активный поиск других агентов: локальный хост + внешние источники
+bin/zeptomesh-node scan -addr http://127.0.0.1:8081
+# ...с перебором локальной подсети и ограничением числа кандидатов
+bin/zeptomesh-node scan -addr http://127.0.0.1:8081 -scope subnet -scope wan -max-candidates 32
+bin/zeptomesh-node scan -addr http://127.0.0.1:8081 -last   # отчёт прошлого скана
 ```
 
 Полные инструкции по развёртыванию (LAN/WAN-профили, PSK, bootstrap,
@@ -80,6 +86,7 @@ bin/zeptomesh-node submit -addr http://127.0.0.1:8081 -i "hello" -w
 | Обнаружение (WAN) | Bootstrap-узлы, Kademlia DHT (индекс навыков), Peer Exchange |
 | Членство | GossipSub (эпидемическая рассылка `PeerState`) |
 | Поиск исполнителя | Search-relay: расширенный опрос соседей с `full_refresh` навыков |
+| Активный скан окружения | `scan` (`POST /api/v1/admin/scan`): агент сам прощупывает локальный хост, LAN (вкл. перебор подсети) и внешние источники (DHT, bootstrap, peer-exchange, search topic), находит других агентов и устанавливает с ними связь (dial + проверка подписанных capabilities → сосед в таблице); опционально медленный фоновый скан по `discovery.scan` |
 | Хранилище | BadgerDB v4 (node-local) + content-addressed артефакты на диске |
 | Делегирование | TTL, маршрут без петель, дедупликация, лимиты фан-аута и параллелизма, rate limiting |
 | Декомпозиция | план подзадач (`subtasks` / `--subtask`) → дочерние конверты → один подписанный итог: секции в порядке плана, дедуп артефактов по hash, ретрай retryable-ребёна |
@@ -176,11 +183,12 @@ zeptoclaw/
 │                               #                   tasks|get|cancel|resubmit|reload|leave|
 │                               #                   skills|skill-set|skill-rm|skills-sync|
 │                               #                   triggers|trigger-add|trigger-rm|
-│                               #                   rebinds|rotate|revoke
+│                               #                   rebinds|rotate|revoke|scan
 ├── internal/
 │   ├── api/                    # HTTP/JSON админ-API (+ bearer-токен, /metrics)
 │   ├── config/                 # YAML-конфиг, дефолты, валидация, ${VAR:-default}   + тесты
-│   ├── discovery/              # local.go, mdns.go, bootstrap.go, dht.go, gossip.go, searchtopic.go
+│   ├── discovery/              # local.go, mdns.go, bootstrap.go, dht.go, gossip.go,
+│   │                           #        searchtopic.go, scan.go (активный скан окружения)
 │   ├── logging/                # slog + мост для stdlib-логера libp2p
 │   ├── metrics/                # Prometheus (приватный registry) + выделенный слушатель
 │   ├── node/                   # сборка компонентов узла, композитный skill-источник
@@ -341,6 +349,13 @@ discovery:
   dht_mode: auto                # server | client | auto | auto-server
   peer_exchange: true
   bootstrap_interval: 30s
+  scan:                         # активный скан окружения агентом (по умолчанию выкл)
+    enabled: false              # включить медленный фоновый скан
+    interval: 15m
+    subnet_scan: false          # перебор локальной подсети (трафик по всей LAN)
+    dial_timeout: 6s
+    timeout: 45s
+    max_candidates: 64
   gossip:
     enabled: true
     topic: /zeptomesh/membership/0.1.0
