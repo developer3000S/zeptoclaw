@@ -92,7 +92,7 @@ find_free_port() {
       printf '%s' "$port"
       return 0
     fi
-    (( attempts++ ))
+    attempts=$((attempts + 1))
   done
   die "не удалось найти свободный порт за 200 попыток"
 }
@@ -111,7 +111,7 @@ next_free_from() {
       RET_PORT="$p"
       return 0
     fi
-    (( p++ ))
+    p=$((p + 1))
   done
   die "не найдено свободного порта начиная с $1"
 }
@@ -505,6 +505,84 @@ EOF
 
 # ---------- docker ----------
 
+# remove_old_image IMAGE — удаляет старый образ до сборки нового и до
+# проверки портов. Образ, занятый контейнерами, удалить нельзя, поэтому
+# контейнеры, использующие его (контейнеры предыдущего стека), останавливаются
+# и удаляются — заодно освобождая порты, которые они держали.
+remove_old_image() {
+  local img="$1" c
+  if ! docker image inspect "$img" >/dev/null 2>&1; then
+    log "старый образ $img не найден — удаление не требуется"
+    return 0
+  fi
+  local -a ids=()
+  while IFS= read -r c; do
+    [[ -n "$c" ]] && ids+=("$c")
+  done < <(docker ps -aq --filter "ancestor=$img" 2>/dev/null)
+  if ((${#ids[@]})); then
+    log "удаление $img: образ занят контейнерами (${ids[*]}) — останавливаю и удаляю их"
+    docker stop "${ids[@]}" >/dev/null 2>&1 || true
+    docker rm -f "${ids[@]}" >/dev/null 2>&1 || true
+  else
+    log "удаление старого образа $img"
+  fi
+  docker image rm -f "$img" >/dev/null 2>&1 \
+    || warn "не удалось удалить образ $img (удалите вручную: docker image rm -f $img)"
+  # Пересборка без кэша оставляет висячие слои предыдущей версии — чистим,
+  # иначе они копятся при каждом переустанавливающем запуске.
+  docker image prune -f >/dev/null 2>&1 || true
+}
+
+# clear_port PORT — освобождает порт, занятый docker-контейнером на хосте.
+# Сторонние процессы не трогаем: снимаем только контейнеры Docker.
+# Возвращает 0, если порт свободен или был освобождён, 1 — если занят ещё
+# кем-то (процесс вне Docker).
+clear_port() {
+  local port="$1" c
+  if ! _port_in_use "$port"; then return 0; fi
+  local -a ids=()
+  while IFS= read -r c; do
+    [[ -n "$c" ]] && ids+=("$c")
+  done < <(docker ps -q --filter "publish=$port" 2>/dev/null)
+  if ((!${#ids[@]})); then return 1; fi
+  log "порт $port занят контейнерами (${ids[*]}) — освобождаю"
+  docker stop "${ids[@]}" >/dev/null 2>&1 || true
+  docker rm -f "${ids[@]}" >/dev/null 2>&1 || true
+  # docker-proxy отдаёт порт не мгновенно — даём ему время.
+  local t=0
+  while (( t < 20 )) && _port_in_use "$port"; do sleep 0.5; t=$((t + 1)); done
+  _port_in_use "$port" && return 1
+  return 0
+}
+
+# clear_stack_ports — освобождает порты, которые стек будет занимать. В режиме
+# автоматического подбира порты и так выбираются свободными; при распределении
+# от базы проверяем базовые порты заранее и освобождаем занятые старыми
+# контейнерами (остаток — забота allocate_ports, он сдвинется вверх).
+clear_stack_ports() {
+  if [[ $AUTO_PORTS -eq 1 ]]; then
+    log "порты: автоматический выбор свободных (предочистка не требуется)"
+    return 0
+  fi
+  local i
+  for ((i = 0; i < NODES; i++)); do
+    local mesh=$((MESH_BASE_PORT + i)) api=$((API_BASE_PORT + i)) prom=$((PROM_BASE_PORT + i))
+    clear_port "$mesh" || warn "порт $mesh занят не контейнером — будет подобран свободный"
+    clear_port "$api"  || warn "порт $api занят не контейнером — будет подобран свободный"
+    clear_port "$prom" || warn "порт $prom занят не контейнером — будет подобран свободный"
+  done
+}
+
+# build_docker_image — сборка образа узла; всегда без кэша, иначе новый код
+# может притащить слои предыдущей сборки.
+build_docker_image() {
+  log "сборка образа zeptomesh-node:latest (без кэша)"
+  docker build --no-cache -f "$REPO_DIR/deploy/docker/Dockerfile" \
+    --build-arg GIT_COMMIT="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+    --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    -t zeptomesh-node:latest "$REPO_DIR"
+}
+
 install_docker() {
   require_cmd docker "нужен Docker Engine"
   docker compose version >/dev/null 2>&1 || die "нужен плагин docker compose v2"
@@ -514,21 +592,17 @@ install_docker() {
   local stack_dir="$DATA_DIR/docker"
   mkdir -p "$stack_dir" || die "не могу создать $stack_dir"
 
+  # 1. Удаляем старые образы — до проверки портов: контейнеры старого образа
+  #    при этом останавливаются, и порты освобождаются до распределения.
+  remove_old_image zeptomesh-node:latest
+
+  # 2. Проверяем порты: занятые — освобождаем (старые контейнеры), затем
+  #    распределяем mesh/api/prom по экземплярам.
+  clear_stack_ports
   allocate_ports
 
-  # Удаляем старый образ, чтобы пересборка без кэша не тащила слои предыдущей
-  # версии; при первой установке образа нет — это не ошибка.
-  if docker image inspect zeptomesh-node:latest >/dev/null 2>&1; then
-    log "удаление старого образа zeptomesh-node:latest"
-    docker image rm zeptomesh-node:latest >/dev/null 2>&1 \
-      || warn "не удалось удалить образ zeptomesh-node:latest (возможно, используется контейнером)"
-  fi
-
-  log "сборка образа zeptomesh-node:latest (без кэша)"
-  docker build --no-cache -f "$REPO_DIR/deploy/docker/Dockerfile" \
-    --build-arg GIT_COMMIT="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
-    --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    -t zeptomesh-node:latest "$REPO_DIR"
+  # 3. Собираем новый образ без кэша.
+  build_docker_image
 
   write_compose "$stack_dir/docker-compose.yml"
   local compose_file="$stack_dir/docker-compose.yml"
@@ -547,7 +621,7 @@ install_docker() {
               "curl -fsS http://127.0.0.1:${API_PORTS[0]}/healthz" 2>/dev/null \
             | sed -nE 's/.*"peer_id":"([^"]+)".*/\1/p')"
       [[ -n "$zp" ]] && break
-      sleep 2; (( tries++ ))
+      sleep 2; tries=$((tries + 1))
     done
     if [[ -n "$zp" ]]; then
       local addr="/dns4/zepto-0/tcp/${MESH_PORTS[0]}/p2p/$zp"

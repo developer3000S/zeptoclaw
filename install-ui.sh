@@ -99,12 +99,21 @@ usage() {
 
 Доступ к API узлов:
   ZETOMESH_UI_TOKEN       токен доступа к самому API панели (включает авторизацию)
+  ZETOMESH_UI_TOKEN       токен доступа к самому API панели (включает авторизацию)
   ZETOMESH_UI_API_TOKEN   bearer для узлов без собственного токена
   ZETOMESH_API_TOKEN      если узлы требуют токен, задайте его же здесь
 EOF
 }
 
 # ---------- аргументы ----------
+
+# Define UI_API_TOKEN if not already set.
+# ${VAR:-} обязателен: скрипт под set -u, и проверка [ -z "$UI_API_TOKEN" ]
+# на несуществующей переменной падает до тела блока.
+if [ -z "${UI_API_TOKEN:-}" ]; then
+    UI_API_TOKEN="$(openssl rand -hex 32)"
+    export UI_API_TOKEN
+fi
 
 COMMAND="install"
 if [[ $# -gt 0 && "$1" != --* ]]; then
@@ -151,22 +160,72 @@ port_in_use() {
   return 1
 }
 
-# ensure_free_port — если порт занят, перебирает следующий свободный
-# (старший), чтобы панель всегда запускалась. Изменённый порт печатается.
+# ensure_free_port — порт панели должен быть свободен к моменту старта.
+# Сначала пытаемся освободить занятый порт (контейнер старой панели); если
+# порт занят сторонним процессом, не имеющим отношения к Docker — уходим на
+# следующий свободный, чтобы панель запустилась в любом случае.
 ensure_free_port() {
   if ! port_in_use "$UI_PORT"; then
     log "порт панели: $UI_PORT (свободен)"
     return 0
   fi
+  if clear_port "$UI_PORT"; then
+    log "порт панели: $UI_PORT (освобождён)"
+    return 0
+  fi
   local p
   for (( p = UI_PORT + 1; p < 65536; p++ )); do
     if ! port_in_use "$p"; then
-      warn "порт $UI_PORT занят — панель переходит на порт $p"
+      warn "порт $UI_PORT занят сторонним процессом — панель переходит на порт $p"
       UI_PORT="$p"
       return 0
     fi
   done
   die "не найдено свободного порта начиная с $UI_PORT"
+}
+
+# ---------- авторизация панели ----------
+
+# token_file — куда персистится токен доступа, чтобы при переустановке панели
+# токен не менялся (иначе браузер оператора будет снова просить его ввести).
+token_file() { printf '%s' "${DATA_DIR}/ui-token"; }
+
+# gen_token — криптостойкий случайный токен (hex).
+gen_token() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32 && return 0
+  fi
+  od -An -tx1 -N32 /dev/urandom 2>/dev/null | tr -d ' \n' && return 0
+  die "нет ни openssl, ни /dev/urandom — нечем сгенерировать токен"
+}
+
+# resolve_token — выбирает токен доступа к API панели:
+# 1) явный ZETOMESH_UI_TOKEN из окружения;
+# 2) ранее сохранённый ${DATA_DIR}/ui-token (персистентность при переустановках);
+# 3) новая случайная генерация.
+# Результат — в глобальной UI_TOKEN, и он всегда записывается на диск (0600),
+# чтобы оператор мог его прочитать, а контейнер — получить через compose.
+UI_TOKEN=""
+resolve_token() {
+  local stored
+  if [[ -n "${ZETOMESH_UI_TOKEN:-}" ]]; then
+    UI_TOKEN="$ZETOMESH_UI_TOKEN"
+    log "токен доступа: из ZETOMESH_UI_TOKEN окружения"
+    return 0
+  fi
+  if [[ -f "$(token_file)" ]]; then
+    stored="$(tr -d '[:space:]' < "$(token_file)")"
+    if [[ -n "$stored" ]]; then
+      UI_TOKEN="$stored"
+      log "токен доступа: ранее сохранённый ($(token_file))"
+      return 0
+    fi
+  fi
+  UI_TOKEN="$(gen_token)"
+  log "токен доступа: сгенерирован новый"
+  printf '%s' "$UI_TOKEN" > "$(token_file)" 2>/dev/null \
+    || warn "не удалось сохранить токен в $(token_file) — при следующей установке будет новый"
+  chmod 600 "$(token_file)" 2>/dev/null
 }
 
 # ---------- обнаружение узлов ----------
@@ -221,8 +280,8 @@ write_compose() {
       # Слушатель обязан быть 0.0.0.0: иначе проброшенный на хост порт не ответит.
       ZETOMESH_UI_LISTEN: "0.0.0.0:${UI_PORT}"
       ZETOMESH_UI_NODES: "${nodes}"
-      ZETOMESH_UI_TOKEN: "\${ZETOMESH_UI_TOKEN:-}"
-      ZETOMESH_UI_API_TOKEN: "\${ZETOMESH_UI_API_TOKEN:-\${ZETOMESH_API_TOKEN:-}}"
+      ZETOMESH_UI_TOKEN: "${UI_TOKEN}"
+      ZETOMESH_UI_API_TOKEN: "${UI_API_TOKEN}"
       ZETOMESH_UI_POLL_INTERVAL: "${POLL_INTERVAL}"
       ZETOMESH_UI_LOG_LEVEL: "${LOG_LEVEL}"
       ZETOMESH_UI_DATA: "/var/lib/zeptomesh-ui"
@@ -261,18 +320,56 @@ EOF
 
 # ---------- установка ----------
 
+# remove_old_image — удаляет старый образ панели до сборки нового и до
+# проверки порта. Образ, занятый контейнером, удалить нельзя, поэтому контейнер
+# предыдущей панели останавливается и удаляется — заодно освобождая порт.
+remove_old_image() {
+  if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    log "старый образ $IMAGE не найден — удаление не требуется"
+    return 0
+  fi
+  local c ids=()
+  while IFS= read -r c; do
+    [[ -n "$c" ]] && ids+=("$c")
+  done < <(docker ps -aq --filter "ancestor=$IMAGE" 2>/dev/null)
+  if ((${#ids[@]})); then
+    log "удаление $IMAGE: образ занят контейнерами (${ids[*]}) — останавливаю и удаляю их"
+    docker stop "${ids[@]}" >/dev/null 2>&1 || true
+    docker rm -f "${ids[@]}" >/dev/null 2>&1 || true
+  else
+    log "удаление старого образа $IMAGE"
+  fi
+  docker image rm -f "$IMAGE" >/dev/null 2>&1 \
+    || warn "не удалось удалить образ $IMAGE (удалите вручную: docker image rm -f $IMAGE)"
+  # Пересборка без кэша оставляет висячие слои предыдущей версии — чистим.
+  docker image prune -f >/dev/null 2>&1 || true
+}
+
+# clear_port PORT — освобождает порт, занятый docker-контейнером.
+# Возвращает 0, если порт свободен или был освобождён; 1 — если порт занят
+# процессом, не являющимся контейнером Docker (его не трогаем).
+clear_port() {
+  local port="$1" c
+  if ! port_in_use "$port"; then return 0; fi
+  local ids=()
+  while IFS= read -r c; do
+    [[ -n "$c" ]] && ids+=("$c")
+  done < <(docker ps -q --filter "publish=$port" 2>/dev/null)
+  if ((!${#ids[@]})); then return 1; fi
+  log "порт $port занят контейнерами (${ids[*]}) — освобождаю"
+  docker stop "${ids[@]}" >/dev/null 2>&1 || true
+  docker rm -f "${ids[@]}" >/dev/null 2>&1 || true
+  # docker-proxy отдаёт порт не мгновенно — даём ему время.
+  local t=0
+  while (( t < 20 )) && port_in_use "$port"; do sleep 0.5; t=$((t + 1)); done
+  port_in_use "$port" && return 1
+  return 0
+}
+
 build_image() {
   local dockerfile="$REPO_DIR/deploy/ui/Dockerfile"
   [[ -f "$dockerfile" ]] \
     || die "нет $dockerfile — выполните §6.1 docs/UI-ТЗ.md ('make docker-build-ui')"
-
-  # Удаляем старый образ, чтобы сборка без кэша не оставила слои от предыдущей
-  # версии, а отстуствие образа не было ошибкой при первой установке.
-  if docker image inspect "$IMAGE" >/dev/null 2>&1; then
-    log "удаление старого образа ${IMAGE}"
-    docker image rm "$IMAGE" >/dev/null 2>&1 \
-      || warn "не удалось удалить образ $IMAGE (возможно, используется контейнером)"
-  fi
 
   log "сборка образа ${IMAGE} (без кэша)"
   docker build --no-cache -f "$dockerfile" \
@@ -288,7 +385,7 @@ wait_healthy() {
       return 0
     fi
     sleep 2
-    (( tries++ ))
+    tries=$((tries + 1))
   done
   warn "панель не ответила на /healthz за 60 с: docker compose -f \"$(compose_file)\" logs"
   return 1
@@ -299,8 +396,17 @@ install_ui() {
   DATA_DIR="${DATA_DIR:-$(default_data_dir)}"
   mkdir -p "$DATA_DIR/docker" || die "не могу создать $DATA_DIR/docker"
 
-  # Проверяем порт до сборки и генерации compose: занятый порт => следующий свободный.
+  # 1. Удаляем старый образ — до проверки порта: контейнер старой панели при
+  #    этом останавливается, и порт освобождается до его проверки.
+  remove_old_image
+
+  # 2. Проверяем порт до сборки и генерации compose: занятый — освобождаем
+  #    (старые контейнеры), иначе уходим на первый свободный.
   ensure_free_port
+
+  # Токен доступа к API панели: из окружения, из предыдущей установки или
+  # новый — он вписывается в compose при генерации ниже.
+  resolve_token
 
   local nodes=""
   if [[ -n "$NODES_ARG" ]]; then
@@ -332,6 +438,7 @@ install_ui() {
 
   [[ -n "$nodes" ]] && log "узлы панели: ${nodes}"
 
+  # 3. Собираем образ панели без кэша.
   build_image
 
   write_compose "$(compose_file)" "$nodes"
