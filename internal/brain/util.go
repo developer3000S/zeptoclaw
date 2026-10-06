@@ -24,3 +24,11 @@ func MarshalJSON(v any) ([]byte, error) { return json.Marshal(v) }
 
 // UnmarshalJSON deserialises JSON into v. It is a package-local alias.
 func UnmarshalJSON(data []byte, v any) error { return json.Unmarshal(data, v) }
+
+// base64Encode renders signature bytes as standard base64 for JSON transport.
+func base64Encode(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
+
+// base64Decode parses a standard-base64 field back to bytes.
+func base64Decode(s string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(s)
+}

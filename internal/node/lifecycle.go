@@ -180,11 +180,16 @@ func New(opts Options) (*Node, error) {
 		return nil, err
 	}
 
+	if err := n.buildBrain(); err != nil {
+		return nil, err
+	}
+
 	mgr, err := tasks.NewManager(tasks.Options{
 		Config: cfg, Identity: identity, Policy: policy, Limiter: n.Limiter,
 		Audit: audit, Store: store, Table: table, Adapter: adapter,
 		Service: n.Service, Known: n.skillsSource(), SkillView: skillReg,
 		OnRebind: n.acceptRebind,
+		Brain:    n,
 		Metrics:  mets, Logger: logging.Component(logger, "tasks"),
 	})
 	if err != nil {
@@ -282,6 +287,7 @@ func (n *Node) Start(ctx context.Context) error {
 
 	n.Manager.Start(runCtx)
 	n.Scheduler.Start(runCtx)
+	n.StartBrain(runCtx)
 
 	if n.Registry != nil {
 		if err := n.Registry.Start(runCtx); err != nil {

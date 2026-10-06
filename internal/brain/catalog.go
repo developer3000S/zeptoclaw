@@ -308,6 +308,58 @@ func (c *Catalog) List() []Candidate {
 	return out
 }
 
+// Get returns one candidate by its catalog id (cnd_<sha256[:12]>).
+func (c *Catalog) Get(id string) (Candidate, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, cand := range c.candidates {
+		if cand.ID == id {
+			return *cand, true
+		}
+	}
+	return Candidate{}, false
+}
+
+// mergeReceived folds one gossip-contributed candidate into the catalog,
+// mirroring the scan merge's dedup semantics: same (ip, port, protocol) unions
+// the sources and refreshes observed_at; a new key is added. Received entries
+// keep their original risk score unless ours is higher — risk is advisory
+// metadata, and the highest warning wins.
+func (c *Catalog) mergeReceived(cand Candidate) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := catalogDedupKey(cand.IP, cand.Port, cand.Protocol)
+	if ex, ok := c.candidates[key]; ok {
+		ex.Sources = union(ex.Sources, cand.Sources...)
+		ex.DNSNames = union(ex.DNSNames, cand.DNSNames...)
+		if cand.ObservedAt.After(ex.ObservedAt) {
+			ex.ObservedAt = cand.ObservedAt
+		}
+		if cand.RiskScore > ex.RiskScore {
+			ex.RiskScore = cand.RiskScore
+		}
+		return 1
+	}
+	added := cand
+	c.candidates[key] = &added
+	return 1
+}
+
+// SetKeys replaces the search-engine credentials held in memory (the key
+// exchange endpoint uses it; keys are never persisted to disk).
+func (c *Catalog) SetKeys(keys CatalogKeys) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.keys = keys
+}
+
+// Keys returns a copy of the current search-engine credentials.
+func (c *Catalog) Keys() CatalogKeys {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.keys
+}
+
 // LastScan returns the most recent scan report, or nil if no scan ran yet.
 func (c *Catalog) LastScan() *ScanReport {
 	c.mu.Lock()

@@ -72,6 +72,15 @@ type SkillView interface {
 	SelectDelta(known []*pb.SkillVersion, full bool, limit int) []*pb.SkillDescriptor
 }
 
+// BrainSelector picks the model the local executor thinks with. It is a
+// narrow interface over the brain backend pool, so the tasks package stays
+// decoupled from it. SelectModel must prefer the caller's preferred model
+// when some verified backend serves it; ok=false means "no usable brain —
+// let the adapter's own default stand".
+type BrainSelector interface {
+	SelectModel(preferred string) (backendID, model string, ok bool)
+}
+
 // Manager owns the task lifecycle on this node: acceptance, validation,
 // local execution, delegation, relay of results and the durable journal.
 //
@@ -92,6 +101,10 @@ type Manager struct {
 	svc     *p2p.Service
 	known   SkillSource
 	sview   SkillView
+	// brain is the optional model selector backed by the brain backend pool
+	// (discovered Ollama endpoints). When nil no model selection happens and
+	// the adapter's own node-level default stands.
+	brain   BrainSelector
 	rebind  func(*pb.KeyRebind) (bool, string)
 	mets    *metrics.Collector
 	log     *slog.Logger
@@ -162,6 +175,10 @@ type Options struct {
 	// SkillView answers peers' skill-descriptor sync requests (ТЗ 6.3 skill
 	// exchange). Nil disables the endpoint's disclosure side.
 	SkillView SkillView
+	// Brain optionally supplies the model to think with, chosen from the
+	// verified backend pool of discovered Ollama endpoints. It is consulted
+	// only when the operator left picoclaw.model empty.
+	Brain BrainSelector
 	// OnRebind hands a control-plane identity-handover statement to the node
 	// ledger. The node owns the ledger and the trust policy, so the manager only
 	// transports; it returns whether the statement was accepted and why not.
@@ -196,6 +213,7 @@ func NewManager(opts Options) (*Manager, error) {
 		svc:      opts.Service,
 		known:    opts.Known,
 		sview:    opts.SkillView,
+		brain:    opts.Brain,
 		rebind:   opts.OnRebind,
 		mets:     opts.Metrics,
 		log:      logger,
@@ -1514,6 +1532,22 @@ func (m *Manager) canExecute(env *pb.TaskEnvelope) bool {
 	return true
 }
 
+// brainModel names the model the local executor should think with. The
+// operator's explicit picoclaw.model always wins (the adapter already passes
+// it); the brain pool is consulted only when the node has no model default,
+// so a mesh with discovered Ollama nodes still gets a working brain without
+// per-node configuration. Empty result = let the adapter decide.
+func (m *Manager) brainModel() string {
+	if m.brain == nil || m.cfg.PicoClaw.Model != "" {
+		return ""
+	}
+	_, model, ok := m.brain.SelectModel("")
+	if !ok {
+		return ""
+	}
+	return model
+}
+
 // runLocal executes the task through the PicoClaw adapter and delivers the
 // signed result: to the local waiter when we originated it, upstream otherwise.
 func (m *Manager) runLocal(ctx context.Context, env *pb.TaskEnvelope, deadline time.Time) {
@@ -1595,6 +1629,7 @@ func (m *Manager) runLocal(ctx context.Context, env *pb.TaskEnvelope, deadline t
 		Timeout:           timeout,
 		MaxWorkspaceBytes: m.cfg.Tasks.MaxWorkspaceBytes,
 		MaxMemoryBytes:    m.cfg.Tasks.MaxTaskMemoryBytes,
+		Model:             m.brainModel(),
 		SessionKey:        "mesh:" + env.GetTaskId(),
 	})
 

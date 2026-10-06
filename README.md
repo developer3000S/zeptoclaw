@@ -62,6 +62,12 @@ bin/zeptomesh-node scan -addr http://127.0.0.1:8081
 # ...с перебором локальной подсети и ограничением числа кандидатов
 bin/zeptomesh-node scan -addr http://127.0.0.1:8081 -scope subnet -scope wan -max-candidates 32
 bin/zeptomesh-node scan -addr http://127.0.0.1:8081 -last   # отчёт прошлого скана
+
+# Brain: поиск LLM-эндпоинтов и автономная верификация (см. секцию brain ниже)
+bin/zeptomesh-node brain-scan   # опросить поисковики (Shodan/Censys/…) об открытых Ollama
+bin/zeptomesh-node candidates   # каталог найденных эндпоинтов (инвентарь)
+bin/zeptomesh-node backends     # пул проверенных бэкендов, которыми узел думает
+bin/zeptomesh-node promote -id <candidate_id>   # проверить эндпоинт зондом и принять
 ```
 
 Полные инструкции по развёртыванию (LAN/WAN-профили, PSK, bootstrap,
@@ -87,6 +93,7 @@ bin/zeptomesh-node scan -addr http://127.0.0.1:8081 -last   # отчёт про�
 | Членство | GossipSub (эпидемическая рассылка `PeerState`) |
 | Поиск исполнителя | Search-relay: расширенный опрос соседей с `full_refresh` навыков |
 | Активный скан окружения | `scan` (`POST /api/v1/admin/scan`): агент сам прощупывает локальный хост, LAN (вкл. перебор подсети) и внешние источники (DHT, bootstrap, peer-exchange, search topic), находит других агентов и устанавливает с ними связь (dial + проверка подписанных capabilities → сосед в таблице); опционально медленный фоновый скан по `discovery.scan` |
+| Brain (поиск LLM) | `brain` в конфиге: каталог открытых Ollama-эндпоинтов из поисковиков (Censys/Shodan/GreyNoise/ZoomEye/CriminalIP/Netlas) + пул проверенных бэкендов; **верификация автономная** — зонд `GET /api/tags`, ответивший эндпоинт получает `verified` и трафик, центрального подтверждения нет (FOA §4.4.4 игнорируется по директиве). Обмен находками и API-ключами поиска с агентами-друзьями через их admin API и общий gossip-топик |
 | Хранилище | BadgerDB v4 (node-local) + content-addressed артефакты на диске |
 | Делегирование | TTL, маршрут без петель, дедупликация, лимиты фан-аута и параллелизма, rate limiting |
 | Декомпозиция | план подзадач (`subtasks` / `--subtask`) → дочерние конверты → один подписанный итог: секции в порядке плана, дедуп артефактов по hash, ретрай retryable-ребёна |
@@ -183,7 +190,9 @@ zeptoclaw/
 │                               #                   tasks|get|cancel|resubmit|reload|leave|
 │                               #                   skills|skill-set|skill-rm|skills-sync|
 │                               #                   triggers|trigger-add|trigger-rm|
-│                               #                   rebinds|rotate|revoke|scan
+│                               #                   rebinds|rotate|revoke|scan|
+│                               #                   candidates|backends|brain-scan|promote|
+│                               #                   friend-promote|share-keys (brain)
 ├── internal/
 │   ├── api/                    # HTTP/JSON админ-API (+ bearer-токен, /metrics)
 │   ├── config/                 # YAML-конфиг, дефолты, валидация, ${VAR:-default}   + тесты

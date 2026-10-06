@@ -188,8 +188,69 @@ picoclaw:
     latency: 50ms
     echo: true
 
+# brain — «интеллект бэкендов» узла: каталог обнаруженных Ollama-эндпоинтов,
+# пул проверенных бэкендов, которыми узел реально думает, и обмен находками с
+# другими агентами.
+#
+# Контракт автономии: в mesh нет центрального подтверждения, поэтому узел
+# верифицирует каждый эндпоинт сам — зондом GET /api/tags. Ответил списком
+# моделей → verified=true, эндпоинт получает трафик. Подтверждение оператором
+# (FOA §4.4.4) намеренно НЕ применяется: агент всё решает сам.
+brain:
+  enabled: ${ZETOMESH_BRAIN_ENABLED:-true}
+  # Локальный Ollama (http://host:port) — добавляется в пул как бэкенд "local".
+  # Пусто → локального инстанса нет.
+  local_url: ${ZETOMESH_OLLAMA_URL:-}
+  # Явные операторские эндпоинты (помимо local_url). api_key_env называет
+  # переменную окружения с ключом — сам ключ в конфиге не живёт.
+  endpoints: []
+  #   - id: gateway
+  #     base_url: https://llm.internal.example
+  #     api_key_env: LLM_GATEWAY_KEY
+  catalog:
+    enabled: true
+    # Поисковые движки, у которых есть ключ (censys | shodan | greynoise |
+    # zoomeye | criminal_ip | netlas). Источник без ключа тихо пропускается.
+    sources: [shodan, censys]
+    query: port:11434
+    # Как часто узел сам опрашивает поисковики (scan_interval) и через сколько
+    # после старта (initial_delay). 0 → расписания нет, только ручной
+    # `zeptomesh-node brain-scan` / POST /api/v1/brain/scan.
+    scan_interval: 30m
+    initial_delay: 2m
+    timeout: 30s
+    max_per_source: 25
+    retain: 1000
+  # Автопромоушен найденных эндпоинтов: каждый проход каталога зондирует
+  # непроверенных кандидатов и верифицирует их сам. promote_max_per_pass
+  # ограничивает число проб за проход; неудачный эндпоинт повторно зондируется
+  # не раньше чем через час.
+  auto_promote: true
+  promote_max_per_pass: 5
+  probe_interval: 1m
+  gossip:
+    # Обмен каталогом с другими агентами на общем pubsub-роутере membership.
+    enabled: true
+    interval: 5m
+  keys:
+    # exchange включает /api/v1/keys/* в обе стороны; accept разрешает ПРИЁМ
+    # ключей от друзей. Ключи живут только в памяти, в логи и на диск не идут.
+    exchange: true
+    accept: true
+    # Какие переменные окружения можно ОТПРАВЛЯТЬ другу (список имён):
+    share_envs: []
+    #   - SHODAN_API_KEY
+    #   - CENSYS_API_KEY
+  # Друзья — другие агенты, чьё админ-API узел может дёрнуть сам (промоушен
+  # их кандидатов и обмен ключами). token_env — переменная с bearer-токеном
+  # друга; имя друга или сам URL принимает `zeptomesh-node friend-promote
+  # -friend …` и `share-keys -friend …`.
+  friends: []
+  #   - name: gpu-friend
+  #     admin_url: http://127.0.0.1:8082
+  #     token_env: ZETOMESH_FRIEND_TOKEN
+
 security:
-  trust_mode: ${ZETOMESH_TRUST_MODE:-limited}
   require_task_signature: true
   # Транспортная подпись доказывает, кто отправил конверт; авторская
   # (origin_signature) доказывает, что содержимое не переписал промежуточный узел.

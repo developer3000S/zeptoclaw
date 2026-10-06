@@ -11,6 +11,7 @@ import (
 
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 
+	"github.com/developer3000S/zeptoclaw/internal/brain"
 	"github.com/developer3000S/zeptoclaw/internal/config"
 	"github.com/developer3000S/zeptoclaw/internal/discovery"
 	"github.com/developer3000S/zeptoclaw/internal/metrics"
@@ -55,6 +56,11 @@ type Node struct {
 	// tasks.forwarding.search_relay.topic.enabled joined it at startup. It rides
 	// the same pubsub router as Membership — one host, one router.
 	SearchTopic *discovery.SearchTopic
+	// Brain subsystem (see node/brain.go): the catalog of discovered Ollama
+	// endpoints, the verified backend pool and the gossip sync runner. All nil
+	// unless config.Brain.Enabled.
+	BrainCatalog *brain.Catalog
+	BrainPool    *brain.BackendPool
 	// Scheduler runs the cron-declared triggers (ТЗ 6.6.1 п.4), injecting their
 	// jobs as tasks authored by this node.
 	Scheduler *triggers.Scheduler
@@ -66,6 +72,15 @@ type Node struct {
 	// background) for the admin API's GET /api/v1/admin/scan.
 	scanMu   sync.Mutex
 	lastScan *ScanResult
+
+	// brainSync is the gossip runner state for the catalog topic, brainGossipOn
+	// records whether the runner was armed at startup (see node/brain.go).
+	brainSync    *brain.CatalogSync
+	brainGossipOn bool
+	// brainTried tracks candidate promotion attempts (id → last attempt), so a
+	// dead endpoint is not probed on every pass.
+	brainTriedMu sync.Mutex
+	brainTried   map[string]time.Time
 
 	// pubsub is the single gossip router this host speaks. Membership and the
 	// search topic are built over it (a second router would steal the first's

@@ -59,6 +59,12 @@ Commands:
   trigger-rm  delete a stored trigger          (DELETE /api/v1/triggers/<id>)
   rebinds     show retired and rotated peer identities (GET /api/v1/rebinds)
   scan        probe the environment for agents and befriend them (POST /api/v1/admin/scan)
+  candidates  list LLM endpoints found by the search engines (GET /api/v1/brain/candidates)
+  backends    list verified LLM backends this node may use (GET /api/v1/brain/backends)
+  brain-scan  run one model-search inventory scan now (POST /api/v1/brain/scan)
+  promote     probe and adopt one discovered endpoint here (POST /api/v1/candidates/promote)
+  friend-promote  ask a friend agent to adopt one of its endpoints (POST /api/v1/friends/promote)
+  share-keys  hand model-search API keys to a friend agent (POST /api/v1/keys/share)
   genkey      create an Ed25519 identity key file
   rotate      replace the node key, announcing the handover to the mesh
   revoke      retire a peer id with a self-signed revocation
@@ -132,6 +138,18 @@ func main() {
 		err = clientRebinds(args)
 	case "scan":
 		err = clientScan(args)
+	case "candidates":
+		err = clientBrainCandidates(args)
+	case "backends":
+		err = clientBrainBackends(args)
+	case "brain-scan":
+		err = clientBrainScan(args)
+	case "promote":
+		err = clientPromote(args)
+	case "friend-promote":
+		err = clientFriendPromote(args)
+	case "share-keys":
+		err = clientShareKeys(args)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:

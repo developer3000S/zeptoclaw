@@ -12,10 +12,11 @@ import (
 )
 
 // Backend is an LLM endpoint the agent may actually run tasks on. Unlike a
-// Catalog candidate, a backend exists because the operator pointed the node at
-// it — a local Ollama instance or an explicit entry in brain.backends — so the
-// operator is the record of consent. The agent probes the endpoint to learn its
-// models and latency, and only serves tasks from backends that answered.
+// Catalog candidate, a backend exists because it was either pointed at by the
+// operator (local Ollama, an explicit brain.backends entry) or promoted after
+// the agent itself verified it — the agent probes a discovered Ollama endpoint
+// and, when the endpoint answers, accepts it autonomously (no central
+// confirmation exists in a decentralized mesh).
 type Backend struct {
 	ID         string    `json:"id"`
 	BaseURL    string    `json:"base_url"`
@@ -24,6 +25,13 @@ type Backend struct {
 	Models     []string  `json:"models,omitempty"`
 	LatencyMs  int64     `json:"latency_ms,omitempty"`
 	Reachable  bool      `json:"reachable"`
+	// Verified marks an endpoint the agent itself probed successfully
+	// (answered with a model list). True means this node's own probe said the
+	// endpoint speaks Ollama; no external confirmation exists in the mesh.
+	Verified  bool      `json:"verified"`
+	// PromotedFrom names the catalog candidate this backend was promoted from,
+	// when it was ("" for operator-declared backends).
+	PromotedFrom string   `json:"promoted_from,omitempty"`
 	CheckedAt  time.Time `json:"checked_at,omitempty"`
 	Error      string    `json:"error,omitempty"`
 }
@@ -74,6 +82,83 @@ func NewBackendPool(localURL string, endpoints []BackendConfig, keys map[string]
 	return p
 }
 
+// AddVerified appends a promoted endpoint to the pool and probes it
+// immediately. The probe IS the autonomous verification (FOA §4.4.4 is not
+// applied — see the user directive): when the endpoint answers with a model
+// list, the backend is stored Verified=true and its models/latency are
+// recorded; when it does not, the backend is still stored (Reachable=false) so
+// the operator sees the failed promotion and later passes may re-probe it.
+// An endpoint already in the pool (same base URL) is updated in place.
+func (p *BackendPool) AddVerified(ctx context.Context, b Backend) *Backend {
+	b.BaseURL = strings.TrimRight(b.BaseURL, "/")
+	p.mu.Lock()
+	for _, ex := range p.backends {
+		if ex.BaseURL == b.BaseURL {
+			// Known endpoint: refresh identity fields, keep the pool entry.
+			ex.Kind = b.Kind
+			if b.APIKey != "" {
+				ex.APIKey = b.APIKey
+			}
+			if b.PromotedFrom != "" {
+				ex.PromotedFrom = b.PromotedFrom
+			}
+			p.mu.Unlock()
+			p.ProbeOne(ctx, ex)
+			return ex
+		}
+	}
+	added := &b
+	p.backends = append(p.backends, added)
+	p.mu.Unlock()
+	p.ProbeOne(ctx, added)
+	return added
+}
+
+// ProbeOne probes a single backend and records the result — the pool-wide
+// Probe, scoped to one entry, for freshly promoted endpoints.
+func (p *BackendPool) ProbeOne(ctx context.Context, b *Backend) {
+	models, latency, err := p.probeBackend(ctx, b)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	b.CheckedAt = time.Now()
+	if err != nil {
+		b.Reachable = false
+		b.Verified = false
+		b.Error = err.Error()
+		b.Models = nil
+		p.last[b.ID] = b
+		if p.log != nil {
+			p.log.Debug("brain_backend_unreachable", "backend", b.ID, "url", b.BaseURL, "err", err.Error())
+		}
+		return
+	}
+	b.Reachable = true
+	b.Verified = true
+	b.Error = ""
+	b.Models = models
+	b.LatencyMs = latency
+	p.last[b.ID] = b
+}
+
+// Get returns one backend by id.
+func (p *BackendPool) Get(id string) (Backend, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, b := range p.backends {
+		if b.ID == id {
+			return *b, true
+		}
+	}
+	return Backend{}, false
+}
+
+// Count returns the pool size.
+func (p *BackendPool) Count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.backends)
+}
+
 // Probe reaches every backend and records which answered and what they serve.
 // A backend that fails is reported, not removed: it may come back, and the
 // operator wants to see it in the status either way. Probing is the only
@@ -91,6 +176,7 @@ func (p *BackendPool) Probe(ctx context.Context) {
 			b.CheckedAt = time.Now()
 			if err != nil {
 				b.Reachable = false
+				b.Verified = false
 				b.Error = err.Error()
 				b.Models = nil
 				p.last[b.ID] = b
@@ -100,6 +186,7 @@ func (p *BackendPool) Probe(ctx context.Context) {
 				return
 			}
 			b.Reachable = true
+			b.Verified = true
 			b.Error = ""
 			b.Models = models
 			b.LatencyMs = latency

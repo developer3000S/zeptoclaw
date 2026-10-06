@@ -742,3 +742,147 @@ func clientScan(args []string) error {
 	}
 	return printJSON(v)
 }
+
+// clientBrainCandidates lists the catalog inventory: LLM endpoints the search
+// engines reported. Inventory only — nothing has been probed or verified.
+func clientBrainCandidates(args []string) error {
+	fs := flag.NewFlagSet("candidates", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodGet, "/api/v1/brain/candidates", nil, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+// clientBrainBackends lists the backend pool the node may think with, each
+// entry carrying this node's own probe result (verified=true = answered).
+func clientBrainBackends(args []string) error {
+	fs := flag.NewFlagSet("backends", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodGet, "/api/v1/brain/backends", nil, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+// clientBrainScan runs one catalog scan on demand instead of waiting for the
+// scheduled pass, and reports what the search engines said.
+func clientBrainScan(args []string) error {
+	fs := flag.NewFlagSet("brain-scan", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodPost, "/api/v1/brain/scan", map[string]any{}, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+// clientPromote promotes one catalog candidate into this node's backend pool.
+// The node probes the endpoint itself and reports whether it answered — the
+// verification is autonomous, there is no central confirmer in the mesh.
+func clientPromote(args []string) error {
+	fs := flag.NewFlagSet("promote", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	id := fs.String("id", "", "catalog candidate id (required)")
+	apiKey := fs.String("api-key", "", "bearer key for a protected endpoint (optional)")
+	reason := fs.String("reason", "", "audit annotation (optional)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*id) == "" {
+		return fmt.Errorf("promote: -id is required (see `candidates` for ids)")
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	body := map[string]any{"candidate_id": *id}
+	if *apiKey != "" {
+		body["api_key"] = *apiKey
+	}
+	if *reason != "" {
+		body["reason"] = *reason
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodPost, "/api/v1/candidates/promote", body, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+// clientFriendPromote asks a configured friend agent to promote one of its own
+// catalog candidates through its admin API. The friend verifies the endpoint
+// itself; this node only relays the request.
+func clientFriendPromote(args []string) error {
+	fs := flag.NewFlagSet("friend-promote", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	friend := fs.String("friend", "", "friend name or admin URL as declared in brain.friends (required)")
+	id := fs.String("id", "", "candidate id on the friend (required)")
+	reason := fs.String("reason", "", "audit annotation (optional)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*friend) == "" || strings.TrimSpace(*id) == "" {
+		return fmt.Errorf("friend-promote: -friend and -id are required")
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	body := map[string]any{"friend": *friend, "candidate_id": *id}
+	if *reason != "" {
+		body["reason"] = *reason
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodPost, "/api/v1/friends/promote", body, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}
+
+// clientShareKeys hands this node's shareable search credentials to a
+// configured friend agent, so that friend can run its own model search.
+func clientShareKeys(args []string) error {
+	fs := flag.NewFlagSet("share-keys", flag.ContinueOnError)
+	addr, tokenEnv := clientFlags(fs)
+	friend := fs.String("friend", "", "friend name or admin URL as declared in brain.friends (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*friend) == "" {
+		return fmt.Errorf("share-keys: -friend is required")
+	}
+	c, err := dial(addr, tokenEnv)
+	if err != nil {
+		return err
+	}
+	var v any
+	if err := c.do(context.Background(), http.MethodPost, "/api/v1/keys/share",
+		map[string]any{"friend": *friend}, &v); err != nil {
+		return err
+	}
+	return printJSON(v)
+}

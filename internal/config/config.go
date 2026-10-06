@@ -59,6 +59,11 @@ type Config struct {
 	API          APIConfig          `yaml:"api"`
 	Telemetry    TelemetryConfig    `yaml:"telemetry"`
 	Storage      StorageConfig      `yaml:"storage"`
+	// Brain is the node's LLM-backend intelligence: the catalog of discovered
+	// Ollama endpoints (internet search + mesh gossip), the verified backend
+	// pool and the credential exchange with friend agents. A node decides on
+	// its own which endpoints to use — the mesh has no central verifier.
+	Brain BrainConfig `yaml:"brain"`
 	// Triggers are the fourth task source of ТЗ 6.6.1: cron-declared jobs the
 	// node injects into its own pipeline. They are hot-reloadable because the
 	// scheduler owns a live view of this list.
@@ -442,6 +447,106 @@ type StorageConfig struct {
 	MaxTaskRecords int    `yaml:"max_task_records"`
 }
 
+// BrainConfig configures the node's LLM-backend intelligence (см. QWEN.md,
+// раздел Brain): каталог найденных Ollama-эндпоинтов, пул проверенных бэкендов
+// и обмен ключами поиска с агентами-друзьями. Узел автономен: центрального
+// подтверждения в сети нет, решение о доверии эндпоинту принимает сам агент.
+type BrainConfig struct {
+	// Enabled turns the whole brain subsystem on. When off, no catalog scan,
+	// no gossip and no promotion happen; the picoclaw adapter works exactly as
+	// before (its own model configuration).
+	Enabled bool `yaml:"enabled"`
+	// Catalog bounds the internet-search inventory (brain.Catalog).
+	Catalog BrainCatalogConfig `yaml:"catalog"`
+	// LocalURL is this host's own Ollama (e.g. http://127.0.0.1:11434); when
+	// set it becomes the "local" backend of the pool.
+	LocalURL string `yaml:"local_url"`
+	// Endpoints are operator-declared LLM endpoints (id + base_url + the env
+	// var name that carries the API key). These are trusted by construction.
+	Endpoints []BrainBackendConfig `yaml:"endpoints"`
+	// AutoPromote lets the agent promote discovered candidates autonomously:
+	// a candidate whose endpoint answers the verification probe gets
+	// Verified=true and enters the backend pool without an operator action.
+	// This is the user's autonomy directive (2026-10-06); FOA §4.4.4 is ignored.
+	AutoPromote bool `yaml:"auto_promote"`
+	// PromoteMaxPerPass bounds how many catalog candidates one promotion pass
+	// may probe, so a large catalog cannot flood the network with probes.
+	PromoteMaxPerPass int `yaml:"promote_max_per_pass"`
+	// ProbeInterval is how often the pool re-probes its backends to keep the
+	// model lists and latencies fresh.
+	ProbeInterval Duration `yaml:"probe_interval"`
+	// Gossip shares the local catalog (and receives peers' catalogs) over the
+	// brain-catalog pubsub topic — the endpoint exchange between agents.
+	Gossip BrainGossipConfig `yaml:"gossip"`
+	// Keys governs the search-credential exchange with friend agents.
+	Keys BrainKeysConfig `yaml:"keys"`
+	// Friends are the other agents this node may operate through their admin
+	// APIs: promote candidates on them, share search credentials with them.
+	Friends []BrainFriendConfig `yaml:"friends"`
+}
+
+// BrainCatalogConfig bounds the internet-search inventory scan. Sources without
+// credentials in the environment are silently skipped.
+type BrainCatalogConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Sources lists the search engines to query: censys, shodan, greynoise,
+	// zoomeye, criminal_ip, netlas. Empty = all engines that have a key.
+	Sources []string `yaml:"sources"`
+	// Query is the search expression (default: port:11434).
+	Query string `yaml:"query"`
+	// ScanInterval is how often the background inventory scan runs (the
+	// scheduled auto-scan). Zero = no scheduled scans, manual/API only.
+	ScanInterval Duration `yaml:"scan_interval"`
+	// InitialDelay postpones the first scheduled scan after start.
+	InitialDelay Duration `yaml:"initial_delay"`
+	// Timeout bounds one whole scan pass.
+	Timeout Duration `yaml:"timeout"`
+	// MaxPerSource caps how many hosts one engine may report per pass.
+	MaxPerSource int `yaml:"max_per_source"`
+	// Retain caps the stored inventory (newest kept).
+	Retain int `yaml:"retain"`
+}
+
+// BrainBackendConfig is one operator-declared LLM endpoint.
+type BrainBackendConfig struct {
+	ID        string `yaml:"id"`
+	BaseURL   string `yaml:"base_url"`
+	APIKeyEnv string `yaml:"api_key_env"`
+}
+
+// BrainGossipConfig tunes the catalog exchange over the mesh gossip plane.
+type BrainGossipConfig struct {
+	// Enabled joins the brain-catalog topic on the node's pubsub router.
+	Enabled bool `yaml:"enabled"`
+	// Interval is how often the local catalog is announced. Zero = every 5m.
+	Interval Duration `yaml:"interval"`
+}
+
+// BrainKeysConfig governs the search-credential exchange with friend agents:
+// which keys this node may give away and whether it accepts foreign ones.
+// Keys live in the environment only and are exchanged over the friends'
+// bearer-authenticated admin APIs — never written to config or disk.
+type BrainKeysConfig struct {
+	// Exchange enables the /api/v1/keys/* endpoints (both directions).
+	Exchange bool `yaml:"exchange"`
+	// Accept turns on merging keys received from friend agents.
+	Accept bool `yaml:"accept"`
+	// ShareEnvs names the environment variables whose values may be handed to
+	// friends when they ask (e.g. CENSYS_API_KEY, SHODAN_API_KEY). Empty =
+	// this node shares nothing (it may still accept).
+	ShareEnvs []string `yaml:"share_envs"`
+}
+
+// BrainFriendConfig names one friend agent's admin API for outbound operations
+// (promote candidates on the friend, share search credentials with it).
+type BrainFriendConfig struct {
+	Name     string `yaml:"name"`
+	AdminURL string `yaml:"admin_url"`
+	// TokenEnv names the environment variable carrying the friend's admin API
+	// bearer token; the value is read at call time, never stored in config.
+	TokenEnv string `yaml:"token_env"`
+}
+
 // Default returns a configuration with every field populated.
 func Default() *Config {
 	return &Config{
@@ -590,6 +695,27 @@ func Default() *Config {
 			},
 		},
 		Storage: StorageConfig{Engine: "badger", MaxTaskRecords: 100_000},
+		Brain: BrainConfig{
+			Enabled: true,
+			Catalog: BrainCatalogConfig{
+				Enabled:      true,
+				Query:        "port:11434",
+				Timeout:      Duration(30 * time.Second),
+				MaxPerSource: 25,
+				Retain:       1000,
+			},
+			AutoPromote:       true,
+			PromoteMaxPerPass: 5,
+			ProbeInterval:     Duration(time.Minute),
+			Gossip: BrainGossipConfig{
+				Enabled:  true,
+				Interval: Duration(5 * time.Minute),
+			},
+			Keys: BrainKeysConfig{
+				Exchange: true,
+				Accept:   true,
+			},
+		},
 	}
 }
 
@@ -939,6 +1065,29 @@ func (c *Config) Validate() error {
 		triggerIDs[tc.ID] = true
 		if err := tc.ToDomain().Validate(); err != nil {
 			errs = append(errs, err)
+		}
+	}
+
+	if br := c.Brain; br.Enabled {
+		if bc := br.Catalog; bc.Enabled {
+			if bc.Timeout.D() < 0 || bc.ScanInterval.D() < 0 || bc.InitialDelay.D() < 0 {
+				errs = append(errs, errors.New("brain.catalog durations must be >= 0"))
+			}
+			if bc.MaxPerSource < 0 || bc.Retain < 0 {
+				errs = append(errs, errors.New("brain.catalog caps must be >= 0"))
+			}
+		}
+		if br.PromoteMaxPerPass < 0 || br.ProbeInterval.D() < 0 {
+			errs = append(errs, errors.New("brain.promote_max_per_pass and brain.probe_interval must be >= 0"))
+		}
+		if br.Gossip.Interval.D() < 0 {
+			errs = append(errs, errors.New("brain.gossip.interval must be >= 0"))
+		}
+		for _, env := range br.Keys.ShareEnvs {
+			if strings.TrimSpace(env) == "" {
+				errs = append(errs, errors.New("brain.keys.share_envs entries must be non-empty"))
+				break
+			}
 		}
 	}
 

@@ -332,6 +332,66 @@ advertisement, поэтому описание скила не может рас
   /api/v1/skills/{name}`, `POST /api/v1/skills/sync`; CLI
   `skills|skill-set|skill-rm|skills-sync`.
 
+### Brain: каталог Ollama-эндпоинтов, автономная верификация и обмен находками
+
+`internal/brain` + `internal/node/brain.go`. Два вида знания об LLM-эндпоинте,
+и их различие — смысл подсистемы:
+
+- **candidate** — запись из поискового движка (Censys/Shodan/GreyNoise/ZoomEye/
+  CriminalIP/Netlas): *инвентарь*. Узел никогда не дозванивается до кандидата,
+  пока не решит его проверить.
+- **backend** — эндпоинт, которым узел реально думает: локальный Ollama
+  (`brain.local_url`), явные записи `brain.endpoints` или **повышенный
+  кандидат**.
+
+Контракт автономии (директива заказчика): **центрального подтверждения в mesh
+нет, решение принимает сам агент**. Промоушен — это зонд `GET /api/tags` (с
+fallback на OpenAI-совместимый `/v1/models`): ответил списком моделей →
+`verified=true`, эндпоинт получает трафик; не ответил → сохраняется как
+недостижимый (видно в API, повторный зонд не раньше часа). Подтверждение
+оператором перед использованием (FOA §4.4.4) **намеренно не применяется**.
+Выбор модели (`BackendPool.SelectModel`) — предпочтение оператора, иначе
+крупнейшая модель самого быстрого достижимого бэкенда; при отсутствии
+используемых бэкендов исполнитель откатывается на заглушку, а не думает пустотой.
+
+- Расписание: `catalog.scan_interval`/`initial_delay` — фоновые проходы скана +
+  автопромоушен (`auto_promote`, лимит `promote_max_per_pass`, ретраи ≥ 1/час);
+  `probe_interval` — регулярный перезонд пула. Ручной запуск: `brain-scan`.
+  Каталог персистится в `<data_dir>/brain/catalog.json` (только публичные
+  метаданные, без ключей).
+- Обмен эндпоинтами: gossip-топик `/zeptomesh/brain-catalog/0.1` на **общем
+  pubsub-роутере** хоста (тем же, что membership и search topic — отдельный
+  роутер утаил бы stream handler у первого). Сообщение `CatalogGossip`
+  подписывается отправителем и проверяется по self-certifying peer id;
+  полученные кандидаты сливаются аддитивно с дедупом по (ip, port, protocol) и
+  объединением источников (FOA §4.4.2), risk score берётся наихудший
+  (FOA §4.4.3, носит консультативный характер). Publish и receive — два
+  независимых цикла, как в membership.
+- Навыки агента (mesh-операции через админ-API **друга**, bearer-токен друга из
+  `brain.friends[].token_env`):
+  - `internal/skills/promote.go` — `POST /api/v1/candidates/promote` на друге:
+    попросить друга повысить его кандидата; друг верифицирует сам.
+  - `internal/skills/keys.go` — `POST /api/v1/keys/exchange` на друге: отдать
+    ему свои поисковые ключи (`keys.share_envs`).
+- API узла (`internal/api/admin.go`): `POST /api/v1/candidates/promote`
+  (ответ `{status:"promoted", backend:{verified, base_url, models}}`),
+  `GET /api/v1/brain/candidates`, `GET /api/v1/brain/backends`,
+  `POST /api/v1/brain/scan`, `POST /api/v1/keys/exchange` (приём; in-memory,
+  без логов и диска), `POST /api/v1/keys/share`, `POST /api/v1/friends/promote`.
+- CLI: `candidates | backends | brain-scan | promote | friend-promote |
+  share-keys`.
+- Конфиг: секция `brain` в `configs/node.yaml` (каталог, пул, gossip, keys,
+  friends). Ключи поисковиков — только переменные окружения, в конфиге и на
+  диске их нет; `Backend.APIKey` сериализуется как `json:"-"`, поэтому
+  администраторский API никогда их не отдаёт.
+- Тесты: `internal/brain/{catalog,backend}_test.go` (парсинг источников, дедуп,
+  зонд-верификация, выбор модели, OpenAI-fallback), `internal/api/brain_test.go`
+  (HTTP-поверхность: скан→кандидат→промоушен→пул, мёртвый эндпоинт, disabled,
+  неизвестный друг), `internal/node/brain_test.go` (промоушен/выбор модели,
+  автопромоушен с лимитами, обмен ключами, друзья, подпись и слияние gossip,
+  персистентность каталога), `internal/skills/keys_test.go` (bearer, разбор
+  ответа, отказы друга).
+
 ### Хранилище [9]
 
 `internal/storage/storage.go` — BadgerDB v4: задачи (`t:`), результаты (`r:`),

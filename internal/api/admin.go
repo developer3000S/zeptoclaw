@@ -22,6 +22,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/developer3000S/zeptoclaw/internal/brain"
 	"github.com/developer3000S/zeptoclaw/internal/config"
 	"github.com/developer3000S/zeptoclaw/internal/metrics"
 	"github.com/developer3000S/zeptoclaw/internal/node"
@@ -80,47 +81,17 @@ func New(n *node.Node, cfg *config.Config, mets *metrics.Collector, logger *slog
 	// for other agents, dial them and verify their capabilities.
 	s.authed(mux, "POST /api/v1/admin/scan", s.handleScan)
 	s.authed(mux, "GET /api/v1/admin/scan", s.handleScanLast)
-	// CandidatePromotionRequest represents a request to promote a discovered candidate to a backend
-type CandidatePromotionRequest struct {
-	CandidateID string `json:"candidate_id"`
-	Reason      string `json:"reason"`
-}
-
-// PromoteCandidate promotes a discovered candidate to a usable backend
-func (s *Server) PromoteCandidate(w http.ResponseWriter, r *http.Request) {
-	var req CandidatePromotionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	
-	// Find the candidate in the catalog
-	candidate, ok := s.node.Catalog().Get(req.CandidateID)
-	if !ok {
-		http.Error(w, "candidate not found", http.StatusNotFound)
-		return
-	}
-	
-	// Promote to backend
-	backend := brain.Backend{
-		ID:          candidate.ID,
-		IP:          candidate.IP,
-		Port:        candidate.Port,
-		Protocol:    candidate.Protocol,
-		ServiceHint: candidate.ServiceHint,
-		Reason:      req.Reason,
-	}
-	
-	if err := s.node.AddBackend(backend); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "promoted"})
-}
-
-if mets != nil {
+	// Brain: the discovered-LLM catalog, the verified backend pool, the
+	// autonomous promotion, and the two inter-agent skills — asking a friend to
+	// promote a candidate and handing it search credentials.
+	s.authed(mux, "POST /api/v1/candidates/promote", s.handlePromoteCandidate)
+	s.authed(mux, "GET /api/v1/brain/candidates", s.handleBrainCandidates)
+	s.authed(mux, "GET /api/v1/brain/backends", s.handleBrainBackends)
+	s.authed(mux, "POST /api/v1/brain/scan", s.handleBrainScan)
+	s.authed(mux, "POST /api/v1/keys/exchange", s.handleKeysExchange)
+	s.authed(mux, "POST /api/v1/keys/share", s.handleKeysShare)
+	s.authed(mux, "POST /api/v1/friends/promote", s.handleFriendPromote)
+	if mets != nil {
 		mux.Handle("GET /metrics", promhttp.HandlerFor(mets.Registry(), promhttp.HandlerOpts{}))
 	}
 
@@ -524,6 +495,172 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 // admin API or from the background sweep.
 func (s *Server) handleScanLast(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.node.LastScan())
+}
+
+// ---------- brain: catalog, backends, promotion, keys ----------
+
+// candidatePromotionRequest is one promotion request, coming either from an
+// operator or from a friend agent's promote skill.
+type candidatePromotionRequest struct {
+	CandidateID string `json:"candidate_id"`
+	// APIKey is optional: a protected endpoint needs it for the probe to
+	// succeed. The value is held in memory and never persisted.
+	APIKey string `json:"api_key,omitempty"`
+	// Reason is audit annotation (who asked and why).
+	Reason string `json:"reason,omitempty"`
+}
+
+// handlePromoteCandidate promotes one catalog candidate into the backend pool.
+// The node probes the endpoint itself and reports the verdict honestly — the
+// mesh has no central authority to confirm an endpoint, so this node's own
+// probe IS the verification (FOA §4.4.4 is deliberately not applied).
+func (s *Server) handlePromoteCandidate(w http.ResponseWriter, r *http.Request) {
+	var in candidatePromotionRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(in.CandidateID) == "" {
+		writeErr(w, http.StatusBadRequest, "candidate_id is required")
+		return
+	}
+	if s.node.BrainCatalog == nil || s.node.BrainPool == nil {
+		writeErr(w, http.StatusServiceUnavailable, "node: brain disabled")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	b, err := s.node.PromoteCandidate(ctx, in.CandidateID, in.APIKey, in.Reason)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "promoted", "backend": b})
+}
+
+// handleBrainCandidates reports the catalog inventory: the LLM endpoints the
+// search engines know about. Inventory only — nothing here has been probed.
+func (s *Server) handleBrainCandidates(w http.ResponseWriter, r *http.Request) {
+	if s.node.BrainCatalog == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"count": 0, "candidates": []brain.Candidate{}, "enabled": false})
+		return
+	}
+	cands := s.node.BrainCandidates()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":      len(cands),
+		"candidates": cands,
+		"last_scan":  s.node.BrainCatalog.LastScan(),
+		"enabled":    true,
+	})
+}
+
+// handleBrainBackends reports the pool the node may actually think with, with
+// each endpoint's own probe result. verified=true marks an endpoint this node
+// probed and saw answer.
+func (s *Server) handleBrainBackends(w http.ResponseWriter, r *http.Request) {
+	if s.node.BrainPool == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"count": 0, "backends": []brain.Backend{}, "enabled": false})
+		return
+	}
+	backs := s.node.BrainBackends()
+	verified := 0
+	for _, b := range backs {
+		if b.Verified {
+			verified++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":    len(backs),
+		"verified": verified,
+		"backends": backs,
+		"enabled":  true,
+	})
+}
+
+// handleBrainScan runs one catalog scan on demand instead of waiting for the
+// scheduled pass, and reports what the search engines said.
+func (s *Server) handleBrainScan(w http.ResponseWriter, r *http.Request) {
+	if s.node.BrainCatalog == nil {
+		writeErr(w, http.StatusServiceUnavailable, "node: brain disabled")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	report, err := s.node.BrainScanNow(ctx)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "scanned", "report": report})
+}
+
+// handleKeysExchange receives a friend agent's search credentials. Values are
+// held in memory only and never persisted or logged; the friend's own
+// keys-exchange skill is the outbound half.
+func (s *Server) handleKeysExchange(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Keys map[string]string `json:"keys"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request: "+err.Error())
+		return
+	}
+	accepted := s.node.AcceptKeys(in.Keys)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "exchanged", "accepted": accepted})
+}
+
+// handleKeysShare hands this node's shareable search credentials to a
+// configured friend agent. Only the env vars listed in brain.keys.share_envs
+// are ever sent, and only to a friend the operator configured.
+func (s *Server) handleKeysShare(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Friend string `json:"friend"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(in.Friend) == "" {
+		writeErr(w, http.StatusBadRequest, "friend is required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	sent, err := s.node.ShareKeysWithFriend(ctx, in.Friend)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "shared", "sent": sent, "friend": in.Friend})
+}
+
+// handleFriendPromote asks a configured friend agent to promote one of its own
+// catalog candidates through its admin API. The friend verifies the endpoint
+// itself — this node only relays the request, which is the point of the skill
+// in a mesh with no central verifier.
+func (s *Server) handleFriendPromote(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Friend      string `json:"friend"`
+		CandidateID string `json:"candidate_id"`
+		Reason      string `json:"reason,omitempty"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(in.Friend) == "" || strings.TrimSpace(in.CandidateID) == "" {
+		writeErr(w, http.StatusBadRequest, "friend and candidate_id are required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	if err := s.node.PromoteOnFriend(ctx, in.Friend, in.CandidateID, in.Reason); err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "requested", "friend": in.Friend, "candidate_id": in.CandidateID,
+	})
 }
 
 // handleRotateKey replaces the node identity key and announces the handover
