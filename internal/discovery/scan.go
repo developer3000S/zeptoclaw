@@ -233,6 +233,49 @@ func nextHost(base net.IP, i int) string {
 	return net.IP(c).String()
 }
 
+// AutoScanConfig configures periodic catalog scanning
+type AutoScanConfig struct {
+	Enabled    bool          `yaml:"enabled"`
+	Interval   time.Duration `yaml:"interval"`
+	InitialDelay time.Duration `yaml:"initial_delay"`
+}
+
+// AutoScan runs periodic catalog scans according to the configuration
+func (n *Node) AutoScan(ctx context.Context, cfg AutoScanConfig) {
+	if !cfg.Enabled {
+		return
+	}
+
+	// Initial delay
+	if cfg.InitialDelay > 0 {
+		select {
+		case <-time.After(cfg.InitialDelay):
+		case <-ctx.Done():
+			return
+		}
+	}
+
+	// Periodic scan
+	ticker := time.NewTicker(cfg.Interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			scanCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			report := n.Catalog().Scan(scanCtx)
+			cancel()
+			n.log.Info("catalog_scan_completed",
+				"created", report.Created,
+				"deduped", report.Deduped,
+				"total", report.Total,
+				"duration", report.Duration)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func foundSnapshot(m map[string]peer.AddrInfo, mu *sync.Mutex) []peer.AddrInfo {
 	mu.Lock()
 	defer mu.Unlock()

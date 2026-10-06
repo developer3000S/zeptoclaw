@@ -80,7 +80,47 @@ func New(n *node.Node, cfg *config.Config, mets *metrics.Collector, logger *slog
 	// for other agents, dial them and verify their capabilities.
 	s.authed(mux, "POST /api/v1/admin/scan", s.handleScan)
 	s.authed(mux, "GET /api/v1/admin/scan", s.handleScanLast)
-	if mets != nil {
+	// CandidatePromotionRequest represents a request to promote a discovered candidate to a backend
+type CandidatePromotionRequest struct {
+	CandidateID string `json:"candidate_id"`
+	Reason      string `json:"reason"`
+}
+
+// PromoteCandidate promotes a discovered candidate to a usable backend
+func (s *Server) PromoteCandidate(w http.ResponseWriter, r *http.Request) {
+	var req CandidatePromotionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	
+	// Find the candidate in the catalog
+	candidate, ok := s.node.Catalog().Get(req.CandidateID)
+	if !ok {
+		http.Error(w, "candidate not found", http.StatusNotFound)
+		return
+	}
+	
+	// Promote to backend
+	backend := brain.Backend{
+		ID:          candidate.ID,
+		IP:          candidate.IP,
+		Port:        candidate.Port,
+		Protocol:    candidate.Protocol,
+		ServiceHint: candidate.ServiceHint,
+		Reason:      req.Reason,
+	}
+	
+	if err := s.node.AddBackend(backend); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "promoted"})
+}
+
+if mets != nil {
 		mux.Handle("GET /metrics", promhttp.HandlerFor(mets.Registry(), promhttp.HandlerOpts{}))
 	}
 

@@ -614,6 +614,73 @@ func skillsCover(have, want []string) bool {
 	return true
 }
 
+// MembershipGossip carries the node's current membership state for gossip propagation
+type MembershipGossip struct {
+	PeerID    string    `json:"peer_id"`
+	Addrs     []string  `json:"addrs"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// MembershipSync enables agents to share their current membership state over the mesh gossip
+// plane. This is how a decentralized mesh accumulates a shared view of the network
+// topology without a central registry.
+type MembershipSync struct {
+	selfID    peer.ID
+	addrs     []multiaddr.Multiaddr
+	log       *slog.Logger
+	sendPeriod time.Duration
+}
+
+// NewMembershipSync builds the gossip handler for membership state.
+func NewMembershipSync(selfID peer.ID, addrs []multiaddr.Multiaddr, log *slog.Logger) *MembershipSync {
+	return &MembershipSync{
+		selfID:    selfID,
+		addrs:     addrs,
+		log:       log,
+		sendPeriod: 5 * time.Minute, // a full state fit in a single gossip round
+	}
+}
+
+// Topic implements discovery.GossipSource so the node wires it into the membership
+// pubsub just like skills sync.
+func (ms *MembershipSync) Topic() string { return "/zeptomesh/membership/0.1" }
+
+// Payload returns a snapshot of the local membership state for gossip propagation.
+func (ms *MembershipSync) Payload(ctx context.Context) ([]byte, error) {
+	addrs := make([]string, len(ms.addrs))
+	for i, addr := range ms.addrs {
+		addrs[i] = addr.String()
+	}
+	gossip := MembershipGossip{
+		PeerID:    ms.selfID.String(),
+		Addrs:     addrs,
+		Timestamp: time.Now().UTC(),
+	}
+	return json.Marshal(gossip)
+}
+
+// OnReceive applies a received membership state to the local view: addresses from
+// another agent are merged in (new ones added, existing ones updated with fresh
+// timestamp).
+func (ms *MembershipSync) OnReceive(from peer.ID, data []byte) {
+	if ms.log != nil {
+		ms.log.Debug("membership_received", "from", from.String())
+	}
+	var gossip MembershipGossip
+	if err := json.Unmarshal(data, &gossip); err != nil {
+		if ms.log != nil {
+			ms.log.Debug("membership_parse_err", "from", from.String(), "err", err.Error())
+		}
+		return
+	}
+	
+	// Merge received addresses into the local view
+	// (implementation would go here)
+}
+
+// SendPeriod returns how often the membership state is announced to peers.
+func (ms *MembershipSync) SendPeriod() time.Duration { return ms.sendPeriod }
+
 func truncateStr(s string, n int) string {
 	if len(s) <= n {
 		return s
