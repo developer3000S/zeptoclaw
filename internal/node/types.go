@@ -75,7 +75,7 @@ type Node struct {
 
 	// brainSync is the gossip runner state for the catalog topic, brainGossipOn
 	// records whether the runner was armed at startup (see node/brain.go).
-	brainSync    *brain.CatalogSync
+	brainSync     *brain.CatalogSync
 	brainGossipOn bool
 	// brainTried tracks candidate promotion attempts (id → last attempt), so a
 	// dead endpoint is not probed on every pass.

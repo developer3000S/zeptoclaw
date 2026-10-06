@@ -104,12 +104,12 @@ type Manager struct {
 	// brain is the optional model selector backed by the brain backend pool
 	// (discovered Ollama endpoints). When nil no model selection happens and
 	// the adapter's own node-level default stands.
-	brain   BrainSelector
-	rebind  func(*pb.KeyRebind) (bool, string)
-	mets    *metrics.Collector
-	log     *slog.Logger
-	caps    func() *pb.Capabilities
-	tracer  oteltrace.Tracer
+	brain  BrainSelector
+	rebind func(*pb.KeyRebind) (bool, string)
+	mets   *metrics.Collector
+	log    *slog.Logger
+	caps   func() *pb.Capabilities
+	tracer oteltrace.Tracer
 
 	slots  chan struct{}
 	queued chan struct{} // bounds queue depth beyond running slots

@@ -28,10 +28,10 @@ const MaxGossipCandidates = 256
 // the signature covers the announcement body, and the receiver recovers the
 // sender's public key from the claimed peer id (peer ids are self-certifying).
 type CatalogGossip struct {
-	PeerID     string       `json:"peer_id"`
-	Candidates []Candidate  `json:"candidates"`
-	Timestamp  int64        `json:"timestamp_unix"`
-	Signature  string       `json:"signature,omitempty"` // base64, over the signed prefix
+	PeerID     string      `json:"peer_id"`
+	Candidates []Candidate `json:"candidates"`
+	Timestamp  int64       `json:"timestamp_unix"`
+	Signature  string      `json:"signature,omitempty"` // base64, over the signed prefix
 }
 
 // signedPrefix returns the announcement without the signature field, i.e. the

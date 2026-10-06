@@ -18,22 +18,22 @@ import (
 // and, when the endpoint answers, accepts it autonomously (no central
 // confirmation exists in a decentralized mesh).
 type Backend struct {
-	ID         string    `json:"id"`
-	BaseURL    string    `json:"base_url"`
-	Kind       string    `json:"kind"`             // local | endpoint
-	APIKey     string    `json:"-"`                // never serialized
-	Models     []string  `json:"models,omitempty"`
-	LatencyMs  int64     `json:"latency_ms,omitempty"`
-	Reachable  bool      `json:"reachable"`
+	ID        string   `json:"id"`
+	BaseURL   string   `json:"base_url"`
+	Kind      string   `json:"kind"` // local | endpoint
+	APIKey    string   `json:"-"`    // never serialized
+	Models    []string `json:"models,omitempty"`
+	LatencyMs int64    `json:"latency_ms,omitempty"`
+	Reachable bool     `json:"reachable"`
 	// Verified marks an endpoint the agent itself probed successfully
 	// (answered with a model list). True means this node's own probe said the
 	// endpoint speaks Ollama; no external confirmation exists in the mesh.
-	Verified  bool      `json:"verified"`
+	Verified bool `json:"verified"`
 	// PromotedFrom names the catalog candidate this backend was promoted from,
 	// when it was ("" for operator-declared backends).
-	PromotedFrom string   `json:"promoted_from,omitempty"`
-	CheckedAt  time.Time `json:"checked_at,omitempty"`
-	Error      string    `json:"error,omitempty"`
+	PromotedFrom string    `json:"promoted_from,omitempty"`
+	CheckedAt    time.Time `json:"checked_at,omitempty"`
+	Error        string    `json:"error,omitempty"`
 }
 
 // BackendConfig is one operator-declared LLM endpoint. The API key is named by

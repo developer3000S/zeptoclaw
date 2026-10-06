@@ -61,15 +61,15 @@ type Candidate struct {
 // CatalogKeys are the search-engine credentials. They are read from the
 // environment only — a key never belongs in a config file that gets committed.
 type CatalogKeys struct {
-	CensysToken     string
-	CensysID        string
-	CensysSecret    string
-	Shodan          string
-	GreyNoise       string
-	ZoomEye         string
-	CriminalIP      string
-	NetlasEndpoint  string
-	Netlas          string
+	CensysToken    string
+	CensysID       string
+	CensysSecret   string
+	Shodan         string
+	GreyNoise      string
+	ZoomEye        string
+	CriminalIP     string
+	NetlasEndpoint string
+	Netlas         string
 }
 
 // CatalogConfig bounds the internet-search inventory scan.
@@ -168,12 +168,12 @@ func (c *Catalog) WithEndpoints(e CatalogEndpoints) *Catalog {
 // rather than reported as an error: the operator simply did not supply it.
 func (c *Catalog) configuredSources() []string {
 	available := map[string]bool{
-		"censys":     c.keys.CensysToken != "",
-		"shodan":     c.keys.Shodan != "",
-		"greynoise":  c.keys.GreyNoise != "",
-		"zoomeye":    c.keys.ZoomEye != "",
+		"censys":      c.keys.CensysToken != "",
+		"shodan":      c.keys.Shodan != "",
+		"greynoise":   c.keys.GreyNoise != "",
+		"zoomeye":     c.keys.ZoomEye != "",
 		"criminal_ip": c.keys.CriminalIP != "",
-		"netlas":     c.keys.Netlas != "",
+		"netlas":      c.keys.Netlas != "",
 	}
 	var out []string
 	for _, s := range c.cfg.Sources {

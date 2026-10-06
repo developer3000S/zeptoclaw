@@ -1,8 +1,8 @@
 package ui_test
 
 import (
-	"testing"
 	"github.com/developer3000S/zeptoclaw/internal/ui"
+	"testing"
 )
 
 func TestEmbeddedFiles(t *testing.T) {
