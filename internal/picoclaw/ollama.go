@@ -30,6 +30,7 @@ import (
 // trivially: the model receives the instruction text and returns text.
 type OllamaAdapter struct {
 	pool    *brain.BackendPool
+	cfg     config.PicoClawConfig
 	skills  []string
 	timeout time.Duration
 	log     *slog.Logger
@@ -54,6 +55,7 @@ func NewOllama(pool *brain.BackendPool, cfg config.PicoClawConfig, skills []stri
 	}
 	return &OllamaAdapter{
 		pool:    pool,
+		cfg:     cfg,
 		skills:  append([]string(nil), skills...),
 		timeout: timeout,
 		log:     logger,
@@ -63,6 +65,32 @@ func NewOllama(pool *brain.BackendPool, cfg config.PicoClawConfig, skills []stri
 
 // Name implements Adapter.
 func (a *OllamaAdapter) Name() string { return "ollama" }
+
+// Model implements ModelReporter: the pinned model wins when the operator set
+// it; otherwise the pool's own selection names what the node actually thinks
+// with (the fallback happens in picoclaw.Describe → ModelOf).
+func (a *OllamaAdapter) Model() string {
+	if a.cfg.Model != "" {
+		return a.cfg.Model
+	}
+	if a.pool != nil {
+		_, model, _ := a.pool.SelectModel("")
+		return model
+	}
+	return ""
+}
+
+// BaseURL implements BaseReporter: reports the currently selected backend's
+// endpoint so the operator can see which host the node is actually calling.
+// Empty when the pool has no usable backend yet.
+func (a *OllamaAdapter) BaseURL() string {
+	if a.pool != nil {
+		if b, _, _ := a.pool.SelectModel(""); b != nil {
+			return b.BaseURL
+		}
+	}
+	return ""
+}
 
 // Healthy reports whether the brain pool currently holds at least one backend
 // that answered the last probe with a model list.
