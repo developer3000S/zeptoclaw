@@ -120,6 +120,9 @@ func NewWS(cfg config.PicoClawConfig, logger *slog.Logger) (*WSAdapter, error) {
 // Name implements Adapter.
 func (a *WSAdapter) Name() string { return "picoclaw-pico-ws" }
 
+// BaseURL implements BaseReporter: the Pico Protocol gateway this adapter talks to.
+func (a *WSAdapter) BaseURL() string { return a.httpBase }
+
 // Healthy checks the gateway's /health endpoint.
 func (a *WSAdapter) Healthy(ctx context.Context) error {
 	health := strings.TrimRight(a.httpBase, "/") + a.health

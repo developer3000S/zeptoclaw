@@ -45,7 +45,19 @@ type Status struct {
 		Healthy bool   `json:"healthy"`
 		Detail  string `json:"detail,omitempty"`
 		Model   string `json:"model,omitempty"`
+		BaseURL string `json:"base_url,omitempty"`
 	} `json:"adapter"`
+	// Brain is the subsystem that supplies the model the agent thinks with when
+	// the operator has not pinned picoclaw.model. The admin API surfaces it so
+	// the operator can see which discovered Ollama endpoint the node is using.
+	Brain struct {
+		Enabled   bool   `json:"enabled"`
+		Model     string `json:"model,omitempty"`
+		BackendID string `json:"backend_id,omitempty"`
+		BaseURL   string `json:"base_url,omitempty"`
+		Backends  int    `json:"backends"`
+		Usable    int    `json:"usable"`
+	} `json:"brain"`
 	Security struct {
 		TrustMode        string `json:"trust_mode"`
 		RequireTaskSig   bool   `json:"require_task_signature"`
@@ -105,6 +117,21 @@ func (n *Node) Status() Status {
 	st.Adapter.Healthy = inf.Healthy
 	st.Adapter.Detail = inf.Detail
 	st.Adapter.Model = inf.Model
+	st.Adapter.BaseURL = inf.BaseURL
+	// The brain is what the node thinks with when picoclaw.model is not pinned
+	// (see Manager.brainModel): the pool's own selection names the model and the
+	// verified endpoint that serves it. Reported even when nothing is usable, so
+	// the operator sees "brain enabled but empty" instead of guessing.
+	if n.BrainPool != nil {
+		st.Brain.Enabled = true
+		st.Brain.Backends = n.BrainPool.Count()
+		st.Brain.Usable = len(n.BrainPool.Usable())
+		if b, model, ok := n.BrainPool.SelectModel(""); ok && b != nil {
+			st.Brain.Model = model
+			st.Brain.BackendID = b.ID
+			st.Brain.BaseURL = b.BaseURL
+		}
+	}
 	st.Security.TrustMode = n.Policy.Mode().String()
 	st.Security.RequireTaskSig = n.Cfg.Security.RequireTaskSignature
 	st.Security.MinTrustForTasks = n.Policy.MinTrustForTasks().String()

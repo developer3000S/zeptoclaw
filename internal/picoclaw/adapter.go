@@ -116,6 +116,23 @@ func ModelOf(a Adapter) string {
 	return ""
 }
 
+// BaseReporter is implemented by adapters that reach the agent over a remote
+// base URL (the Pico Protocol gateway). Adapters that drive a local binary have
+// no URL to report, so the status says nothing rather than inventing one.
+type BaseReporter interface {
+	// BaseURL returns the endpoint the adapter connects to, "" when the
+	// integration is local (a child process, not a remote service).
+	BaseURL() string
+}
+
+// BaseURLOf reports where the adapter reaches the agent it drives.
+func BaseURLOf(a Adapter) string {
+	if br, ok := a.(BaseReporter); ok {
+		return br.BaseURL()
+	}
+	return ""
+}
+
 // Info describes the adapter for the admin API.
 type Info struct {
 	Name    string    `json:"name"`
@@ -124,6 +141,7 @@ type Info struct {
 	Checked time.Time `json:"checked,omitempty"`
 	Detail  string    `json:"detail,omitempty"`
 	Model   string    `json:"model,omitempty"`
+	BaseURL string    `json:"base_url,omitempty"`
 }
 
 // Describe runs Healthy and packages the result for status output.
@@ -135,6 +153,7 @@ func Describe(ctx context.Context, a Adapter) Info {
 		info.Detail = err.Error()
 	}
 	info.Model = ModelOf(a)
+	info.BaseURL = BaseURLOf(a)
 	info.Checked = time.Now().UTC()
 	return info
 }

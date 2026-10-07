@@ -60,6 +60,20 @@ function nodeCard(n) {
   const err = n.error
     ? `<div class="hint" style="color:var(--red)">ошибка: ${esc(n.error)}</div>`
     : "";
+  // Мозги агента: если оператор не закрепил picoclaw.model, модель выбирает
+  // brain-пул из проверенных Ollama-эндпоинтов (см. Manager.brainModel). Значит,
+  // эффективная модель — это adapter.model (явный выбор) либо brain.model.
+  const model = st.adapter?.model || st.brain?.model || "";
+  const baseURL = st.adapter?.base_url || st.brain?.base_url || "";
+  const modelView = model
+    ? `${esc(model)}${st.brain?.model && !st.adapter?.model ? ' <span class="pill warn">brain</span>' : ""}`
+    : `<span class="hint">не указана</span>`;
+  const baseURLView = baseURL
+    ? esc(baseURL)
+    : `<span class="hint">не указан</span>`;
+  const brainView = st.brain?.enabled
+    ? `brain: ${st.brain.usable}/${st.brain.backends} usable`
+    : `brain: <span class="hint">выключен</span>`;
   return `
   <div class="card" data-name="${esc(n.name)}">
     <h3>${esc(n.name)} <span class="pill ${cls}">${reachable ? "reachable" : "unreachable"}</span></h3>
@@ -72,7 +86,10 @@ function nodeCard(n) {
       <dt>load</dt><dd>${fmtPct(st.load)}</dd>
       <dt>задачи</dt><dd>${st.running_tasks ?? 0} running / ${st.tracked_tasks ?? 0} tracked</dd>
       <dt>соседи</dt><dd>${st.neighbors_connected ?? 0} подключено / ${st.neighbors_total ?? 0} всего</dd>
-      <dt>адаптер</dt><dd>${esc(st.adapter?.name || "—")} ${adapterOK === undefined ? "" : adapterOK ? '<span class="pill ok">healthy</span>' : '<span class="pill bad">down</span>'} ${esc(st.adapter?.model || "")}</dd>
+      <dt>адаптер</dt><dd>${esc(st.adapter?.name || "—")} ${adapterOK === undefined ? "" : adapterOK ? '<span class="pill ok">healthy</span>' : '<span class="pill bad">down</span>'}</dd>
+      <dt>модель ИИ</dt><dd>${modelView}</dd>
+      <dt>BASE_URL</dt><dd class="mono">${baseURLView}</dd>
+      <dt>мозги</dt><dd>${brainView}</dd>
       <dt>trust_mode</dt><dd>${esc(st.security?.trust_mode || "—")}</dd>
       <dt>latency</dt><dd>${reachable ? n.latency_ms + " ms" : "—"}</dd>
     </dl>
