@@ -285,24 +285,28 @@ func (p *BackendPool) withAuth(req *http.Request, b *Backend) *http.Request {
 }
 
 // List returns a snapshot of every backend and its last probe result, for the
-// admin API and for brain selection.
+// admin API and for brain selection. The order is the pool's declaration order
+// (local, then operator endpoints, then promoted candidates), so two equally
+// fast backends always tie-break the same way.
 func (p *BackendPool) List() []Backend {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	out := make([]Backend, 0, len(p.last))
-	for _, b := range p.last {
+	out := make([]Backend, 0, len(p.backends))
+	for _, b := range p.backends {
 		out = append(out, *b)
 	}
 	return out
 }
 
 // Usable returns the backends that answered the last probe and the models they
-// serve. This is the pool a brain model is chosen from.
+// serve. This is the pool a brain model is chosen from. Declaration order is
+// preserved: SelectModel breaks a latency tie on it, so a node does not flip
+// between two equally fast backends' models between probes.
 func (p *BackendPool) Usable() []Backend {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var out []Backend
-	for _, b := range p.last {
+	for _, b := range p.backends {
 		if b.Reachable && len(b.Models) > 0 {
 			out = append(out, *b)
 		}

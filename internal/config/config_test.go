@@ -111,6 +111,50 @@ func TestLoadAppliesLLMEndpointsFromEnv(t *testing.T) {
 	}
 }
 
+// ZETOMESH_LLM_API_KEY pairs with ZETOMESH_LLM_ENDPOINTS: a gateway that
+// authenticates would reject the pool's probe as a dead endpoint without it,
+// so every env-added endpoint must carry the key's env name.
+func TestLoadAppliesLLMAPIKeyFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "node.yaml")
+	body := "node:\n  name: t\n  data_dir: " + filepath.Join(dir, "d") + "\n  listen: [\"/ip4/127.0.0.1/tcp/4101\"]\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZETOMESH_LLM_ENDPOINTS", "http://172.17.0.1:8080")
+	t.Setenv("ZETOMESH_LLM_API_KEY", "foa_live_example")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Brain.Endpoints) != 1 {
+		t.Fatalf("brain endpoints = %v, want 1", cfg.Brain.Endpoints)
+	}
+	if got := cfg.Brain.Endpoints[0].APIKeyEnv; got != "ZETOMESH_LLM_API_KEY" {
+		t.Fatalf("api_key_env = %q, want ZETOMESH_LLM_API_KEY (the pool resolves the key from it)", got)
+	}
+}
+
+// Without a key the env-added endpoints stay keyless: an open Ollama must not
+// gain a phantom credential reference.
+func TestLoadWithoutLLMAPIKeyLeavesEndpointsKeyless(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "node.yaml")
+	body := "node:\n  name: t\n  data_dir: " + filepath.Join(dir, "d") + "\n  listen: [\"/ip4/127.0.0.1/tcp/4101\"]\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZETOMESH_LLM_ENDPOINTS", "http://10.0.0.5:11434")
+	t.Setenv("ZETOMESH_LLM_API_KEY", "")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Brain.Endpoints) != 1 || cfg.Brain.Endpoints[0].APIKeyEnv != "" {
+		t.Fatalf("keyless endpoint should stay keyless, got %v", cfg.Brain.Endpoints)
+	}
+}
+
 // The shipped template must survive expansion with an empty environment:
 // one broken expression makes every instance misconfigured the same way.
 func TestDefaultTemplateExpands(t *testing.T) {

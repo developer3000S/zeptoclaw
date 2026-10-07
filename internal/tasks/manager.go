@@ -237,8 +237,11 @@ func (m *Manager) Start(ctx context.Context) {
 	m.log.Info("task_manager_started", "max_parallel", cap(m.slots))
 }
 
-// Stop waits for background goroutines to drain. Task executions are bound to
-// the manager's own per-task contexts; node shutdown cancels them.
+// Stop waits for background goroutines to drain: the janitor, the sandbox
+// sweeper and every task still executing or being routed. Task goroutines are
+// bound to per-task contexts derived from the caller's ctx, so cancelling
+// before Stop makes them exit promptly instead of outliving shutdown and
+// writing artifacts into a store that is already closing.
 func (m *Manager) Stop() {
 	m.wg.Wait()
 }
@@ -367,7 +370,9 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (string, error)
 	m.countReceived()
 
 	if fan != nil {
+		m.wg.Add(1)
 		go func() {
+			defer m.wg.Done()
 			if err := m.decompose(spanOnly(sctx), fan); err != nil {
 				// The plan never got off the ground (bad ttl, rejected child):
 				// fail the parent instead of leaving a task that waits forever.
@@ -381,7 +386,11 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (string, error)
 		}()
 		return env.GetTaskId(), nil
 	}
-	go m.routeOrigin(spanOnly(sctx), env, deadline)
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.routeOrigin(spanOnly(sctx), env, deadline)
+	}()
 	return env.GetTaskId(), nil
 }
 
@@ -660,7 +669,11 @@ func (m *Manager) OnTask(ctx context.Context, remote peer.ID, env *pb.TaskEnvelo
 	m.recordJournal(env, Evaluating, false)
 
 	if m.canExecute(env) {
-		go m.runLocal(rctx, env, deadline)
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.runLocal(rctx, env, deadline)
+		}()
 		return m.ack(env.GetTaskId(), pb.AckStatus_ACK_STATUS_QUEUED, ""), nil
 	}
 	// A relay node gets one attempt: if this hop cannot place the task, the

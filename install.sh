@@ -38,7 +38,7 @@ NODES=""                # количество экземпляров
 DATA_DIR=""             # корень данных
 API_HOST="127.0.0.1"    # адрес админ-API в local-режиме
 TRUST_MODE="limited"    # open | limited | private
-PICO_MODE="stub"        # stub | binary | http
+PICO_MODE="${ZETOMESH_PICO_MODE:-stub}"        # stub | binary | http | ollama
 BOOTSTRAP=""            # multiaddr через запятую
 PSK=""                  # общий ключ закрытой сети
 LOG_LEVEL="info"
@@ -162,7 +162,8 @@ usage() {
                          ~/.local/share/zeptomesh для пользователя)
   --api-host HOST        адрес админ-API (default: 127.0.0.1)
   --trust-mode M         open | limited | private (default: limited)
-  --pico-mode M          stub | binary | http (default: stub)
+  --pico-mode M          stub | binary | http | ollama (default: stub, или
+                         значение ZETOMESH_PICO_MODE из окружения)
   --bootstrap ADDRS      точки входа mesh через запятую
   --psk KEY              общий ключ закрытой сети (одинаковый у всех узлов)
   --run-user NAME        пользователь сервисов (default: zeptomesh для root)
@@ -253,7 +254,7 @@ prompt_settings() {
   (( NODES <= 64 )) || die "слишком много экземпляров ($NODES): порты до $((MESH_BASE_PORT + NODES))"
 
   case "$TRUST_MODE" in open|limited|private) ;; *) die "--trust-mode: open|limited|private" ;; esac
-  case "$PICO_MODE" in stub|binary|http) ;; *) die "--pico-mode: stub|binary|http" ;; esac
+  case "$PICO_MODE" in stub|binary|http|ollama) ;; *) die "--pico-mode: stub|binary|http|ollama" ;; esac
 }
 
 default_data_dir() {
@@ -331,12 +332,15 @@ ZETOMESH_PROM_LISTEN=$API_HOST:$prom
 ZETOMESH_API_HOST=$API_HOST
 ZETOMESH_TRUST_MODE=$TRUST_MODE
 ZETOMESH_PICO_MODE=$PICO_MODE
+ZETOMESH_PICO_MODEL=${ZETOMESH_PICO_MODEL:-}
 ZETOMESH_MDNS=true
 ZETOMESH_DHT_MODE=auto
 ZETOMESH_LOG_LEVEL=$LOG_LEVEL
 ZETOMESH_PSK=${PSK:-}
 ZETOMESH_BOOTSTRAP=${BOOTSTRAP:-}
 ZETOMESH_API_TOKEN=${ZETOMESH_API_TOKEN:-}
+ZETOMESH_LLM_ENDPOINTS=${ZETOMESH_LLM_ENDPOINTS:-}
+ZETOMESH_LLM_API_KEY=${ZETOMESH_LLM_API_KEY:-}
 EOF
   )
   chmod 0600 "$dir/instance.env"
@@ -689,6 +693,7 @@ write_compose() {
       ZETOMESH_API_HOST: "0.0.0.0"
       ZETOMESH_TRUST_MODE: "$TRUST_MODE"
       ZETOMESH_PICO_MODE: "$PICO_MODE"
+      ZETOMESH_PICO_MODEL: "\${ZETOMESH_PICO_MODEL:-}"
       ZETOMESH_MDNS: "false"
       ZETOMESH_DHT_MODE: "auto"
       ZETOMESH_LOG_LEVEL: "$LOG_LEVEL"
@@ -696,6 +701,7 @@ write_compose() {
       ZETOMESH_PSK: "\${ZETOMESH_PSK:-}"
       ZETOMESH_API_TOKEN: "\${ZETOMESH_API_TOKEN:-}"
       ZETOMESH_LLM_ENDPOINTS: "\${ZETOMESH_LLM_ENDPOINTS:-}"
+      ZETOMESH_LLM_API_KEY: "\${ZETOMESH_LLM_API_KEY:-}"
       TZ: "${TZ:-UTC}"
     ports:
       - "$mesh:$mesh/tcp"

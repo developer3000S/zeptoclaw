@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // quietPool is a pool whose logs are discarded.
@@ -94,7 +95,17 @@ func TestAddVerified_DedupesByBaseURL(t *testing.T) {
 func TestSelectModel_PrefersNamedThenLargest(t *testing.T) {
 	fast := ollamaServer("qwen2.5:0.5b", "qwen2.5:7b")
 	defer fast.Close()
-	slow := ollamaServer("llama3.1:8b")
+	// A genuinely slower endpoint: the pool ranks backends by measured latency,
+	// so the ordering the test asserts on must be real rather than a coin flip
+	// between two equally fast local servers.
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(40 * time.Millisecond)
+		if r.URL.Path != "/api/tags" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = jsonWrite(w, map[string]any{"models": []map[string]string{{"name": "llama3.1:8b"}}})
+	}))
 	defer slow.Close()
 
 	p := quietPool()
