@@ -82,6 +82,35 @@ func TestLoadAppliesBootstrapFromEnv(t *testing.T) {
 	}
 }
 
+// ZETOMESH_LLM_ENDPOINTS feeds brain.endpoints the same way bootstrap feeds
+// discovery.bootstrap: a single mounted config template serves every node of a
+// mesh, each pointing at the operator's Ollama-compatible gateways.
+func TestLoadAppliesLLMEndpointsFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "node.yaml")
+	body := "node:\n  name: t\n  data_dir: " + filepath.Join(dir, "d") + "\n  listen: [\"/ip4/127.0.0.1/tcp/4101\"]\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZETOMESH_LLM_ENDPOINTS", "http://172.17.0.1:8080/, http://10.0.0.5:11434,http://172.17.0.1:8080")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Brain.Endpoints) != 2 {
+		t.Fatalf("brain endpoints = %v, want 2 (trailing slash trimmed, duplicate skipped)", cfg.Brain.Endpoints)
+	}
+	if cfg.Brain.Endpoints[0].ID != "llm-1" {
+		t.Fatalf("first endpoint id = %q, want llm-1", cfg.Brain.Endpoints[0].ID)
+	}
+	if cfg.Brain.Endpoints[0].BaseURL != "http://172.17.0.1:8080" {
+		t.Fatalf("first endpoint url = %q, want http://172.17.0.1:8080", cfg.Brain.Endpoints[0].BaseURL)
+	}
+	if cfg.Brain.Endpoints[1].BaseURL != "http://10.0.0.5:11434" {
+		t.Fatalf("second endpoint url = %q", cfg.Brain.Endpoints[1].BaseURL)
+	}
+}
+
 // The shipped template must survive expansion with an empty environment:
 // one broken expression makes every instance misconfigured the same way.
 func TestDefaultTemplateExpands(t *testing.T) {

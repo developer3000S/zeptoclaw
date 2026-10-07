@@ -695,6 +695,7 @@ write_compose() {
       ZETOMESH_BOOTSTRAP: "$boot"
       ZETOMESH_PSK: "\${ZETOMESH_PSK:-}"
       ZETOMESH_API_TOKEN: "\${ZETOMESH_API_TOKEN:-}"
+      ZETOMESH_LLM_ENDPOINTS: "\${ZETOMESH_LLM_ENDPOINTS:-}"
       TZ: "${TZ:-UTC}"
     ports:
       - "$mesh:$mesh/tcp"

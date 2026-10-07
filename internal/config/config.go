@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -339,7 +340,7 @@ type SkillExchangeConfig struct {
 // PicoClawConfig configures the agent adapter. Mode selects the transport used
 // to reach a local PicoClaw instance; see internal/picoclaw for implementations.
 type PicoClawConfig struct {
-	Mode                string            `yaml:"mode"` // binary | http | stub
+	Mode                string            `yaml:"mode"` // binary | http | stub | ollama
 	Binary              string            `yaml:"binary"`
 	ConfigFile          string            `yaml:"config"`
 	WorkspaceRoot       string            `yaml:"workspace_root"`
@@ -751,20 +752,40 @@ func Load(path string) (*Config, error) {
 
 // applyEnvOverrides applies settings that a YAML scalar expansion cannot
 // express, because the target is a sequence: ZETOMESH_BOOTSTRAP is a comma
-// separated list of multiaddrs appended to discovery.bootstrap, so one mounted
-// template can serve every instance of a mesh without editing the file.
+// separated list of multiaddrs appended to discovery.bootstrap, and
+// ZETOMESH_LLM_ENDPOINTS is a comma separated list of Ollama-compatible base
+// URLs appended to brain.endpoints, so one mounted template can serve every
+// instance of a mesh without editing the file.
 func (c *Config) applyEnvOverrides() {
-	v := strings.TrimSpace(os.Getenv("ZETOMESH_BOOTSTRAP"))
-	if v == "" {
-		return
-	}
-	for _, part := range strings.Split(v, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
+	if v := strings.TrimSpace(os.Getenv("ZETOMESH_BOOTSTRAP")); v != "" {
+		for _, part := range strings.Split(v, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			if !slices.Contains(c.Discovery.Bootstrap, part) {
+				c.Discovery.Bootstrap = append(c.Discovery.Bootstrap, part)
+			}
 		}
-		if !slices.Contains(c.Discovery.Bootstrap, part) {
-			c.Discovery.Bootstrap = append(c.Discovery.Bootstrap, part)
+	}
+	if v := strings.TrimSpace(os.Getenv("ZETOMESH_LLM_ENDPOINTS")); v != "" {
+		for i, part := range strings.Split(v, ",") {
+			part = strings.TrimRight(strings.TrimSpace(part), "/")
+			if part == "" {
+				continue
+			}
+			dup := false
+			for _, ep := range c.Brain.Endpoints {
+				if ep.BaseURL == part {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				c.Brain.Endpoints = append(c.Brain.Endpoints, BrainBackendConfig{
+					ID: "llm-" + strconv.Itoa(i+1), BaseURL: part,
+				})
+			}
 		}
 	}
 }
@@ -863,9 +884,9 @@ func (c *Config) Validate() error {
 	c.Node.DataDir = filepath.Clean(c.Node.DataDir)
 
 	switch strings.ToLower(c.PicoClaw.Mode) {
-	case "stub", "binary", "http":
+	case "stub", "binary", "http", "ollama":
 	default:
-		errs = append(errs, fmt.Errorf("picoclaw.mode %q must be one of stub|binary|http", c.PicoClaw.Mode))
+		errs = append(errs, fmt.Errorf("picoclaw.mode %q must be one of stub|binary|http|ollama", c.PicoClaw.Mode))
 	}
 	if c.PicoClaw.MaxConcurrentAgents <= 0 {
 		c.PicoClaw.MaxConcurrentAgents = 1

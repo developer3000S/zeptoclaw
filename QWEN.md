@@ -33,7 +33,7 @@ Go identifiers, CLI signatures, env vars, and protocol names stay in English.
 | Delegation | TTL, loop-free route, dedup, fan-out/parallelism limits, rate limiting |
 | Task decomposition | `subtasks` / `--subtask` plan → child envelopes → single signed aggregate result |
 | Signatures | `TaskEnvelope`, `TaskResult` (+`worker_signature`), `TaskAck`, `CancelRequest`, `Capabilities`, `origin_signature`, `KeyRebind`, `SkillsSyncResponse` |
-| Executor | PicoClaw via adapter: CLI process / Pico Protocol (WebSocket) / offline stub |
+| Executor | PicoClaw via adapter: CLI process / Pico Protocol (WebSocket) / offline stub / `ollama` chat inference on a brain-pool backend |
 
 ### Architecture (high level)
 

@@ -14,6 +14,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/libp2p/go-libp2p-pubsub"
 
 	"github.com/developer3000S/zeptoclaw/internal/brain"
+	"github.com/developer3000S/zeptoclaw/internal/config"
 	"github.com/developer3000S/zeptoclaw/internal/discovery"
 	"github.com/developer3000S/zeptoclaw/internal/logging"
 	"github.com/developer3000S/zeptoclaw/internal/security"
@@ -58,6 +60,23 @@ func brainKeysFromEnv() brain.CatalogKeys {
 	return keys
 }
 
+// newBrainPool builds the backend pool from node configuration. It is a plain
+// function rather than a method: the adapter is assembled before the Node
+// exists, and buildBrain hands the same pool to the node afterwards.
+func newBrainPool(cfg config.BrainConfig, log *slog.Logger) *brain.BackendPool {
+	endpoints := make([]brain.BackendConfig, 0, len(cfg.Endpoints))
+	keysByEnv := map[string]string{}
+	for _, ep := range cfg.Endpoints {
+		endpoints = append(endpoints, brain.BackendConfig{
+			ID: ep.ID, BaseURL: ep.BaseURL, APIKeyEnv: ep.APIKeyEnv,
+		})
+		if ep.APIKeyEnv != "" {
+			keysByEnv[ep.APIKeyEnv] = os.Getenv(ep.APIKeyEnv)
+		}
+	}
+	return brain.NewBackendPool(cfg.LocalURL, endpoints, keysByEnv, log)
+}
+
 // buildBrain constructs the catalog and the backend pool. It must run before
 // the task manager is built (the manager consumes the model selector).
 func (n *Node) buildBrain() error {
@@ -77,17 +96,13 @@ func (n *Node) buildBrain() error {
 		RetainEntries: cfg.Catalog.Retain,
 	}, brainKeysFromEnv(), blog)
 
-	endpoints := make([]brain.BackendConfig, 0, len(cfg.Endpoints))
-	keysByEnv := map[string]string{}
-	for _, ep := range cfg.Endpoints {
-		endpoints = append(endpoints, brain.BackendConfig{
-			ID: ep.ID, BaseURL: ep.BaseURL, APIKeyEnv: ep.APIKeyEnv,
-		})
-		if ep.APIKeyEnv != "" {
-			keysByEnv[ep.APIKeyEnv] = os.Getenv(ep.APIKeyEnv)
-		}
+	// The pool may already exist: lifecycle.go builds it before the adapter so
+	// mode "ollama" can consume it. Reuse that instance — probing and status
+	// must observe the same pool the adapter executes on.
+	pool := n.BrainPool
+	if pool == nil {
+		pool = newBrainPool(cfg, blog)
 	}
-	pool := brain.NewBackendPool(cfg.LocalURL, endpoints, keysByEnv, blog)
 
 	if path := n.brainStatePath(); path != "" {
 		if err := catalog.Load(path); err != nil {
@@ -139,6 +154,11 @@ func (n *Node) StartBrain(ctx context.Context) {
 		n.wg.Add(1)
 		go func() {
 			defer n.wg.Done()
+			// First probe right away: until a backend has been probed the pool
+			// is empty, the ollama adapter is unhealthy and the status shows no
+			// model — waiting a full probe_interval for the first answer makes
+			// a freshly started node look brainless for no reason.
+			n.BrainPool.Probe(ctx)
 			t := time.NewTicker(iv)
 			defer t.Stop()
 			for {

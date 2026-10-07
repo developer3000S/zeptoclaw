@@ -11,6 +11,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
+	"github.com/developer3000S/zeptoclaw/internal/brain"
 	"github.com/developer3000S/zeptoclaw/internal/discovery"
 	"github.com/developer3000S/zeptoclaw/internal/logging"
 	"github.com/developer3000S/zeptoclaw/internal/metrics"
@@ -96,9 +97,16 @@ func New(opts Options) (*Node, error) {
 		closePartial()
 		return nil, fmt.Errorf("node: storage: %w", err)
 	}
+	// The brain backend pool is assembled before the adapter: mode "ollama"
+	// executes tasks on a backend the pool selected (and picoclaw.New fails
+	// fast when that mode runs without one).
+	var brainPool *brain.BackendPool
+	if cfg.Brain.Enabled {
+		brainPool = newBrainPool(cfg.Brain, logging.Component(logger, "brain"))
+	}
 	adapter := opts.Adapter
 	if adapter == nil {
-		adapter, err = picoclaw.New(cfg, logging.Component(logger, "picoclaw"))
+		adapter, err = picoclaw.New(cfg, logging.Component(logger, "picoclaw"), brainPool)
 		if err != nil {
 			_ = store.Close()
 			closePartial()
@@ -143,6 +151,7 @@ func New(opts Options) (*Node, error) {
 		Cfg: cfg, Identity: identity, Store: store, Policy: policy,
 		Limiter: security.NewLimiter(cfg.Security.RateLimit.RequestsPerSecond, cfg.Security.RateLimit.Burst),
 		Audit:   audit, Rebinds: rebinds, Metrics: mets, Table: table, Adapter: adapter, Skills: skillReg, log: logger,
+		BrainPool:  brainPool,
 		configPath: opts.ConfigPath, levelVar: opts.LevelVar, quit: make(chan struct{}),
 		halted:      make(chan struct{}),
 		introducing: make(map[peer.ID]bool), handshaked: make(map[peer.ID]bool),

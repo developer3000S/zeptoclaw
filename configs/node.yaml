@@ -155,7 +155,10 @@ capabilities:
     persist: true         # <data_dir>/skills.json — часы версий переживают рестарт
 
 picoclaw:
-  # stub | binary | http  — подробнее в docs/PICOCLAW-INTEGRATION.md
+  # stub | binary | http | ollama — подробнее в docs/PICOCLAW-INTEGRATION.md.
+  # ollama — реальный инференс: инструкция уходит в /api/chat (или
+  # /v1/chat/completions) того бэкенда, которого выбрал пул мозгов; требует
+  # brain.enabled и хотя бы одного проверенного бэкенда.
   mode: ${ZETOMESH_PICO_MODE:-stub}
   binary: ${ZETOMESH_PICO_BIN:-picoclaw}
   config: ${ZETOMESH_PICO_CONFIG:-}
@@ -203,6 +206,9 @@ brain:
   local_url: ${ZETOMESH_OLLAMA_URL:-}
   # Явные операторские эндпоинты (помимо local_url). api_key_env называет
   # переменную окружения с ключом — сам ключ в конфиге не живёт.
+  # ZETOMESH_LLM_ENDPOINTS (список через запятую) доливается в этот список
+  # поверх YAML — как ZETOMESH_BOOTSTRAP, поэтому один смонтированный шаблон
+  # обслуживает все экземпляры mesh.
   endpoints: []
   #   - id: gateway
   #     base_url: https://llm.internal.example

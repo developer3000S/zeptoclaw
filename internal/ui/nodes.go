@@ -140,7 +140,19 @@ type NodeStatus struct {
 		Healthy bool   `json:"healthy"`
 		Detail  string `json:"detail,omitempty"`
 		Model   string `json:"model,omitempty"`
+		BaseURL string `json:"base_url,omitempty"`
 	} `json:"adapter"`
+	// Brain mirrors the node's brain-pool selection: what the agent thinks
+	// with when the operator left picoclaw.model empty (mode "ollama" runs
+	// tasks on the selected backend).
+	Brain struct {
+		Enabled   bool   `json:"enabled"`
+		Model     string `json:"model,omitempty"`
+		BackendID string `json:"backend_id,omitempty"`
+		BaseURL   string `json:"base_url,omitempty"`
+		Backends  int    `json:"backends"`
+		Usable    int    `json:"usable"`
+	} `json:"brain"`
 	Security struct {
 		TrustMode        string `json:"trust_mode"`
 		RequireTaskSig   bool   `json:"require_task_signature"`
