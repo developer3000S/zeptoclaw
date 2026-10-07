@@ -56,6 +56,12 @@ ZETOMESH_DATA=./n1 ZETOMESH_INDEX=1 ZETOMESH_MESH_PORT=4002 \
 bin/zeptomesh-node status -addr http://127.0.0.1:8081
 bin/zeptomesh-node peers  -addr http://127.0.0.1:8081
 bin/zeptomesh-node submit -addr http://127.0.0.1:8081 -i "hello" -w
+# Если узел запущен с токеном админ-API (ZETOMESH_API_TOKEN в его окружении),
+# CLI должен знать имя env-переменной с ним — добавьте -token-env:
+# ZETOMESH_API_TOKEN=... bin/zeptomesh-node status -addr http://127.0.0.1:8081 \
+#   -token-env ZETOMESH_API_TOKEN
+# (или вообще без -addr: ZETOMESH_CONFIG=<путь к node.yaml> — CLI возьмёт
+#  адрес и имя токена из конфига)
 
 # Активный поиск других агентов: локальный хост + внешние источники
 bin/zeptomesh-node scan -addr http://127.0.0.1:8081
@@ -68,7 +74,36 @@ bin/zeptomesh-node brain-scan   # опросить поисковики (Shodan/
 bin/zeptomesh-node candidates   # каталог найденных эндпоинтов (инвентарь)
 bin/zeptomesh-node backends     # пул проверенных бэкендов, которыми узел думает
 bin/zeptomesh-node promote -id <candidate_id>   # проверить эндпоинт зондом и принять
+# Передать найденные эндпоинты и поисковые ключи другу (админ-API друга):
+bin/zeptomesh-node friend-promote -friend <name> -id <candidate_id>
+bin/zeptomesh-node share-keys   # отправить другу ключи из brain.keys.share_envs
+# Если узел запущен с токеном админ-API (ZETOMESH_API_TOKEN в его окружении),
+# CLI должен знать имя env-переменной с ним — добавьте -token-env:
+# ZETOMESH_API_TOKEN=... bin/zeptomesh-node candidates -addr http://127.0.0.1:8081 \
+#   -token-env ZETOMESH_API_TOKEN
+# (или вообще без -addr: ZETOMESH_CONFIG=<путь к node.yaml> — CLI возьмёт
+#  адрес и имя токена из конфига)
 ```
+
+Локальный Ollama добавляется в пул как бэкенд `local` и верифицируется тем же
+зондом (`GET /api/tags`, fallback на OpenAI-совместимый `/v1/models`).
+Например, ответ `backends` при запущенном локальном Ollama:
+
+```json
+{
+  "backends": [{
+    "id": "local", "kind": "local",
+    "base_url": "http://127.0.0.1:11434",
+    "verified": true, "reachable": true, "latency_ms": 25,
+    "models": ["qwen2.5:1.5b", "qwen3.5:0.8b", "..."]
+  }],
+  "count": 1, "enabled": true, "verified": 1
+}
+```
+
+Найденные эндпоинты также расходятся по mesh через gossip-топик
+`/zeptomesh/brain-catalog/0.1` — никакой центральной сверки, каждый узел
+верифицирует зондом сам.
 
 Полные инструкции по развёртыванию (LAN/WAN-профили, PSK, bootstrap,
 несколько экземпляров, firewall) — [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md);

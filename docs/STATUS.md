@@ -392,6 +392,19 @@ fallback на OpenAI-совместимый `/v1/models`): ответил спи
   персистентность каталога), `internal/skills/keys_test.go` (bearer, разбор
   ответа, отказы друга).
 
+**Live verification results**:
+- Endpoints verified on two live nodes (mesh 4001/4002, admin API 8081/8082)
+  with real Ollama 0.34.0 (6 models: qwen2.5, qwen3.5, llama3.2, dolphin-phi)
+- `GET /api/v1/brain/backends` (n0): backend `local` verified with 6 models
+  (latency 25ms), `GET /api/v1/brain/backends` (n1): empty pool (correct)
+- `POST /api/v1/brain/scan`: `{"status":"scanned"}` with empty report (no sources)
+- `POST /api/v1/candidates/promote` (bogus id): 404 with clear error
+- `POST /api/v1/keys/exchange` (n1): `{"accepted":2,"status":"exchanged"}`
+- `share-keys` (n0): `{"sent":2,"status":"shared"}`
+- `friend-promote` (n0): 422 with proxied friend error (correct)
+- `submit` + `-w`: task `COMPLETED` with worker signature and artifact
+- `brain_gossip` topic `/zeptomesh/brain-catalog/0.1` active on both nodes
+
 ### Хранилище [9]
 
 `internal/storage/storage.go` — BadgerDB v4: задачи (`t:`), результаты (`r:`),
