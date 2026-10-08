@@ -7,26 +7,26 @@
 # Запуск:  zeptomesh-node run -config configs/examples/wan.yaml
 #
 # Перед запуском заполните:
-#   ZETOMESH_PUB_IP  — публичный IPv4 хоста (или задайте announce literal'ом);
-#   ZETOMESH_BOOTSTRAP — не менее 1–2 публичных multiaddr действующих узлов
+#   ZEPTOMESH_PUB_IP  — публичный IPv4 хоста (или задайте announce literal'ом);
+#   ZEPTOMESH_BOOTSTRAP — не менее 1–2 публичных multiaddr действующих узлов
 #   (формат: /ip4/АДРЕС/tcp/ПОРТ/p2p/PEER_ID); их добавляет загрузчик конфига.
 #
-# Все узлы закрытой сети обязаны использовать ОДИН ZETOMESH_PSK
+# Все узлы закрытой сети обязаны использовать ОДИН ZEPTOMESH_PSK
 # (`zeptomesh-node psk` печатает значение). PSK отсекает чужие подключения на
 # уровне транспорта; подписи и trust-политика продолжают действовать поверх.
 
 node:
-  name: ${ZETOMESH_NAME:-zepto-${ZETOMESH_INDEX:-0}}
-  data_dir: ${ZETOMESH_DATA:-/var/lib/zeptomesh}/${ZETOMESH_INDEX:-0}
+  name: ${ZEPTOMESH_NAME:-zepto-${ZEPTOMESH_INDEX:-0}}
+  data_dir: ${ZEPTOMESH_DATA:-/var/lib/zeptomesh}/${ZEPTOMESH_INDEX:-0}
   listen:
-    - /ip4/0.0.0.0/tcp/${ZETOMESH_MESH_PORT:-4001}
-    - /ip4/0.0.0.0/udp/${ZETOMESH_MESH_PORT:-4001}/quic-v1
+    - /ip4/0.0.0.0/tcp/${ZEPTOMESH_MESH_PORT:-4001}
+    - /ip4/0.0.0.0/udp/${ZEPTOMESH_MESH_PORT:-4001}/quic-v1
   # Без явного анонса узел за NAT рекламирует приватные адреса, до него нельзя
   # достучаться. Укажите публичный адрес этого хоста.
   announce:
-    - /ip4/${ZETOMESH_PUB_IP:-127.0.0.1}/tcp/${ZETOMESH_MESH_PORT:-4001}
-    - /ip4/${ZETOMESH_PUB_IP:-127.0.0.1}/udp/${ZETOMESH_MESH_PORT:-4001}/quic-v1
-  private_network_psk: ${ZETOMESH_PSK:-}
+    - /ip4/${ZEPTOMESH_PUB_IP:-127.0.0.1}/tcp/${ZEPTOMESH_MESH_PORT:-4001}
+    - /ip4/${ZEPTOMESH_PUB_IP:-127.0.0.1}/udp/${ZEPTOMESH_MESH_PORT:-4001}/quic-v1
+  private_network_psk: ${ZEPTOMESH_PSK:-}
   # Circuit relay v2 (ТЗ 6.3.3.4).
   # enabled=true — узел сам пользуется реле, когда до соседа нет прямого пути;
   # advertise_as_relay=true — узел разрешает транзит ЧУЖИХ соединений и тратит
@@ -37,7 +37,7 @@ node:
     advertise_as_relay: false
     # Явные реле предпочтительнее поиска; пусто → кандидаты из DHT.
     static_relays:
-      - ${ZETOMESH_RELAY_1:-}
+      - ${ZEPTOMESH_RELAY_1:-}
     limit:
       max_reservations: 64
       max_circuits: 8
@@ -54,7 +54,7 @@ discovery:
   mdns: false                   # в WAN broadcast недоступен
   mdns_service_name: _zeptomesh._udp
   # Точки входа заполняются через env (config.applyEnvOverrides дописывает
-  # ZETOMESH_BOOTSTRAP в этот список). 2–3 независимых узла = устойчивый вход.
+  # ZEPTOMESH_BOOTSTRAP в этот список). 2–3 независимых узла = устойчивый вход.
   bootstrap: []
   dht: true
   dht_mode: server              # WAN-узлы держат DHT-таблицу для остальных
@@ -64,9 +64,9 @@ discovery:
   # выключен по умолчанию. В WAN обзор опирается на DHT/bootstrap/peer-exchange,
   # а subnet_scan бессмысленен за NAT: перебирать пришлось бы чужие /24.
   scan:
-    enabled: ${ZETOMESH_SCAN_ENABLED:-false}
+    enabled: ${ZEPTOMESH_SCAN_ENABLED:-false}
     interval: 30m               # реже: внешние поискы дороже по трафику
-    subnet_scan: ${ZETOMESH_SCAN_SUBNET:-false}
+    subnet_scan: ${ZEPTOMESH_SCAN_SUBNET:-false}
     dial_timeout: 8s            # WAN-RTT выше
     timeout: 60s
     max_candidates: 64
@@ -139,16 +139,16 @@ capabilities:
     persist: true
 
 picoclaw:
-  mode: ${ZETOMESH_PICO_MODE:-stub}
-  binary: ${ZETOMESH_PICO_BIN:-picoclaw}
-  config: ${ZETOMESH_PICO_CONFIG:-}
+  mode: ${ZEPTOMESH_PICO_MODE:-stub}
+  binary: ${ZEPTOMESH_PICO_BIN:-picoclaw}
+  config: ${ZEPTOMESH_PICO_CONFIG:-}
   timeout_seconds: 600
   max_concurrent_agents: 4
   extra_args: []
   prompt_template: ""
   env: {}
   http:
-    base_url: ${ZETOMESH_PICO_WS_URL:-http://127.0.0.1:18790}
+    base_url: ${ZEPTOMESH_PICO_WS_URL:-http://127.0.0.1:18790}
     path: /pico/ws
     health_path: /health
     token_env: PICOCLAW_MESH_PICO_TOKEN
@@ -159,13 +159,13 @@ picoclaw:
 
 security:
   # limited + явные списки: в WAN принимайте задачи только от известных узлов.
-  trust_mode: ${ZETOMESH_TRUST_MODE:-limited}
+  trust_mode: ${ZEPTOMESH_TRUST_MODE:-limited}
   require_task_signature: true
   drop_invalid_signatures: true
   min_trust_for_tasks: known
   # base58 peer id, по одному на строку; # — комментарий.
-  allowed_peers_file: ${ZETOMESH_ALLOWED_PEERS:-/etc/zeptomesh/allowed_peers.txt}
-  blocked_peers_file: ${ZETOMESH_BLOCKED_PEERS:-/etc/zeptomesh/blocked_peers.txt}
+  allowed_peers_file: ${ZEPTOMESH_ALLOWED_PEERS:-/etc/zeptomesh/allowed_peers.txt}
+  blocked_peers_file: ${ZEPTOMESH_BLOCKED_PEERS:-/etc/zeptomesh/blocked_peers.txt}
   max_message_bytes: 4194304
   rate_limit:
     requests_per_second: 10     # из Интернета — строже
@@ -175,16 +175,16 @@ api:
   enabled: true
   # Никогда не поднимайте API на 0.0.0.0 без токена; локальный доступ + SSH —
   # штатный путь администрирования удалённого узла.
-  listen: ${ZETOMESH_API_HOST:-127.0.0.1}:${ZETOMESH_API_PORT:-8081}
-  auth_token_env: ZETOMESH_API_TOKEN
+  listen: ${ZEPTOMESH_API_HOST:-127.0.0.1}:${ZEPTOMESH_API_PORT:-8081}
+  auth_token_env: ZEPTOMESH_API_TOKEN
   read_timeout: 15s
   write_timeout: 600s
 
 telemetry:
   # Скрейпит тот же Prometheus, что и остальные узлы; при необходимости —
   # обратный SSH-туннель вместо публичного порта.
-  prometheus_listen: ${ZETOMESH_PROM_LISTEN:-127.0.0.1:9464}
-  log_level: ${ZETOMESH_LOG_LEVEL:-info}
+  prometheus_listen: ${ZEPTOMESH_PROM_LISTEN:-127.0.0.1:9464}
+  log_level: ${ZEPTOMESH_LOG_LEVEL:-info}
   structured_logs: true
 
 storage:

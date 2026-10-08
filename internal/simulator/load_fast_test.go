@@ -445,7 +445,7 @@ func TestSeedChangesTheMesh(t *testing.T) {
 // asserts the claim at every one of them. Under -short only the base size runs, which is
 // what keeps make ci's fast suite in the seconds.
 //
-// Override the list with ZETOMESH_SIM_SYNC_NODES to repeat the comparison elsewhere.
+// Override the list with ZEPTOMESH_SIM_SYNC_NODES to repeat the comparison elsewhere.
 func TestFullSyncAnalyticVersusExactFlood(t *testing.T) {
 	for _, n := range floodSweepSizes() {
 		n := n
@@ -482,9 +482,9 @@ func TestFullSyncAnalyticVersusExactFlood(t *testing.T) {
 // reading is the cheap one and is all the fast suite can afford: an exact flood walk costs
 // Θ(N²) deliveries per beat, measured here at 1.2 s for 60 nodes and 103 s for 300. The
 // wider sweep — the one that shows the error growing with the mesh — belongs to the tagged
-// load run, whose boundarySizes default to 60,150,300. ZETOMESH_SIM_SYNC_NODES widens either.
+// load run, whose boundarySizes default to 60,150,300. ZEPTOMESH_SIM_SYNC_NODES widens either.
 func floodSweepSizes() []int {
-	if v := strings.TrimSpace(os.Getenv("ZETOMESH_SIM_SYNC_NODES")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("ZEPTOMESH_SIM_SYNC_NODES")); v != "" {
 		var out []int
 		for _, part := range strings.Split(v, ",") {
 			n, err := strconv.Atoi(strings.TrimSpace(part))

@@ -10,16 +10,16 @@
 # поэтому файл пригоден и как шаблон для нескольких экземпляров.
 
 node:
-  name: ${ZETOMESH_NAME:-zepto-${ZETOMESH_INDEX:-0}}
-  data_dir: ${ZETOMESH_DATA:-/var/lib/zeptomesh}/${ZETOMESH_INDEX:-0}
+  name: ${ZEPTOMESH_NAME:-zepto-${ZEPTOMESH_INDEX:-0}}
+  data_dir: ${ZEPTOMESH_DATA:-/var/lib/zeptomesh}/${ZEPTOMESH_INDEX:-0}
   listen:
-    - /ip4/0.0.0.0/tcp/${ZETOMESH_MESH_PORT:-4001}
-    - /ip4/0.0.0.0/udp/${ZETOMESH_MESH_PORT:-4001}/quic-v1
+    - /ip4/0.0.0.0/tcp/${ZEPTOMESH_MESH_PORT:-4001}
+    - /ip4/0.0.0.0/udp/${ZEPTOMESH_MESH_PORT:-4001}/quic-v1
   # В LAN публичный адрес не фиксируем: libp2p сам анонсирует адреса интерфейсов,
   # и они корректны для соседей по подсети.
   announce: []
   # Закрытая сеть по PSK необязательна: в доверенной LAN достаточно trust-политики.
-  private_network_psk: ${ZETOMESH_PSK:-}
+  private_network_psk: ${ZEPTOMESH_PSK:-}
 
 identity:
   # пусто → <data_dir>/keys/peer.key
@@ -40,9 +40,9 @@ discovery:
   # раз полезен: перебирает TCP-порты mesh локальной /24 и находит узлы,
   # которых mDNS и реестр не увидели.
   scan:
-    enabled: ${ZETOMESH_SCAN_ENABLED:-false}
+    enabled: ${ZEPTOMESH_SCAN_ENABLED:-false}
     interval: 15m
-    subnet_scan: ${ZETOMESH_SCAN_SUBNET:-true}
+    subnet_scan: ${ZEPTOMESH_SCAN_SUBNET:-true}
     dial_timeout: 6s
     timeout: 45s
     max_candidates: 64
@@ -114,16 +114,16 @@ capabilities:
     persist: true         # <data_dir>/skills.json, часы версий переживают рестарт
 
 picoclaw:
-  mode: ${ZETOMESH_PICO_MODE:-stub}
-  binary: ${ZETOMESH_PICO_BIN:-picoclaw}
-  config: ${ZETOMESH_PICO_CONFIG:-}
+  mode: ${ZEPTOMESH_PICO_MODE:-stub}
+  binary: ${ZEPTOMESH_PICO_BIN:-picoclaw}
+  config: ${ZEPTOMESH_PICO_CONFIG:-}
   timeout_seconds: 600
   max_concurrent_agents: 4
   extra_args: []
   prompt_template: ""
   env: {}
   http:
-    base_url: ${ZETOMESH_PICO_WS_URL:-http://127.0.0.1:18790}
+    base_url: ${ZEPTOMESH_PICO_WS_URL:-http://127.0.0.1:18790}
     path: /pico/ws
     health_path: /health
     token_env: PICOCLAW_MESH_PICO_TOKEN
@@ -135,12 +135,12 @@ picoclaw:
 security:
   # limited: подписанные задачи принимаются от известных пиров; списки пиров —
   # по желанию оператора.
-  trust_mode: ${ZETOMESH_TRUST_MODE:-limited}
+  trust_mode: ${ZEPTOMESH_TRUST_MODE:-limited}
   require_task_signature: true
   drop_invalid_signatures: true
   min_trust_for_tasks: known
-  allowed_peers_file: ${ZETOMESH_ALLOWED_PEERS:-}
-  blocked_peers_file: ${ZETOMESH_BLOCKED_PEERS:-}
+  allowed_peers_file: ${ZEPTOMESH_ALLOWED_PEERS:-}
+  blocked_peers_file: ${ZEPTOMESH_BLOCKED_PEERS:-}
   max_message_bytes: 4194304
   rate_limit:
     requests_per_second: 50     # в LAN лимит выше: сеть быстрая, узлы свои
@@ -148,14 +148,14 @@ security:
 
 api:
   enabled: true
-  listen: ${ZETOMESH_API_HOST:-127.0.0.1}:${ZETOMESH_API_PORT:-8081}
-  auth_token_env: ZETOMESH_API_TOKEN
+  listen: ${ZEPTOMESH_API_HOST:-127.0.0.1}:${ZEPTOMESH_API_PORT:-8081}
+  auth_token_env: ZEPTOMESH_API_TOKEN
   read_timeout: 15s
   write_timeout: 600s
 
 telemetry:
-  prometheus_listen: ${ZETOMESH_PROM_LISTEN:-127.0.0.1:9464}
-  log_level: ${ZETOMESH_LOG_LEVEL:-info}
+  prometheus_listen: ${ZEPTOMESH_PROM_LISTEN:-127.0.0.1:9464}
+  log_level: ${ZEPTOMESH_LOG_LEVEL:-info}
   structured_logs: true
 
 storage:

@@ -70,17 +70,17 @@ gen_cfg() {
     fi
     mkdir -p "$dir"
     sed \
-        -e "s|name: dev-\${ZETOMESH_INDEX:-0}|name: acc-$idx|" \
-        -e "s|data_dir: \${ZETOMESH_DATA:-.dev/cluster}/\${ZETOMESH_INDEX:-0}|data_dir: $dir|" \
-        -e "s|/tcp/\${ZETOMESH_MESH_PORT:-4101}|/tcp/$mesh|" \
+        -e "s|name: dev-\${ZEPTOMESH_INDEX:-0}|name: acc-$idx|" \
+        -e "s|data_dir: \${ZEPTOMESH_DATA:-.dev/cluster}/\${ZEPTOMESH_INDEX:-0}|data_dir: $dir|" \
+        -e "s|/tcp/\${ZEPTOMESH_MESH_PORT:-4101}|/tcp/$mesh|" \
         -e "s|local_registry: true|local_registry: $( [[ $sockgrp == manual ]] && echo false || echo true )|" \
-        -e "s|local_socket_dir: \${ZETOMESH_DATA:-.dev/cluster}/shared|local_socket_dir: $DATA/sock-$sockgrp|" \
-        -e "s|bootstrap: \[\${ZETOMESH_BOOTSTRAP:-}\]|bootstrap: $boot|" \
-        -e "s|skills: \[\${ZETOMESH_SKILL:-general}\]|skills: [$(echo "$skills" | sed 's/,/, /g')]|" \
+        -e "s|local_socket_dir: \${ZEPTOMESH_DATA:-.dev/cluster}/shared|local_socket_dir: $DATA/sock-$sockgrp|" \
+        -e "s|bootstrap: \[\${ZEPTOMESH_BOOTSTRAP:-}\]|bootstrap: $boot|" \
+        -e "s|skills: \[\${ZEPTOMESH_SKILL:-general}\]|skills: [$(echo "$skills" | sed 's/,/, /g')]|" \
         -e "s|accept_external_tasks: true|accept_external_tasks: $accept|" \
-        -e "s|name: \${ZETOMESH_SKILL:-general}|name: $(echo "$skills" | cut -d, -f1)|" \
-        -e "s|listen: 127.0.0.1:\${ZETOMESH_API_PORT:-8101}|listen: 127.0.0.1:$api|" \
-        -e "s|prometheus_listen: 127.0.0.1:\${ZETOMESH_PROM_PORT:-9564}|prometheus_listen: 127.0.0.1:$prom|" \
+        -e "s|name: \${ZEPTOMESH_SKILL:-general}|name: $(echo "$skills" | cut -d, -f1)|" \
+        -e "s|listen: 127.0.0.1:\${ZEPTOMESH_API_PORT:-8101}|listen: 127.0.0.1:$api|" \
+        -e "s|prometheus_listen: 127.0.0.1:\${ZEPTOMESH_PROM_PORT:-9564}|prometheus_listen: 127.0.0.1:$prom|" \
         "$TPL" > "$dir/node.yaml"
     if [[ $gossip == off ]]; then
         sed -i '/^  gossip:/,/failure_timeout:/{s/^    enabled: true/    enabled: false/}' "$dir/node.yaml"
@@ -348,8 +348,8 @@ E6() {
     gen_cfg 1 "coding" e6a true on
     local pskA pskB
     pskA="$("$BIN" psk)"; pskB="$("$BIN" psk)"
-    sed -i "s|private_network_psk: \${ZETOMESH_PSK:-}|private_network_psk: $pskA|" "$DATA/node-0/node.yaml"
-    sed -i "s|private_network_psk: \${ZETOMESH_PSK:-}|private_network_psk: $pskB|" "$DATA/node-1/node.yaml"
+    sed -i "s|private_network_psk: \${ZEPTOMESH_PSK:-}|private_network_psk: $pskA|" "$DATA/node-0/node.yaml"
+    sed -i "s|private_network_psk: \${ZEPTOMESH_PSK:-}|private_network_psk: $pskB|" "$DATA/node-1/node.yaml"
     node_up 0; node_up 1
     wait_api 0 && wait_api 1 || { bad "PSK-пара не поднялась"; return; }
     sleep 8
@@ -366,7 +366,7 @@ E6() {
     rm -f "$DATA"/sock-e6a/*.sock 2>/dev/null
     # (b) API за bearer-токеном; секрет не в логах.
     gen_cfg 0 "research" e6b true on
-    node_up 0 ZETOMESH_API_TOKEN="super-secret-token-42"
+    node_up 0 ZEPTOMESH_API_TOKEN="super-secret-token-42"
     wait_api 0 || { bad "узел с токеном не поднялся"; return; }
     local code
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://$(api 0)/api/v1/status")"

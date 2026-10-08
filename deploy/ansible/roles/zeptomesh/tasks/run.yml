@@ -121,7 +121,7 @@
       Контейнер '{{ item.container }}' не работает (статус:
       {{ (info.State | default({})).Status | default('контейнер не создан') }}).
       Типичные причины: занят порт {{ item.mesh_port }}/{{ item.api_port }},
-      некорректная конфигурация (например ZETOMESH_BOOTSTRAP без /p2p/ или
+      некорректная конфигурация (например ZEPTOMESH_BOOTSTRAP без /p2p/ или
       неверный PSK), недоступен образ. Диагностика:
       docker logs {{ item.container }}
     quiet: true

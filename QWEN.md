@@ -140,7 +140,7 @@ docker run --rm -v "$PWD":/src -w /src golang:1.26 bash -c 'go test ./...'
 
 - **Config** is YAML, loaded by `config.Load`: `config.Default()` → `${VAR}` /
   `${VAR:-default}` expansion (incl. nested defaults) → YAML → env overrides
-  (`ZETOMESH_BOOTSTRAP` appends to `discovery.bootstrap`) → `Validate()`.
+  (`ZEPTOMESH_BOOTSTRAP` appends to `discovery.bootstrap`) → `Validate()`.
   Secrets are never written into config files; they come from env (bearer
   tokens named via `auth_token_env`, `token_env`, etc.).
 - **Signatures / canonical encoding**: do not bypass `internal/wire` — the
@@ -192,14 +192,14 @@ the browser, and the BFF merges multiple nodes into one graph.
 
   | Env | Default |
   |---|---|
-  | `ZETOMESH_UI_LISTEN` | `127.0.0.1:28090` |
-  | `ZETOMESH_UI_NODES` | empty (seed list) |
-  | `ZETOMESH_UI_NODES_FILE` | `<data>/nodes.json` (persistent, editable from UI) |
-  | `ZETOMESH_UI_TOKEN` | empty (this UI's own auth) |
-  | `ZETOMESH_UI_API_TOKEN` | empty (bearer for nodes lacking their own) |
-  | `ZETOMESH_UI_POLL_INTERVAL` | `5s` |
-  | `ZETOMESH_UI_DATA` | `./zeptomesh-ui-data` |
-  | `ZETOMESH_UI_LOG_LEVEL` | `info` |
+  | `ZEPTOMESH_UI_LISTEN` | `127.0.0.1:28090` |
+  | `ZEPTOMESH_UI_NODES` | empty (seed list) |
+  | `ZEPTOMESH_UI_NODES_FILE` | `<data>/nodes.json` (persistent, editable from UI) |
+  | `ZEPTOMESH_UI_TOKEN` | empty (this UI's own auth) |
+  | `ZEPTOMESH_UI_API_TOKEN` | empty (bearer for nodes lacking their own) |
+  | `ZEPTOMESH_UI_POLL_INTERVAL` | `5s` |
+  | `ZEPTOMESH_UI_DATA` | `./zeptomesh-ui-data` |
+  | `ZEPTOMESH_UI_LOG_LEVEL` | `info` |
 
 - **Default dashboard port is 28090** (mesh port 4001, admin API 8081, Prom metrics 9464).
 - Backend API: `GET /healthz` (HEALTHCHECK), `GET /api/v1/mesh` (cached network snapshot),
@@ -237,7 +237,7 @@ the browser, and the BFF merges multiple nodes into one graph.
 
 - `install.sh` — agents: local (systemd, user or system units) or Docker; N instances
   numbered from 0. Ports: mesh base `4001`, API base `8081`, Prom base `9464`; random free
-  5-digit ports by default (or sequential from `ZETOMESH_BASE_*`). Supports `--nodes`,
+  5-digit ports by default (or sequential from `ZEPTOMESH_BASE_*`). Supports `--nodes`,
   `--mode`, `--yes`, `status|start|stop|uninstall`.
 - `install-ui.sh` — dashboard (see UI section above).
 - `update.sh` — updates from the repo (short wrapper; check its contents before relying on it).
@@ -253,9 +253,9 @@ the browser, and the BFF merges multiple nodes into one graph.
 ```bash
 go build -trimpath -o bin/ ./cmd/zeptomesh-node
 bin/zeptomesh-node genkey --out ./n0/keys/peer.key   # and the same for ./n1
-ZETOMESH_DATA=./n0 ZETOMESH_INDEX=0 bin/zeptomesh-node run -config configs/node.yaml &
-ZETOMESH_DATA=./n1 ZETOMESH_INDEX=1 ZETOMESH_MESH_PORT=4002 \
-  ZETOMESH_API_PORT=8082 ZETOMESH_PROM_LISTEN=127.0.0.1:9465 \
+ZEPTOMESH_DATA=./n0 ZEPTOMESH_INDEX=0 bin/zeptomesh-node run -config configs/node.yaml &
+ZEPTOMESH_DATA=./n1 ZEPTOMESH_INDEX=1 ZEPTOMESH_MESH_PORT=4002 \
+  ZEPTOMESH_API_PORT=8082 ZEPTOMESH_PROM_LISTEN=127.0.0.1:9465 \
   bin/zeptomesh-node run -config configs/node.yaml &
 
 bin/zeptomesh-node status  -addr http://127.0.0.1:8081

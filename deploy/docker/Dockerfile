@@ -60,16 +60,16 @@ VOLUME ["/var/lib/zeptomesh"]
 # The config loader expands ${VAR:-default} itself (internal/config.expandEnv),
 # so this template drives every instance: change the env, not the file.
 #
-# ZETOMESH_API_HOST must be 0.0.0.0 here, unlike a bare-metal install: Docker
+# ZEPTOMESH_API_HOST must be 0.0.0.0 here, unlike a bare-metal install: Docker
 # publishes a port by connecting to the container's routable address, so an API
 # bound to 127.0.0.1 inside the netns would be unreachable from the host.
-ENV ZETOMESH_DATA=/var/lib/zeptomesh \
-    ZETOMESH_CONFIG=/etc/zeptomesh/node.yaml \
-    ZETOMESH_API_HOST=0.0.0.0 \
-    ZETOMESH_MESH_PORT=4001 \
-    ZETOMESH_API_PORT=8081 \
-    ZETOMESH_PROM_PORT=9464 \
-    ZETOMESH_PICO_MODE=stub \
+ENV ZEPTOMESH_DATA=/var/lib/zeptomesh \
+    ZEPTOMESH_CONFIG=/etc/zeptomesh/node.yaml \
+    ZEPTOMESH_API_HOST=0.0.0.0 \
+    ZEPTOMESH_MESH_PORT=4001 \
+    ZEPTOMESH_API_PORT=8081 \
+    ZEPTOMESH_PROM_PORT=9464 \
+    ZEPTOMESH_PICO_MODE=stub \
     TZ=UTC
 
 USER zeptomesh
@@ -79,7 +79,7 @@ WORKDIR /var/lib/zeptomesh
 EXPOSE 4001/tcp 4001/udp 8081/tcp 9464/tcp
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:${ZETOMESH_API_PORT:-8081}/healthz" || exit 1
+  CMD curl -fsS "http://127.0.0.1:${ZEPTOMESH_API_PORT:-8081}/healthz" || exit 1
 
 ENTRYPOINT ["/usr/local/bin/zeptomesh-node"]
 CMD ["run"]

@@ -8,7 +8,7 @@
 #                        узел сам себе анонсирует, уже с суффиксом /p2p/<peer id>.
 #
 # Берутся addrs, а не «IP хоста + порт»: при wan-профиле там announce из
-# ZETOMESH_PUB_IP, при lan-профиле — адрес интерфейса; в обоих случаях это то,
+# ZEPTOMESH_PUB_IP, при lan-профиле — адрес интерфейса; в обоих случаях это то,
 # по чему узел реально отвечает соседям. Если анонса нет вовсе — адрес
 # синтезируется из zeptomesh_pub_ip, и источник помечен как «synthesized»,
 # чтобы оператор видел разницу.
@@ -17,9 +17,9 @@
 #   <группа>.peerids.yml   — {хост: {экземпляр: [multiaddr,…]}}; формат годится
 #                            для include_vars, его читает tasks/preflight.yml
 #                            (zeptomesh_auto_bootstrap) и он же — значение
-#                            ZETOMESH_BOOTSTRAP для следующей партии узлов
+#                            ZEPTOMESH_BOOTSTRAP для следующей партии узлов
 #   <группа>.bootstrap.txt — те же адреса одной строкой через запятую — прямое
-#                            значение ZETOMESH_BOOTSTRAP / discovery.bootstrap
+#                            значение ZEPTOMESH_BOOTSTRAP / discovery.bootstrap
 #   <группа>.peerids.csv   — человекочитаемо: хост, экземпляр, peer id, адреса
 
 - name: Peer ID | Проверить, что есть данные здоровья
@@ -231,7 +231,7 @@
   check_mode: false
   when: not ansible_check_mode
 
-- name: Артефакт | Записать bootstrap.txt — прямое значение ZETOMESH_BOOTSTRAP
+- name: Артефакт | Записать bootstrap.txt — прямое значение ZEPTOMESH_BOOTSTRAP
   ansible.builtin.template:
     src: bootstrap.txt.j2
     dest: "{{ zeptomesh_artifact_dir }}/{{ zeptomesh_host_group }}.bootstrap.txt"

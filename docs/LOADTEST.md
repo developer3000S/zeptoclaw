@@ -35,9 +35,9 @@ go test -count=1 ./internal/simulator/...
 ```
 
 Настройки прогона — переменные окружения (значения по умолчанию совпадают с
-таблицей ниже): `ZETOMESH_SIM_SIZES`, `ZETOMESH_SIM_STEPS` (`idle:active:failure`
-в heartbeat), `ZETOMESH_SIM_SEED`, `ZETOMESH_SIM_CRASH`, `ZETOMESH_SIM_REPORT`,
-`ZETOMESH_SIM_SYNC_NODES` (размеры сети для замера границы модели, §«Границы»).
+таблицей ниже): `ZEPTOMESH_SIM_SIZES`, `ZEPTOMESH_SIM_STEPS` (`idle:active:failure`
+в heartbeat), `ZEPTOMESH_SIM_SEED`, `ZEPTOMESH_SIM_CRASH`, `ZEPTOMESH_SIM_REPORT`,
+`ZEPTOMESH_SIM_SYNC_NODES` (размеры сети для замера границы модели, §«Границы»).
 
 ## Машина
 

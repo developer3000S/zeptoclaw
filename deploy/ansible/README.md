@@ -44,7 +44,7 @@ ansible-playbook -i inventory.yml deploy.yml --ask-vault-pass \
 # 5. Собрать их Peer ID -> артефакт на контроллере.
 ansible-playbook -i inventory.yml collect_peerids.yml --ask-vault-pass \
     --limit anchors
-cat collected/mesh_nodes.bootstrap.txt      # готовое значение ZETOMESH_BOOTSTRAP
+cat collected/mesh_nodes.bootstrap.txt      # готовое значение ZEPTOMESH_BOOTSTRAP
 
 # 6. Остальные узлы: роль подставит точки входа сама (zeptomesh_auto_bootstrap).
 ansible-playbook -i inventory.yml deploy.yml --ask-vault-pass \
@@ -126,7 +126,7 @@ roles/zeptomesh/
 └── templates/
     ├── instance.env.j2       # окружение экземпляра (PSK/токены, 0600)
     ├── peerids.yml.j2        # артефакт: {хост: {экземпляр: [multiaddr]}}
-    ├── bootstrap.txt.j2      # артефакт: одна строка — ZETOMESH_BOOTSTRAP
+    ├── bootstrap.txt.j2      # артефакт: одна строка — ZEPTOMESH_BOOTSTRAP
     └── peerids.csv.j2        # артефакт: человекочитаемые детали
 ```
 
@@ -154,7 +154,7 @@ roles/zeptomesh/
 
 Один параметризованный `node.yaml` обслуживает все N узлов хоста: узел сам
 раскрывает `${VAR:-default}` (`internal/config.expandEnv`) и дописывает
-`ZETOMESH_BOOTSTRAP` в `discovery.bootstrap` (`config.applyEnvOverrides`), так
+`ZEPTOMESH_BOOTSTRAP` в `discovery.bootstrap` (`config.applyEnvOverrides`), так
 что отличия экземпляров живут в env-файлах, а не в копиях конфигурации.
 
 Артефакты в `collected/` (по одному на группу, перезаписываются полным
@@ -162,7 +162,7 @@ roles/zeptomesh/
 
 ```
 collected/mesh_nodes.peerids.yml     # роль читает его обратно (автоbootstrap)
-collected/mesh_nodes.bootstrap.txt   # одна строка = значение ZETOMESH_BOOTSTRAP
+collected/mesh_nodes.bootstrap.txt   # одна строка = значение ZEPTOMESH_BOOTSTRAP
 collected/mesh_nodes.peerids.csv     # хост, экземпляр, peer id, источник, адреса
 ```
 
@@ -289,7 +289,7 @@ zeptomesh-node: node: bootstrap: discovery: bad bootstrap addrs:
 `/api/v1/status` работающей группы и пишет `collected/<группа>.bootstrap.txt` —
 готовые полные адреса. Тот же путь прошли `install.sh` (режим docker: якорь
 поднимается отдельно, его реальный peer ID подставляется остальным) и
-статичный `deploy/docker/docker-compose.yml` (адрес берётся из `ZETOMESH_ANCHOR`;
+статичный `deploy/docker/docker-compose.yml` (адрес берётся из `ZEPTOMESH_ANCHOR`;
 пусто → узлы сходятся через DHT/PEX). Preflight роли отлавливает битые адреса
 до развёртывания, поэтому Ansible-путь не даст поднять сеть с нерабочими
 точками входа.
@@ -351,7 +351,7 @@ SELinux). Вложенные каталоги (`keys/`, `db/`, `run/`, `workspac
   `GET /api/v1/status` (в том числе наличие `/p2p-circuit` и quic-v1 в
   `addrs`, поведение 401 без токена);
 - что узел действительно принимает собранные адреса как
-  `ZETOMESH_BOOTSTRAP` (включая `/p2p-circuit` и `quic-v1`) и что адрес без
+  `ZEPTOMESH_BOOTSTRAP` (включая `/p2p-circuit` и `quic-v1`) и что адрес без
   `/p2p/` отбивает старт — отсюда проверка формата на preflight.
 
 Что осталось непроверенным:

@@ -256,7 +256,7 @@ func TestBrain_ShareableKeys(t *testing.T) {
 func TestBrain_FriendOperations(t *testing.T) {
 	ollama := testOllama(t, "qwen2.5:7b")
 	n := testBrainNode(t, ollama)
-	t.Setenv("ZETOMESH_TEST_FRIEND_TOKEN", "friend-secret")
+	t.Setenv("ZEPTOMESH_TEST_FRIEND_TOKEN", "friend-secret")
 
 	// The friend: an admin API that records what it was handed.
 	var seen map[string]string
@@ -274,7 +274,7 @@ func TestBrain_FriendOperations(t *testing.T) {
 	t.Cleanup(friend.Close)
 
 	n.Cfg.Brain.Friends = []config.BrainFriendConfig{{
-		Name: "gpu-friend", AdminURL: friend.URL, TokenEnv: "ZETOMESH_TEST_FRIEND_TOKEN",
+		Name: "gpu-friend", AdminURL: friend.URL, TokenEnv: "ZEPTOMESH_TEST_FRIEND_TOKEN",
 	}}
 	ctx := context.Background()
 	if err := n.PromoteOnFriend(ctx, "gpu-friend", "cnd_abcd", "relay"); err != nil {
@@ -303,7 +303,7 @@ func TestBrain_ShareKeysWithFriend(t *testing.T) {
 	n := testBrainNode(t, ollama)
 	t.Setenv("SHODAN_API_KEY", "my-shodan")
 	n.Cfg.Brain.Keys.ShareEnvs = []string{"SHODAN_API_KEY"}
-	t.Setenv("ZETOMESH_TEST_FRIEND_TOKEN", "friend-secret")
+	t.Setenv("ZEPTOMESH_TEST_FRIEND_TOKEN", "friend-secret")
 
 	var got map[string]string
 	friend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -317,7 +317,7 @@ func TestBrain_ShareKeysWithFriend(t *testing.T) {
 	}))
 	t.Cleanup(friend.Close)
 	n.Cfg.Brain.Friends = []config.BrainFriendConfig{{
-		Name: "gpu-friend", AdminURL: friend.URL, TokenEnv: "ZETOMESH_TEST_FRIEND_TOKEN",
+		Name: "gpu-friend", AdminURL: friend.URL, TokenEnv: "ZEPTOMESH_TEST_FRIEND_TOKEN",
 	}}
 
 	sent, err := n.ShareKeysWithFriend(context.Background(), "gpu-friend")

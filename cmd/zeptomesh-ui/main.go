@@ -3,7 +3,7 @@
 // into one network graph, serves the embedded web UI and proxies operator
 // actions back to a chosen node.
 //
-//	ZETOMESH_UI_NODES=http://zepto-0:8081 ./bin/zeptomesh-ui
+//	ZEPTOMESH_UI_NODES=http://zepto-0:8081 ./bin/zeptomesh-ui
 //
 // It is deliberately a separate binary and image from the agent: installing it
 // touches no agent configuration (see install-ui.sh).
@@ -63,14 +63,14 @@ const usage = `zeptomesh-ui — ZeptoClaw mesh dashboard backend
 
 Configuration is entirely environmental (like the agent):
 
-  ZETOMESH_UI_LISTEN        listen address        (default 127.0.0.1:28090)
-  ZETOMESH_UI_NODES         comma-separated agent admin API URLs (seed list)
-  ZETOMESH_UI_NODES_FILE    persistent node list  (default <data>/nodes.json)
-  ZETOMESH_UI_TOKEN         access token for this UI's own API (default: none)
-  ZETOMESH_UI_API_TOKEN     bearer used for nodes without their own token
-  ZETOMESH_UI_POLL_INTERVAL node poll interval    (default 5s)
-  ZETOMESH_UI_DATA          data directory        (default ./zeptomesh-ui-data)
-  ZETOMESH_UI_LOG_LEVEL     trace|debug|info|warn|error (default info)
+  ZEPTOMESH_UI_LISTEN        listen address        (default 127.0.0.1:28090)
+  ZEPTOMESH_UI_NODES         comma-separated agent admin API URLs (seed list)
+  ZEPTOMESH_UI_NODES_FILE    persistent node list  (default <data>/nodes.json)
+  ZEPTOMESH_UI_TOKEN         access token for this UI's own API (default: none)
+  ZEPTOMESH_UI_API_TOKEN     bearer used for nodes without their own token
+  ZEPTOMESH_UI_POLL_INTERVAL node poll interval    (default 5s)
+  ZEPTOMESH_UI_DATA          data directory        (default ./zeptomesh-ui-data)
+  ZEPTOMESH_UI_LOG_LEVEL     trace|debug|info|warn|error (default info)
 
 See docs/UI.md for the full specification and install-ui.sh for the Docker path.
 `

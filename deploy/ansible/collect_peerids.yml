@@ -16,7 +16,7 @@
 # Артефакты на контроллере в collected/:
 #   mesh_nodes.peerids.yml     — {хост: {экземпляр: [multiaddr,…]}}; роль читает
 #                                его через include_vars (zeptomesh_auto_bootstrap)
-#   mesh_nodes.bootstrap.txt   — одна строка через запятую = ZETOMESH_BOOTSTRAP
+#   mesh_nodes.bootstrap.txt   — одна строка через запятую = ZEPTOMESH_BOOTSTRAP
 #   mesh_nodes.peerids.csv     — хост, экземпляр, peer id, источник адреса
 #
 # Запуск:

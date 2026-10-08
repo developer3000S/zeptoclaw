@@ -111,7 +111,7 @@ func newFabric(t *testing.T, manual bool) *mesh {
 	return &mesh{
 		t:        t,
 		shared:   shared,
-		verbose:  os.Getenv("ZETOMESH_TEST_VERBOSE") != "",
+		verbose:  os.Getenv("ZEPTOMESH_TEST_VERBOSE") != "",
 		skipDisc: manual,
 	}
 }

@@ -81,7 +81,7 @@ zeptomesh-node leave   -addr …            # штатный уход узла (
 zeptomesh-node rotate  -addr … -reason "…" # плановая смена ключа (§4.5)
 zeptomesh-node revoke  -addr … -reason "…" # аварийный отзыв идентичности (§4.6)
 zeptomesh-node rebinds -addr …            # журнал принятых переходов/отзывов
-# при заданном api.auth_token_env добавьте -token-env ZETOMESH_API_TOKEN
+# при заданном api.auth_token_env добавьте -token-env ZEPTOMESH_API_TOKEN
 ```
 
 `-subtask '<skills>|<instruction>'` — пункт плана декомпозиции (повторяемый);
@@ -373,7 +373,7 @@ docker run -d --name jaeger -p 4318:4318 -p 16686:16686 \
    - **битый ключ** (`security: … key`) → ключ `$DATA_DIR/<i>/keys/peer.key`
      повреждён: восстановить из бэкапа (§5), иначе узел потеряет идентичность;
    - **битый конфиг** (`config: parse/invalid …`) → правка шаблона/ENV;
-     проверить `ZETOMESH_*` из `instance.env`;
+     проверить `ZEPTOMESH_*` из `instance.env`;
    - **BadgerDB залочен** (`failed to acquire lock`) → второй процесс с тем же
      `db/` (ручной запуск поверх systemd-экземпляра). Убить процесс-двойник.
 
@@ -383,7 +383,7 @@ docker run -d --name jaeger -p 4318:4318 -p 16686:16686 \
 ss -ltnup | grep -E ':(4001|4002|8081|9464)\b'
 ```
 
-Решение: сдвинуть базы (`ZETOMESH_BASE_MESH_PORT`, `…_API_PORT`, `…_PROM_PORT`
+Решение: сдвинуть базы (`ZEPTOMESH_BASE_MESH_PORT`, `…_API_PORT`, `…_PROM_PORT`
 в `install.sh`), либо пересоздать юниты. порты экземпляров считаются от базы,
 см. DEPLOYMENT §3.
 

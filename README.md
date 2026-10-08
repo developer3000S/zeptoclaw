@@ -47,20 +47,20 @@
 export PATH=$PATH:/usr/local/go/bin
 go build -trimpath -o bin/ ./cmd/zeptomesh-node
 bin/zeptomesh-node genkey --out ./n0/keys/peer.key   # и то же для ./n1
-ZETOMESH_DATA=./n0 ZETOMESH_INDEX=0 bin/zeptomesh-node run -config configs/node.yaml &
-ZETOMESH_DATA=./n1 ZETOMESH_INDEX=1 ZETOMESH_MESH_PORT=4002 \
-  ZETOMESH_API_PORT=8082 ZETOMESH_PROM_LISTEN=127.0.0.1:9465 \
+ZEPTOMESH_DATA=./n0 ZEPTOMESH_INDEX=0 bin/zeptomesh-node run -config configs/node.yaml &
+ZEPTOMESH_DATA=./n1 ZEPTOMESH_INDEX=1 ZEPTOMESH_MESH_PORT=4002 \
+  ZEPTOMESH_API_PORT=8082 ZEPTOMESH_PROM_LISTEN=127.0.0.1:9465 \
   bin/zeptomesh-node run -config configs/node.yaml &
 
 # Проверка
 bin/zeptomesh-node status -addr http://127.0.0.1:8081
 bin/zeptomesh-node peers  -addr http://127.0.0.1:8081
 bin/zeptomesh-node submit -addr http://127.0.0.1:8081 -i "hello" -w
-# Если узел запущен с токеном админ-API (ZETOMESH_API_TOKEN в его окружении),
+# Если узел запущен с токеном админ-API (ZEPTOMESH_API_TOKEN в его окружении),
 # CLI должен знать имя env-переменной с ним — добавьте -token-env:
-# ZETOMESH_API_TOKEN=... bin/zeptomesh-node status -addr http://127.0.0.1:8081 \
-#   -token-env ZETOMESH_API_TOKEN
-# (или вообще без -addr: ZETOMESH_CONFIG=<путь к node.yaml> — CLI возьмёт
+# ZEPTOMESH_API_TOKEN=... bin/zeptomesh-node status -addr http://127.0.0.1:8081 \
+#   -token-env ZEPTOMESH_API_TOKEN
+# (или вообще без -addr: ZEPTOMESH_CONFIG=<путь к node.yaml> — CLI возьмёт
 #  адрес и имя токена из конфига)
 
 # Активный поиск других агентов: локальный хост + внешние источники
@@ -77,11 +77,11 @@ bin/zeptomesh-node promote -id <candidate_id>   # проверить эндпо�
 # Передать найденные эндпоинты и поисковые ключи другу (админ-API друга):
 bin/zeptomesh-node friend-promote -friend <name> -id <candidate_id>
 bin/zeptomesh-node share-keys   # отправить другу ключи из brain.keys.share_envs
-# Если узел запущен с токеном админ-API (ZETOMESH_API_TOKEN в его окружении),
+# Если узел запущен с токеном админ-API (ZEPTOMESH_API_TOKEN в его окружении),
 # CLI должен знать имя env-переменной с ним — добавьте -token-env:
-# ZETOMESH_API_TOKEN=... bin/zeptomesh-node candidates -addr http://127.0.0.1:8081 \
-#   -token-env ZETOMESH_API_TOKEN
-# (или вообще без -addr: ZETOMESH_CONFIG=<путь к node.yaml> — CLI возьмёт
+# ZEPTOMESH_API_TOKEN=... bin/zeptomesh-node candidates -addr http://127.0.0.1:8081 \
+#   -token-env ZEPTOMESH_API_TOKEN
+# (или вообще без -addr: ZEPTOMESH_CONFIG=<путь к node.yaml> — CLI возьмёт
 #  адрес и имя токена из конфига)
 ```
 
@@ -356,7 +356,7 @@ CI-конвейер (ТЗ 15.1) — GitHub Actions, `.github/workflows/ci.yml`: 
 
 Формат — YAML. Загрузчик (`config.Load`) применяет `config.Default()`, затем
 раскрывает в файле `${VAR}` и `${VAR:-default}` (включая вложенные default'ы),
-затем накладывает YAML и переменные окружения (`ZETOMESH_BOOTSTRAP`
+затем накладывает YAML и переменные окружения (`ZEPTOMESH_BOOTSTRAP`
 дописывается в `discovery.bootstrap`), после чего выполняется `Validate()`.
 Секреты в файл конфигурации не пишутся.
 

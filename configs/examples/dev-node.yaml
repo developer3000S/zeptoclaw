@@ -5,7 +5,7 @@
 # mDNS и внешних точек входа.
 #
 # Запуск одного экземпляра:
-#   ZETOMESH_INDEX=0 ./bin/zeptomesh-node run -config configs/examples/dev-node.yaml
+#   ZEPTOMESH_INDEX=0 ./bin/zeptomesh-node run -config configs/examples/dev-node.yaml
 # Запуск кластера из трёх узлов:
 #   make dev-cluster      (остановка: make dev-cluster-down)
 #
@@ -19,17 +19,17 @@
 #   * gossip-интервалы укорочены, чтобы изменения были видны за секунды.
 #
 # Значения ${VAR:-default} раскрывает загрузчик (internal/config.expandEnv),
-# поэтому файл обслуживает любой экземпляр: достаточно ZETOMESH_INDEX.
+# поэтому файл обслуживает любой экземпляр: достаточно ZEPTOMESH_INDEX.
 
 node:
-  name: dev-${ZETOMESH_INDEX:-0}
-  data_dir: ${ZETOMESH_DATA:-.dev/cluster}/${ZETOMESH_INDEX:-0}
+  name: dev-${ZEPTOMESH_INDEX:-0}
+  data_dir: ${ZEPTOMESH_DATA:-.dev/cluster}/${ZEPTOMESH_INDEX:-0}
   listen:
     # dev-cluster.sh выдаёт каждому экземпляру свой порт; без него это узел 0.
     # Явный порт нужен и соседям: bootstrap-ссылка ссылается на номер порта.
-    - /ip4/127.0.0.1/tcp/${ZETOMESH_MESH_PORT:-4101}
+    - /ip4/127.0.0.1/tcp/${ZEPTOMESH_MESH_PORT:-4101}
   announce: []
-  private_network_psk: ${ZETOMESH_PSK:-}
+  private_network_psk: ${ZEPTOMESH_PSK:-}
   relay:
     enabled: false
     advertise_as_relay: false
@@ -44,7 +44,7 @@ discovery:
   # multicast и без внешних точек входа.
   local_registry: true
   # Общая для всех экземпляров директория: каждый узел видит записи остальных.
-  local_socket_dir: ${ZETOMESH_DATA:-.dev/cluster}/shared
+  local_socket_dir: ${ZEPTOMESH_DATA:-.dev/cluster}/shared
   mdns: false
   dht: false
   peer_exchange: false
@@ -52,16 +52,16 @@ discovery:
   # содержит перечисление через запятую ("/ip4/…/tcp/…/p2p/12D3…"). Полностью
   # пустой по умолчанию: реестр выше закрывает знакомство, а bootstrap-адрес без
   # /p2p/<id> узел отвергает при старте — such a line can never connect.
-  bootstrap: [${ZETOMESH_BOOTSTRAP:-}]
+  bootstrap: [${ZEPTOMESH_BOOTSTRAP:-}]
   bootstrap_interval: 3s
   # Активный обход окружения (`zeptomesh-node scan` / POST /api/v1/admin/scan);
   # выключен по умолчанию, чтобы dev-cluster и acceptance-тест оставались
-  # детерминированными. ZETOMESH_SCAN_ENABLED=true — и обход крутится в фоне
+  # детерминированными. ZEPTOMESH_SCAN_ENABLED=true — и обход крутится в фоне
   # каждые 20 c: удобно следить за ним глазами.
   scan:
-    enabled: ${ZETOMESH_SCAN_ENABLED:-false}
+    enabled: ${ZEPTOMESH_SCAN_ENABLED:-false}
     interval: 20s               # отладочный кластер — обратная связь быстрая
-    subnet_scan: ${ZETOMESH_SCAN_SUBNET:-false}
+    subnet_scan: ${ZEPTOMESH_SCAN_SUBNET:-false}
     dial_timeout: 3s
     timeout: 20s
     max_candidates: 16
@@ -105,8 +105,8 @@ tasks:
 
 capabilities:
   # Навыки экземпляра различаются: иначе не проверить, что задача уехала именно
-  # к носителю нужного навыка. dev-cluster.sh передаёт ZETOMESH_SKILLS.
-  skills: [${ZETOMESH_SKILL:-general}]
+  # к носителю нужного навыка. dev-cluster.sh передаёт ZEPTOMESH_SKILLS.
+  skills: [${ZEPTOMESH_SKILL:-general}]
   models: []
   resource_class: small
   accept_external_tasks: true
@@ -120,7 +120,7 @@ capabilities:
   # Описание навыков — то, что видят соседи после обмена. Версию и дайджест
   # узел считает сам; здесь только человеческая аннотация.
   skill_docs:
-    - name: ${ZETOMESH_SKILL:-general}
+    - name: ${ZEPTOMESH_SKILL:-general}
       description: dev-cluster placeholder skill
       models: [dev-stub]
       attributes:
@@ -154,14 +154,14 @@ security:
 
 api:
   enabled: true
-  listen: 127.0.0.1:${ZETOMESH_API_PORT:-8101}
-  auth_token_env: ZETOMESH_API_TOKEN
+  listen: 127.0.0.1:${ZEPTOMESH_API_PORT:-8101}
+  auth_token_env: ZEPTOMESH_API_TOKEN
   read_timeout: 15s
   write_timeout: 60s
 
 telemetry:
-  prometheus_listen: 127.0.0.1:${ZETOMESH_PROM_PORT:-9564}
-  log_level: ${ZETOMESH_LOG_LEVEL:-info}
+  prometheus_listen: 127.0.0.1:${ZEPTOMESH_PROM_PORT:-9564}
+  log_level: ${ZEPTOMESH_LOG_LEVEL:-info}
   structured_logs: false
 
 storage:

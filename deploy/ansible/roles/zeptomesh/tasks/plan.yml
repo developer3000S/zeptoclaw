@@ -45,7 +45,7 @@
     container: "{{ '%s-%s' | format(zeptomesh_container_prefix, idx) }}"
     # Данные экземпляра: именованный docker-том (как в compose) или каталог
     # хоста (планировка как в локальном режиме install.sh). Внутри контейнера —
-    # всегда /var/lib/zeptomesh: это VOLUME и ENV ZETOMESH_DATA из
+    # всегда /var/lib/zeptomesh: это VOLUME и ENV ZEPTOMESH_DATA из
     # deploy/docker/Dockerfile, поэтому один и тот же конфиг работает в обоих
     # режимах.
     container_data_source: >-

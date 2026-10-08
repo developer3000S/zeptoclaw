@@ -117,7 +117,7 @@ zeptomesh_data_owner_gid: ""
 
 # ---------- пути внутри контейнера ----------
 # Фиксированы и повторяют deploy/docker/Dockerfile (VOLUME /var/lib/zeptomesh,
-# ENV ZETOMESH_CONFIG=/etc/zeptomesh/node.yaml). Менять не нужно: источник
+# ENV ZEPTOMESH_CONFIG=/etc/zeptomesh/node.yaml). Менять не нужно: источник
 # конфига на хосте задаётся выше, а внутри контейнера путь остаётся привычным.
 zeptomesh_container_data_root: /var/lib/zeptomesh
 zeptomesh_container_conf_dir: /etc/zeptomesh
@@ -131,7 +131,7 @@ zeptomesh_container_allowed_peers_path: "{{ zeptomesh_container_conf_dir }}/allo
 zeptomesh_container_blocked_peers_path: "{{ zeptomesh_container_conf_dir }}/blocked_peers.txt"
 # Слушатель метрик внутри контейнера обязан быть 0.0.0.0: docker публикует порт,
 # подключаясь к адресам контейнера в его netns (то же соображение, что и для
-# ENV ZETOMESH_API_HOST в Dockerfile). Наружу порт выходит на loopback хоста.
+# ENV ZEPTOMESH_API_HOST в Dockerfile). Наружу порт выходит на loopback хоста.
 zeptomesh_prom_host: 0.0.0.0
 # Файл артефакта группы на контроллере (его же читает include_vars в preflight).
 zeptomesh_group_peerids_file: "{{ zeptomesh_artifact_dir }}/{{ zeptomesh_host_group }}.peerids.yml"
@@ -159,7 +159,7 @@ zeptomesh_mdns: false
 # По умолчанию — адрес по умолчанию на хосте; для NAT/облака укажите явно.
 zeptomesh_pub_ip: "{{ ansible_default_ipv4.address | default('', true) }}"
 zeptomesh_relay_advertise: false
-zeptomesh_relay_1: ""             # ZETOMESH_RELAY_1 в configs/examples/wan.yaml
+zeptomesh_relay_1: ""             # ZEPTOMESH_RELAY_1 в configs/examples/wan.yaml
 # Точки входа существующей сети через запятую
 # (/ip4/203.0.113.10/tcp/4001/p2p/12D3KooW…, …). Если пусто и
 # zeptomesh_auto_bootstrap=true — берутся из собранного peerid-артефакта.
@@ -167,7 +167,7 @@ zeptomesh_bootstrap: ""
 
 # Списки peer-ов (base58 peer id, по строке на пира). Файлы доставляются в
 # zeptomesh_conf_dir, в контейнер попадают через ту же read-only.mount;
-# ZETOMESH_ALLOWED_PEERS/ZETOMESH_BLOCKED_PEERS указывают пути внутри контейнера.
+# ZEPTOMESH_ALLOWED_PEERS/ZEPTOMESH_BLOCKED_PEERS указывают пути внутри контейнера.
 zeptomesh_allowed_peers: []
 zeptomesh_blocked_peers: []
 
@@ -175,7 +175,7 @@ zeptomesh_blocked_peers: []
 # Ожидаем значения из ansible-vault: group_vars/mesh_nodes/vault.yml или
 # -e @vault.yml (пример — ../.vault.example.yml).
 zeptomesh_psk: ""              # общий ключ закрытой сети (одинаков у всех узлов!)
-zeptomesh_api_token: ""        # bearer-токен админ-API (ZETOMESH_API_TOKEN)
+zeptomesh_api_token: ""        # bearer-токен админ-API (ZEPTOMESH_API_TOKEN)
 zeptomesh_pico_token: ""       # PICOCLAW_MESH_PICO_TOKEN для picoclaw.mode=http
 # true — задачи, которые могут показать секреты (env контейнера), идут с no_log.
 zeptomesh_no_log: true
@@ -279,7 +279,7 @@ zeptomesh_config_force: false
 # <artifact_dir>/<группа>.peerids.yml, кроме собственных адресов хоста.
 zeptomesh_auto_bootstrap: true
 # Требовать непустой zeptomesh_pub_ip, когда текст профиля содержит
-# ${ZETOMESH_PUB_IP} (wan.yaml). false — разрешить announce приватного адреса.
+# ${ZEPTOMESH_PUB_IP} (wan.yaml). false — разрешить announce приватного адреса.
 zeptomesh_require_pub_ip: true
 # Пишет ли deploy-плейбук артефакты Peer ID (шаг 6). При serial/limite каждая
 # партия перезаписывает файл всё более полным составом.

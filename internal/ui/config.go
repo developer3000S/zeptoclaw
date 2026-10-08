@@ -49,24 +49,24 @@ type Config struct {
 }
 
 // Load builds the config from the environment, then resolves the node list:
-// the persistent nodes.json wins, otherwise the ZETOMESH_UI_NODES seed is
+// the persistent nodes.json wins, otherwise the ZEPTOMESH_UI_NODES seed is
 // written into it so the UI has one editable source of truth.
 func Load() (Config, error) {
 	cfg := Config{
-		Listen:       envOr("ZETOMESH_UI_LISTEN", defaultListen),
-		DataDir:      envOr("ZETOMESH_UI_DATA", defaultDataDir),
-		Token:        os.Getenv("ZETOMESH_UI_TOKEN"),
-		APIToken:     os.Getenv("ZETOMESH_UI_API_TOKEN"),
+		Listen:       envOr("ZEPTOMESH_UI_LISTEN", defaultListen),
+		DataDir:      envOr("ZEPTOMESH_UI_DATA", defaultDataDir),
+		Token:        os.Getenv("ZEPTOMESH_UI_TOKEN"),
+		APIToken:     os.Getenv("ZEPTOMESH_UI_API_TOKEN"),
 		PollInterval: 0,
 		LogLevel:     defaultLogLevel,
 	}
-	if v := os.Getenv("ZETOMESH_UI_POLL_INTERVAL"); v != "" {
+	if v := os.Getenv("ZEPTOMESH_UI_POLL_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
-			return Config{}, fmt.Errorf("ZETOMESH_UI_POLL_INTERVAL: %w", err)
+			return Config{}, fmt.Errorf("ZEPTOMESH_UI_POLL_INTERVAL: %w", err)
 		}
 		if d < time.Second {
-			return Config{}, fmt.Errorf("ZETOMESH_UI_POLL_INTERVAL must be >= 1s, got %s", d)
+			return Config{}, fmt.Errorf("ZEPTOMESH_UI_POLL_INTERVAL must be >= 1s, got %s", d)
 		}
 		cfg.PollInterval = d
 	} else {
@@ -76,21 +76,21 @@ func Load() (Config, error) {
 		}
 		cfg.PollInterval = d
 	}
-	if v := os.Getenv("ZETOMESH_UI_LOG_LEVEL"); v != "" {
+	if v := os.Getenv("ZEPTOMESH_UI_LOG_LEVEL"); v != "" {
 		var level slog.Level
 		if err := level.UnmarshalText([]byte(v)); err != nil {
-			return Config{}, fmt.Errorf("ZETOMESH_UI_LOG_LEVEL: %w", err)
+			return Config{}, fmt.Errorf("ZEPTOMESH_UI_LOG_LEVEL: %w", err)
 		}
 		cfg.LogLevel = level
 	}
 
-	if v := os.Getenv("ZETOMESH_UI_NODES_FILE"); v != "" {
+	if v := os.Getenv("ZEPTOMESH_UI_NODES_FILE"); v != "" {
 		cfg.NodesFile = v
 	} else {
 		cfg.NodesFile = filepath.Join(cfg.DataDir, defaultNodesFile)
 	}
 
-	seed := parseNodesEnv(os.Getenv("ZETOMESH_UI_NODES"))
+	seed := parseNodesEnv(os.Getenv("ZEPTOMESH_UI_NODES"))
 	stored, err := loadNodes(cfg.NodesFile)
 	if err != nil {
 		return Config{}, err

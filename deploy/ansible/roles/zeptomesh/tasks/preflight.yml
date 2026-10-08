@@ -4,7 +4,7 @@
 # «mesh не собрался»:
 #   * пересекающиеся диапазоны портов экземпляров;
 #   * отсутствующий на контроллере источник конфигурации (этап deploy);
-#   * пустой zeptomesh_pub_ip при профиле, который анонсирует ${ZETOMESH_PUB_IP}
+#   * пустой zeptomesh_pub_ip при профиле, который анонсирует ${ZEPTOMESH_PUB_IP}
 #     (иначе узел объявит 127.0.0.1, и соседи до него не достанут);
 #   * bootstrap-адрес без /p2p/<peer id> — с таким списком узел не запускается
 #     вообще (internal/discovery/bootstrap.go отвергает его как негодный к
@@ -213,11 +213,11 @@
     - zeptomesh_config_deliver | bool
 
 # Текст конфига читается на контроллере: нужно лишь определить, анонсирует ли
-# профиль ${ZETOMESH_PUB_IP}. На хост за этим никто не ходит.
+# профиль ${ZEPTOMESH_PUB_IP}. На хост за этим никто не ходит.
 - name: Preflight | Определить, анонсирует ли профиль публичный адрес
   ansible.builtin.set_fact:
     zeptomesh_config_announces_pub_ip: >-
-      {{- ('ZETOMESH_PUB_IP' in lookup('ansible.builtin.file', zeptomesh_config_source))
+      {{- ('ZEPTOMESH_PUB_IP' in lookup('ansible.builtin.file', zeptomesh_config_source))
           if (zeptomesh_stage == 'deploy' and zeptomesh_config_deliver | bool
               and zeptomesh_config_src_stat.stat.exists | default(false))
           else false -}}
@@ -230,7 +230,7 @@
     fail_msg: >-
       zeptomesh_pub_ip='{{ zeptomesh_pub_ip | default('', true) }}' пуст или не
       похож на адрес, а профиль '{{ zeptomesh_config_source | basename }}'
-      анонсирует ${ZETOMESH_PUB_IP}: узел объявил бы 127.0.0.1, и соседи до него
+      анонсирует ${ZEPTOMESH_PUB_IP}: узел объявил бы 127.0.0.1, и соседи до него
       не достучались бы. Задайте публичный IPv4 хоста (для облака — внешний
       адрес, а не ansible_default_ipv4 при NAT). Отключить проверку:
       -e zeptomesh_require_pub_ip=false; взять профиль без announce —

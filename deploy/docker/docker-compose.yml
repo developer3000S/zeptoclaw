@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # ZeptoClaw Agent Mesh — локальная сеть узлов.
 #
-#   ZETOMESH_NODES=3 docker compose -f deploy/docker/docker-compose.yml up -d
+#   ZEPTOMESH_NODES=3 docker compose -f deploy/docker/docker-compose.yml up -d
 #
 # Порты задаются через переменные окружения и по умолчанию подбираются
 # автоматически скриптом install.sh (случайные свободные пятизначные порты).
@@ -17,10 +17,10 @@
 #   PEER=$(docker exec zeptomesh-0 sh -c \
 #            'curl -fsS http://127.0.0.1:8081/healthz' \
 #          | sed -nE 's/.*"peer_id":"([^"]+)".*/\1/p')
-#   ZETOMESH_ANCHOR="/dns4/zepto-0/tcp/4001/p2p/$PEER" \
+#   ZEPTOMESH_ANCHOR="/dns4/zepto-0/tcp/4001/p2p/$PEER" \
 #     docker compose -f deploy/docker/docker-compose.yml up -d
 #
-# Без ZETOMESH_ANCHOR узлы 1+ стартуют с пустым bootstrap и сходятся через
+# Без ZEPTOMESH_ANCHOR узлы 1+ стартуют с пустым bootstrap и сходятся через
 # DHT/peer-exchange (медленнее, но работоспособно: DHT в образе включён).
 # ---------------------------------------------------------------------------
 
@@ -32,13 +32,13 @@ x-node-base: &node-base
   restart: unless-stopped
   stop_grace_period: 30s
   environment: &node-env
-    ZETOMESH_PICO_MODE: ${ZETOMESH_PICO_MODE:-stub}
-    ZETOMESH_TRUST_MODE: ${ZETOMESH_TRUST_MODE:-open}
-    ZETOMESH_MDNS: "false"
-    ZETOMESH_LOG_LEVEL: ${ZETOMESH_LOG_LEVEL:-info}
-    ZETOMESH_API_HOST: 0.0.0.0
-    ZETOMESH_API_TOKEN: ${ZETOMESH_API_TOKEN:-}
-    ZETOMESH_PSK: ${ZETOMESH_PSK:-}
+    ZEPTOMESH_PICO_MODE: ${ZEPTOMESH_PICO_MODE:-stub}
+    ZEPTOMESH_TRUST_MODE: ${ZEPTOMESH_TRUST_MODE:-open}
+    ZEPTOMESH_MDNS: "false"
+    ZEPTOMESH_LOG_LEVEL: ${ZEPTOMESH_LOG_LEVEL:-info}
+    ZEPTOMESH_API_HOST: 0.0.0.0
+    ZEPTOMESH_API_TOKEN: ${ZEPTOMESH_API_TOKEN:-}
+    ZEPTOMESH_PSK: ${ZEPTOMESH_PSK:-}
     TZ: ${TZ:-UTC}
   command: ["run"]
 
@@ -48,12 +48,12 @@ services:
     hostname: zepto-0
     environment:
       <<: *node-env
-      ZETOMESH_INDEX: "0"
-      ZETOMESH_NAME: zepto-0
-      ZETOMESH_MESH_PORT: "${ZEPTO0_MESH_PORT:-14001}"
-      ZETOMESH_API_PORT: "${ZEPTO0_API_PORT:-18081}"
-      ZETOMESH_PROM_LISTEN: "0.0.0.0:${ZEPTO0_PROM_PORT:-19464}"
-      ZETOMESH_BOOTSTRAP: ""
+      ZEPTOMESH_INDEX: "0"
+      ZEPTOMESH_NAME: zepto-0
+      ZEPTOMESH_MESH_PORT: "${ZEPTO0_MESH_PORT:-14001}"
+      ZEPTOMESH_API_PORT: "${ZEPTO0_API_PORT:-18081}"
+      ZEPTOMESH_PROM_LISTEN: "0.0.0.0:${ZEPTO0_PROM_PORT:-19464}"
+      ZEPTOMESH_BOOTSTRAP: ""
     ports:
       - "${ZEPTO0_MESH_PORT:-14001}:${ZEPTO0_MESH_PORT:-14001}/tcp"
       - "${ZEPTO0_MESH_PORT:-14001}:${ZEPTO0_MESH_PORT:-14001}/udp"
@@ -69,12 +69,12 @@ services:
       - zepto-0
     environment:
       <<: *node-env
-      ZETOMESH_INDEX: "1"
-      ZETOMESH_NAME: zepto-1
-      ZETOMESH_MESH_PORT: "${ZEPTO1_MESH_PORT:-14002}"
-      ZETOMESH_API_PORT: "${ZEPTO1_API_PORT:-18082}"
-      ZETOMESH_PROM_LISTEN: "0.0.0.0:${ZEPTO1_PROM_PORT:-19465}"
-      ZETOMESH_BOOTSTRAP: ${ZETOMESH_ANCHOR:-}
+      ZEPTOMESH_INDEX: "1"
+      ZEPTOMESH_NAME: zepto-1
+      ZEPTOMESH_MESH_PORT: "${ZEPTO1_MESH_PORT:-14002}"
+      ZEPTOMESH_API_PORT: "${ZEPTO1_API_PORT:-18082}"
+      ZEPTOMESH_PROM_LISTEN: "0.0.0.0:${ZEPTO1_PROM_PORT:-19465}"
+      ZEPTOMESH_BOOTSTRAP: ${ZEPTOMESH_ANCHOR:-}
     ports:
       - "${ZEPTO1_MESH_PORT:-14002}:${ZEPTO1_MESH_PORT:-14002}/tcp"
       - "${ZEPTO1_MESH_PORT:-14002}:${ZEPTO1_MESH_PORT:-14002}/udp"
@@ -90,12 +90,12 @@ services:
       - zepto-0
     environment:
       <<: *node-env
-      ZETOMESH_INDEX: "2"
-      ZETOMESH_NAME: zepto-2
-      ZETOMESH_MESH_PORT: "${ZEPTO2_MESH_PORT:-14003}"
-      ZETOMESH_API_PORT: "${ZEPTO2_API_PORT:-18083}"
-      ZETOMESH_PROM_LISTEN: "0.0.0.0:${ZEPTO2_PROM_PORT:-19466}"
-      ZETOMESH_BOOTSTRAP: ${ZETOMESH_ANCHOR:-}
+      ZEPTOMESH_INDEX: "2"
+      ZEPTOMESH_NAME: zepto-2
+      ZEPTOMESH_MESH_PORT: "${ZEPTO2_MESH_PORT:-14003}"
+      ZEPTOMESH_API_PORT: "${ZEPTO2_API_PORT:-18083}"
+      ZEPTOMESH_PROM_LISTEN: "0.0.0.0:${ZEPTO2_PROM_PORT:-19466}"
+      ZEPTOMESH_BOOTSTRAP: ${ZEPTOMESH_ANCHOR:-}
     ports:
       - "${ZEPTO2_MESH_PORT:-14003}:${ZEPTO2_MESH_PORT:-14003}/tcp"
       - "${ZEPTO2_MESH_PORT:-14003}:${ZEPTO2_MESH_PORT:-14003}/udp"

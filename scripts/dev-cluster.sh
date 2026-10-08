@@ -23,12 +23,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="${ZETOMESH_BIN:-$ROOT/bin/zeptomesh-node}"
-CFG="${ZETOMESH_CONFIG:-$ROOT/configs/examples/dev-node.yaml}"
-DATA="${ZETOMESH_DATA:-$ROOT/.dev/cluster}"
-MESH_BASE=${ZETOMESH_MESH_BASE:-4101}
-API_BASE=${ZETOMESH_API_BASE:-8101}
-PROM_BASE=${ZETOMESH_PROM_BASE:-9564}
+BIN="${ZEPTOMESH_BIN:-$ROOT/bin/zeptomesh-node}"
+CFG="${ZEPTOMESH_CONFIG:-$ROOT/configs/examples/dev-node.yaml}"
+DATA="${ZEPTOMESH_DATA:-$ROOT/.dev/cluster}"
+MESH_BASE=${ZEPTOMESH_MESH_BASE:-4101}
+API_BASE=${ZEPTOMESH_API_BASE:-8101}
+PROM_BASE=${ZEPTOMESH_PROM_BASE:-9564}
 MAX_SLOTS=16
 
 # Навыки по экземплярам; дальше по кругу.
@@ -64,10 +64,10 @@ running_nodes() {
 # unix-сокетов (discovery.local_registry), записи которого содержат и peer id, и
 # адреса. bootstrap-строка обязана содержать /p2p/<id> — узел отвергает адрес
 # без идентификатора при старте, потому что libp2p не умеет звонить «в сокет без
-# имени». Поэтому список собирается только когда ZETOMESH_BOOTSTRAP передан
+# имени». Поэтому список собирается только когда ZEPTOMESH_BOOTSTRAP передан
 # явно полностью (тогда скрипт передаёт его как есть).
 bootstrap_list() {
-	if [[ -n "${ZETOMESH_BOOTSTRAP:-}" ]]; then printf '%s' "$ZETOMESH_BOOTSTRAP"; return 0; fi
+	if [[ -n "${ZEPTOMESH_BOOTSTRAP:-}" ]]; then printf '%s' "$ZEPTOMESH_BOOTSTRAP"; return 0; fi
 	printf ''
 }
 
@@ -84,10 +84,10 @@ start_one() {
 	mkdir -p "$DATA/$idx"
 	(
 		cd "$ROOT"
-		ZETOMESH_INDEX="$idx" ZETOMESH_DATA="$DATA" \
-		ZETOMESH_MESH_PORT="$mesh" ZETOMESH_API_PORT="$api" ZETOMESH_PROM_PORT="$prom" \
-		ZETOMESH_BOOTSTRAP="$boot" ZETOMESH_SKILL="$skill" \
-		ZETOMESH_LOG_LEVEL="${ZETOMESH_LOG_LEVEL:-info}" \
+		ZEPTOMESH_INDEX="$idx" ZEPTOMESH_DATA="$DATA" \
+		ZEPTOMESH_MESH_PORT="$mesh" ZEPTOMESH_API_PORT="$api" ZEPTOMESH_PROM_PORT="$prom" \
+		ZEPTOMESH_BOOTSTRAP="$boot" ZEPTOMESH_SKILL="$skill" \
+		ZEPTOMESH_LOG_LEVEL="${ZEPTOMESH_LOG_LEVEL:-info}" \
 			nohup "$BIN" run -config "$CFG" >"$DATA/$idx.log" 2>&1 &
 		echo $! >"$(pidfile "$idx")"
 	)
@@ -154,7 +154,7 @@ status() {
 		n=$((n + 1))
 		pid="$(read_pid "$i")"
 		local id="-" peers="-" member="-" skill="-"
-		if [[ -n "${ZETOMESH_NO_CURL:-}" ]] || ! command -v curl >/dev/null 2>&1; then
+		if [[ -n "${ZEPTOMESH_NO_CURL:-}" ]] || ! command -v curl >/dev/null 2>&1; then
 			printf '  node %-2s pid %-8s api :%s (curl недоступен)\n' "$i" "$pid" "$((API_BASE + i))"
 			continue
 		fi

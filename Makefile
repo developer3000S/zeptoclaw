@@ -160,8 +160,8 @@ ci: static-check build test-race ## Полный конвейер: статик�
 ##—— Локальная сеть узлов (отладка) ----------------------------------------
 
 run-1: build ## Запустить узел 0 отладочного кластера (данные в .dev/cluster/0)
-	@mkdir -p .dev/cluster/0 && ZETOMESH_INDEX=0 ZETOMESH_DATA=$(CURDIR)/.dev/cluster \
-	  ZETOMESH_SKILL=general ZETOMESH_BOOTSTRAP= \
+	@mkdir -p .dev/cluster/0 && ZEPTOMESH_INDEX=0 ZEPTOMESH_DATA=$(CURDIR)/.dev/cluster \
+	  ZEPTOMESH_SKILL=general ZEPTOMESH_BOOTSTRAP= \
 	  ./bin/$(BIN) run -config configs/examples/dev-node.yaml
 
 dev-cluster: build ## Поднять 3 узла на одной машине и показать статус

@@ -65,7 +65,7 @@
 Публичные (без авторизации): `GET /healthz`, `GET /` (index.html),
 `GET /static/...`.
 
-При заданном `ZETOMESH_UI_TOKEN` всё ниже требует `Authorization: Bearer <tok>`:
+При заданном `ZEPTOMESH_UI_TOKEN` всё ниже требует `Authorization: Bearer <tok>`:
 
 | Метод | Путь | Назначение |
 |---|---|---|
@@ -222,7 +222,7 @@ internal/ui/static/
 - Live-обновления: поллинг `GET /api/v1/mesh` каждое `poll_interval_ms` из
   снимка; индикатор времени последнего обновления; кнопка паузы
   автообновления.
-- Авторизация: при 401 — форма ввода `ZETOMESH_UI_TOKEN`, сохранение в
+- Авторизация: при 401 — форма ввода `ZEPTOMESH_UI_TOKEN`, сохранение в
   `localStorage`, выход/смена токена; статика доступна без токена.
 - Обработка ошибок: недоступный узел показывается карточкой с `error`, а не
   молчанием; сетевые ошибки BFF — всплывающее уведомление.
@@ -246,26 +246,26 @@ internal/ui/static/
 ### 6.2 `deploy/ui/docker-compose.yml` (отдельный проект)
 
 - `name: zeptomesh-ui`, сервис `zeptomesh-ui`, образ `zeptomesh-ui:latest`.
-- Порт `0.0.0.0:${ZETOMESH_UI_PORT:-28090}:28090` — контейнер слушает
-  `ZETOMESH_UI_LISTEN=0.0.0.0:28090`, доступ с других машин; volume
+- Порт `0.0.0.0:${ZEPTOMESH_UI_PORT:-28090}:28090` — контейнер слушает
+  `ZEPTOMESH_UI_LISTEN=0.0.0.0:28090`, доступ с других машин; volume
   `zeptomesh-ui-data:/var/lib/zeptomesh-ui`.
 - Подключение к сети агентов: `networks: default: external: true,
   name: zeptomesh_default` (стек агентов — проект `zeptomesh`, контейнеры
-  `zeptomesh-N`, API-порты в env `ZETOMESH_API_PORT` каждого контейнера).
-- Env: `ZETOMESH_UI_NODES`, `ZETOMESH_UI_TOKEN`, `ZETOMESH_UI_API_TOKEN`,
-  `ZETOMESH_UI_POLL_INTERVAL`, `ZETOMESH_UI_LOG_LEVEL`, `TZ`.
+  `zeptomesh-N`, API-порты в env `ZEPTOMESH_API_PORT` каждого контейнера).
+- Env: `ZEPTOMESH_UI_NODES`, `ZEPTOMESH_UI_TOKEN`, `ZEPTOMESH_UI_API_TOKEN`,
+  `ZEPTOMESH_UI_POLL_INTERVAL`, `ZEPTOMESH_UI_LOG_LEVEL`, `TZ`.
 
 ### 6.3 `install-ui.sh` (независимый инсталлятор)
 
 - Режим по умолчанию: проверка существования сети `zeptomesh_default`; если её
   нет — предупреждение и подсказка про `--host-gateway`.
 - **Автоконфигурация адресов узлов**: для каждого контейнера `zeptomesh-*`
-  читается env `ZETOMESH_API_PORT` через `docker inspect` и формируется
-  `ZETOMESH_UI_NODES=http://zepto-0:<порт>,…`.
+  читается env `ZEPTOMESH_API_PORT` через `docker inspect` и формируется
+  `ZEPTOMESH_UI_NODES=http://zepto-0:<порт>,…`.
 - `--host-gateway`: external-сеть не используется, вместо неё
   `extra_hosts: host-gateway`, узлы задаются как
   `http://host.docker.internal:<порт>` (для локальной/systemd установки
-  агентов; порты оператор указывает сам или через `ZETOMESH_UI_NODES`).
+  агентов; порты оператор указывает сам или через `ZEPTOMESH_UI_NODES`).
 - Собирает образ и поднимает стек; печатает URL `http://127.0.0.1:28090`.
 - Команды управления: `install-ui.sh status|start|stop|uninstall` — трогает
   **только** UI-контейнер и его образ/стек; установку агентов не затрагивает.

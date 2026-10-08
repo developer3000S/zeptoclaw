@@ -8,7 +8,7 @@
 # install.sh (write_instance_env) и в deploy/docker/docker-compose.yml.
 #
 # Файл лежит в zeptomesh_conf_dir, который монтируется в контейнер на чтение по
-# пути из Dockerfile (/etc/zeptomesh) — там же ждёт его ENV ZETOMESH_CONFIG.
+# пути из Dockerfile (/etc/zeptomesh) — там же ждёт его ENV ZEPTOMESH_CONFIG.
 # Read-only важно: процесс узла не должен иметь возможности расширить
 # собственные ограничения (ТЗ 11.4).
 #

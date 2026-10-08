@@ -751,21 +751,21 @@ func Load(path string) (*Config, error) {
 }
 
 // LLMAPIKeyEnv is the environment variable that carries the shared API key for
-// the endpoints added by ZETOMESH_LLM_ENDPOINTS. A gateway in front of Ollama
+// the endpoints added by ZEPTOMESH_LLM_ENDPOINTS. A gateway in front of Ollama
 // usually authenticates every request, and the pool's probe would reject the
 // endpoint as dead without the key — so the two variables are a pair.
-const LLMAPIKeyEnv = "ZETOMESH_LLM_API_KEY"
+const LLMAPIKeyEnv = "ZEPTOMESH_LLM_API_KEY"
 
 // applyEnvOverrides applies settings that a YAML scalar expansion cannot
-// express, because the target is a sequence: ZETOMESH_BOOTSTRAP is a comma
+// express, because the target is a sequence: ZEPTOMESH_BOOTSTRAP is a comma
 // separated list of multiaddrs appended to discovery.bootstrap, and
-// ZETOMESH_LLM_ENDPOINTS is a comma separated list of Ollama-compatible base
+// ZEPTOMESH_LLM_ENDPOINTS is a comma separated list of Ollama-compatible base
 // URLs appended to brain.endpoints, so one mounted template can serve every
-// instance of a mesh without editing the file. ZETOMESH_LLM_API_KEY names the
+// instance of a mesh without editing the file. ZEPTOMESH_LLM_API_KEY names the
 // env var holding the key those gateways expect, so the endpoints are verified
 // instead of rejected as unreachable.
 func (c *Config) applyEnvOverrides() {
-	if v := strings.TrimSpace(os.Getenv("ZETOMESH_BOOTSTRAP")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("ZEPTOMESH_BOOTSTRAP")); v != "" {
 		for _, part := range strings.Split(v, ",") {
 			part = strings.TrimSpace(part)
 			if part == "" {
@@ -776,7 +776,7 @@ func (c *Config) applyEnvOverrides() {
 			}
 		}
 	}
-	if v := strings.TrimSpace(os.Getenv("ZETOMESH_LLM_ENDPOINTS")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("ZEPTOMESH_LLM_ENDPOINTS")); v != "" {
 		keyEnv := ""
 		if k := strings.TrimSpace(os.Getenv(LLMAPIKeyEnv)); k != "" {
 			keyEnv = LLMAPIKeyEnv
@@ -807,7 +807,7 @@ func (c *Config) applyEnvOverrides() {
 // instances with different ports and data dirs.
 //
 // Default values may themselves contain references
-// (${ZETOMESH_DATA:-./zeptomesh-data}/${ZETOMESH_INDEX:-0}), so the closing
+// (${ZEPTOMESH_DATA:-./zeptomesh-data}/${ZEPTOMESH_INDEX:-0}), so the closing
 // brace is found by depth counting, not by the first '}' — and the resolved
 // value is expanded again, so a nested reference in a default is honoured.
 func expandEnv(s string) string {

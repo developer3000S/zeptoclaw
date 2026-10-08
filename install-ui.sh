@@ -14,12 +14,12 @@
 #
 # Режим по умолчанию подключает UI-контейнер к сети zeptomesh_default стека
 # агентов (проект zeptomesh, контейнеры zeptomesh-N) и адреса узлов выводит
-# из их env ZETOMESH_API_PORT: http://zepto-0:<порт>,…
+# из их env ZEPTOMESH_API_PORT: http://zepto-0:<порт>,…
 # Режим --host-gateway сеть не использует: узлы видны через host-gateway как
 # http://host.docker.internal:<порт> — для агентов, установленных через
 # install.sh --mode local (systemd); порты задаёт оператор.
 #
-# Список узлов — источник истины UI (nodes.json в томе). ZETOMESH_UI_NODES
+# Список узлов — источник истины UI (nodes.json в томе). ZEPTOMESH_UI_NODES
 # сеет его при первом старте; дальнейшее изменение списка — через вкладку
 # «Агенты» самой панели (POST/DELETE /api/v1/nodes).
 # ---------------------------------------------------------------------------
@@ -33,12 +33,12 @@ COMPOSE_PROJECT="zeptomesh-ui"
 AGENT_NETWORK="zeptomesh_default"   # сеть стека агентов (проект zeptomesh)
 CONTAINER="zeptomesh-ui"
 
-UI_PORT="${ZETOMESH_UI_PORT:-28090}"
-NODES_ARG=""                        # --nodes / ZETOMESH_UI_NODES
+UI_PORT="${ZEPTOMESH_UI_PORT:-28090}"
+NODES_ARG=""                        # --nodes / ZEPTOMESH_UI_NODES
 GATEWAY_MODE=0
 DATA_DIR=""
-POLL_INTERVAL="${ZETOMESH_UI_POLL_INTERVAL:-5s}"
-LOG_LEVEL="${ZETOMESH_UI_LOG_LEVEL:-info}"
+POLL_INTERVAL="${ZEPTOMESH_UI_POLL_INTERVAL:-5s}"
+LOG_LEVEL="${ZEPTOMESH_UI_LOG_LEVEL:-info}"
 ASSUME_YES=0
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -90,18 +90,18 @@ usage() {
                       host-gateway как http://host.docker.internal:<порт>
                       (для local/systemd установки агентов)
   --nodes URLS        список адресов админ-API узлов через запятую
-                      (иначе env ZETOMESH_UI_NODES, иначе автоопределение)
-  --port N            порт панели на хосте (default: 28090, env ZETOMESH_UI_PORT)
+                      (иначе env ZEPTOMESH_UI_NODES, иначе автоопределение)
+  --port N            порт панели на хосте (default: 28090, env ZEPTOMESH_UI_PORT)
   --data-dir DIR      каталог для стека (default: /var/lib/zeptomesh-ui для root)
   --poll-interval D   интервал опроса узлов (default: 5s)
   --log-level L       trace|debug|info|warn|error (default: info)
   -y, --yes           не задавать вопросов
 
 Доступ к API узлов:
-  ZETOMESH_UI_TOKEN       токен доступа к самому API панели (включает авторизацию)
-  ZETOMESH_UI_TOKEN       токен доступа к самому API панели (включает авторизацию)
-  ZETOMESH_UI_API_TOKEN   bearer для узлов без собственного токена
-  ZETOMESH_API_TOKEN      если узлы требуют токен, задайте его же здесь
+  ZEPTOMESH_UI_TOKEN       токен доступа к самому API панели (включает авторизацию)
+  ZEPTOMESH_UI_TOKEN       токен доступа к самому API панели (включает авторизацию)
+  ZEPTOMESH_UI_API_TOKEN   bearer для узлов без собственного токена
+  ZEPTOMESH_API_TOKEN      если узлы требуют токен, задайте его же здесь
 EOF
 }
 
@@ -200,7 +200,7 @@ gen_token() {
 }
 
 # resolve_token — выбирает токен доступа к API панели:
-# 1) явный ZETOMESH_UI_TOKEN из окружения;
+# 1) явный ZEPTOMESH_UI_TOKEN из окружения;
 # 2) ранее сохранённый ${DATA_DIR}/ui-token (персистентность при переустановках);
 # 3) новая случайная генерация.
 # Результат — в глобальной UI_TOKEN, и он всегда записывается на диск (0600),
@@ -208,9 +208,9 @@ gen_token() {
 UI_TOKEN=""
 resolve_token() {
   local stored
-  if [[ -n "${ZETOMESH_UI_TOKEN:-}" ]]; then
-    UI_TOKEN="$ZETOMESH_UI_TOKEN"
-    log "токен доступа: из ZETOMESH_UI_TOKEN окружения"
+  if [[ -n "${ZEPTOMESH_UI_TOKEN:-}" ]]; then
+    UI_TOKEN="$ZEPTOMESH_UI_TOKEN"
+    log "токен доступа: из ZEPTOMESH_UI_TOKEN окружения"
     return 0
   fi
   if [[ -f "$(token_file)" ]]; then
@@ -236,7 +236,7 @@ agent_containers() {
     | grep -E '^zeptomesh-[0-9]+$' | sort -t- -k2 -n || true
 }
 
-# detect_agent_nodes — выводит "http://zepto-0:8081,…" по env ZETOMESH_API_PORT
+# detect_agent_nodes — выводит "http://zepto-0:8081,…" по env ZEPTOMESH_API_PORT
 # каждого контейнера zeptomesh-N. Внутри сети стека контейнеры видны по
 # dns-имени службы (zepto-N), а порт админ-API контейнера совпадает с хостовым.
 detect_agent_nodes() {
@@ -244,12 +244,12 @@ detect_agent_nodes() {
   while IFS= read -r c; do
     [[ -z "$c" ]] && continue
     port="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$c" 2>/dev/null \
-      | sed -nE 's/^ZETOMESH_API_PORT=([0-9]+)$/\1/p' | head -n1 || true)"
+      | sed -nE 's/^ZEPTOMESH_API_PORT=([0-9]+)$/\1/p' | head -n1 || true)"
     idx="${c#zeptomesh-}"
     if [[ -n "$port" ]]; then
       nodes="${nodes:+$nodes,}http://zepto-$idx:$port"
     else
-      warn "контейнер $c: не найден env ZETOMESH_API_PORT — узел добавьте вручную (вкладка «Агенты»)"
+      warn "контейнер $c: не найден env ZEPTOMESH_API_PORT — узел добавьте вручную (вкладка «Агенты»)"
     fi
   done < <(agent_containers)
   printf '%s' "$nodes"
@@ -278,13 +278,13 @@ write_compose() {
     init: true
     environment:
       # Слушатель обязан быть 0.0.0.0: иначе проброшенный на хост порт не ответит.
-      ZETOMESH_UI_LISTEN: "0.0.0.0:${UI_PORT}"
-      ZETOMESH_UI_NODES: "${nodes}"
-      ZETOMESH_UI_TOKEN: "${UI_TOKEN}"
-      ZETOMESH_UI_API_TOKEN: "${UI_API_TOKEN}"
-      ZETOMESH_UI_POLL_INTERVAL: "${POLL_INTERVAL}"
-      ZETOMESH_UI_LOG_LEVEL: "${LOG_LEVEL}"
-      ZETOMESH_UI_DATA: "/var/lib/zeptomesh-ui"
+      ZEPTOMESH_UI_LISTEN: "0.0.0.0:${UI_PORT}"
+      ZEPTOMESH_UI_NODES: "${nodes}"
+      ZEPTOMESH_UI_TOKEN: "${UI_TOKEN}"
+      ZEPTOMESH_UI_API_TOKEN: "${UI_API_TOKEN}"
+      ZEPTOMESH_UI_POLL_INTERVAL: "${POLL_INTERVAL}"
+      ZEPTOMESH_UI_LOG_LEVEL: "${LOG_LEVEL}"
+      ZEPTOMESH_UI_DATA: "/var/lib/zeptomesh-ui"
       TZ: "${TZ:-UTC}"
     ports:
       # 0.0.0.0: доступ с других машин (панель слушает 0.0.0.0 внутри контейнера).
@@ -411,14 +411,14 @@ install_ui() {
   local nodes=""
   if [[ -n "$NODES_ARG" ]]; then
     nodes="$NODES_ARG"
-  elif [[ -n "${ZETOMESH_UI_NODES:-}" ]]; then
-    nodes="$ZETOMESH_UI_NODES"
+  elif [[ -n "${ZEPTOMESH_UI_NODES:-}" ]]; then
+    nodes="$ZEPTOMESH_UI_NODES"
   fi
 
   if [[ $GATEWAY_MODE -eq 1 ]]; then
     log "режим host-gateway: узлы как http://host.docker.internal:<порт>"
     if [[ -z "$nodes" ]]; then
-      warn "список узлов пуст — задайте --nodes или env ZETOMESH_UI_NODES,"
+      warn "список узлов пуст — задайте --nodes или env ZEPTOMESH_UI_NODES,"
       warn "иначе добавьте узлы позже через вкладку «Агенты» панели"
     fi
   else
@@ -465,7 +465,7 @@ install_ui() {
   логи:       docker compose -f "$(compose_file)" logs -f
   данные (nodes.json): том zeptomesh-ui-data
 
-Список узлов хранится в nodes.json и сеется значением ZETOMESH_UI_NODES только
+Список узлов хранится в nodes.json и сеется значением ZEPTOMESH_UI_NODES только
 при первом старте. Меняйте состав узлов через вкладку «Агенты» панели —
 агенты при этом не перенастраиваются.
 EOF

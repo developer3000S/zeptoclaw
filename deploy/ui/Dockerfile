@@ -55,15 +55,15 @@ COPY --from=build /out/zeptomesh-ui /usr/local/bin/zeptomesh-ui
 # Holds nodes.json — the UI's editable source of truth for mesh membership.
 VOLUME ["/var/lib/zeptomesh-ui"]
 
-# ZETOMESH_UI_LISTEN must be 0.0.0.0 here, unlike a bare-metal install: Docker
+# ZEPTOMESH_UI_LISTEN must be 0.0.0.0 here, unlike a bare-metal install: Docker
 # publishes a port by connecting to the container's routable address, so a
 # listener bound to 127.0.0.1 inside the netns would be unreachable from the
 # host. install-ui.sh sets it explicitly, but the default keeps the image
 # usable on its own.
-ENV ZETOMESH_UI_DATA=/var/lib/zeptomesh-ui \
-    ZETOMESH_UI_LISTEN=0.0.0.0:28090 \
-    ZETOMESH_UI_POLL_INTERVAL=5s \
-    ZETOMESH_UI_LOG_LEVEL=info \
+ENV ZEPTOMESH_UI_DATA=/var/lib/zeptomesh-ui \
+    ZEPTOMESH_UI_LISTEN=0.0.0.0:28090 \
+    ZEPTOMESH_UI_POLL_INTERVAL=5s \
+    ZEPTOMESH_UI_LOG_LEVEL=info \
     TZ=UTC
 
 USER zeptomesh

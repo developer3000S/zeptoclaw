@@ -172,12 +172,12 @@ func main() {
 
 func runNode(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	cfgPath := fs.String("config", envOr("ZETOMESH_CONFIG", ""), "path to YAML configuration")
+	cfgPath := fs.String("config", envOr("ZEPTOMESH_CONFIG", ""), "path to YAML configuration")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *cfgPath == "" {
-		return fmt.Errorf("-config is required (or set ZETOMESH_CONFIG)")
+		return fmt.Errorf("-config is required (or set ZEPTOMESH_CONFIG)")
 	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {

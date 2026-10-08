@@ -13,11 +13,11 @@ package simulator
 // environment overrides exist so a report can be reassembled at a different length
 // or a different seed without editing code:
 //
-//	ZETOMESH_SIM_SIZES   comma-separated mesh sizes       (default 100,500,1000)
-//	ZETOMESH_SIM_STEPS   idle:active:failure heartbeats   (default 40:40:60)
-//	ZETOMESH_SIM_SEED    run seed                         (default 1)
-//	ZETOMESH_SIM_REPORT  write markdown here               (default: stdout only)
-//	ZETOMESH_SIM_CRASH   crash fraction, 0..1             (default 0.10)
+//	ZEPTOMESH_SIM_SIZES   comma-separated mesh sizes       (default 100,500,1000)
+//	ZEPTOMESH_SIM_STEPS   idle:active:failure heartbeats   (default 40:40:60)
+//	ZEPTOMESH_SIM_SEED    run seed                         (default 1)
+//	ZEPTOMESH_SIM_REPORT  write markdown here               (default: stdout only)
+//	ZEPTOMESH_SIM_CRASH   crash fraction, 0..1             (default 0.10)
 
 import (
 	"fmt"
@@ -31,14 +31,14 @@ import (
 )
 
 const (
-	envSizes  = "ZETOMESH_SIM_SIZES"
-	envSteps  = "ZETOMESH_SIM_STEPS"
-	envSeed   = "ZETOMESH_SIM_SEED"
-	envReport = "ZETOMESH_SIM_REPORT"
-	envCrash  = "ZETOMESH_SIM_CRASH"
+	envSizes  = "ZEPTOMESH_SIM_SIZES"
+	envSteps  = "ZEPTOMESH_SIM_STEPS"
+	envSeed   = "ZEPTOMESH_SIM_SEED"
+	envReport = "ZEPTOMESH_SIM_REPORT"
+	envCrash  = "ZEPTOMESH_SIM_CRASH"
 	// envSyncNodes sizes the analytic-versus-exact full-sync cross-check, which the
 	// boundaries section measures at a size where walking the flood is affordable.
-	envSyncNodes = "ZETOMESH_SIM_SYNC_NODES"
+	envSyncNodes = "ZEPTOMESH_SIM_SYNC_NODES"
 )
 
 func TestLoadSim(t *testing.T) {
@@ -103,7 +103,7 @@ func TestLoadSim(t *testing.T) {
 			"make test-load",
 			"# или напрямую, с теми же параметрами:",
 			"go test -mod=mod -tags=load -timeout 60m -run TestLoadSim -v ./internal/simulator/...",
-			fmt.Sprintf("#   ZETOMESH_SIM_SIZES=%s ZETOMESH_SIM_STEPS=%d:%d:%d ZETOMESH_SIM_SEED=%d",
+			fmt.Sprintf("#   ZEPTOMESH_SIM_SIZES=%s ZEPTOMESH_SIM_STEPS=%d:%d:%d ZEPTOMESH_SIM_SEED=%d",
 				strings.Join(itoaAll(sizes), ","), idle, active, failure, seed),
 		},
 	}
@@ -199,7 +199,7 @@ func parseCrash(v string) float64 {
 // costs Θ(N²) deliveries per beat, so the list stops well below the headline sizes; it is
 // a list rather than one number because the error it measures grows with the mesh, and a
 // report quoting only the smallest reading would describe a scale-dependent approximation
-// by its most flattering point. ZETOMESH_SIM_SYNC_NODES accepts a comma-separated list.
+// by its most flattering point. ZEPTOMESH_SIM_SYNC_NODES accepts a comma-separated list.
 func boundarySizes() []int {
 	v := strings.TrimSpace(os.Getenv(envSyncNodes))
 	if v == "" {

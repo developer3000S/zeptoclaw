@@ -23,7 +23,7 @@
 #   (или bin/zeptomesh-node psk)
 zeptomesh_psk: "/1/REPLACE_ME_BASE32_52_CHARS===="
 
-# Bearer-токен админ-API (ZETOMESH_API_TOKEN; читается как api.auth_token_env).
+# Bearer-токен админ-API (ZEPTOMESH_API_TOKEN; читается как api.auth_token_env).
 # Обязательно, если API когда-либо смотрит не на loopback, и при trust_mode=private
 # (иначе узел сам предупреждает: admin_api_unauthenticated).
 zeptomesh_api_token: "REPLACE_ME_long_random_token"

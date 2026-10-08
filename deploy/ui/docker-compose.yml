@@ -10,9 +10,9 @@
 # or run this file directly after building the image:
 #
 #   make docker-build-ui
-#   ZETOMESH_UI_NODES=http://zepto-0:8081 docker compose -f deploy/ui/docker-compose.yml up -d
+#   ZEPTOMESH_UI_NODES=http://zepto-0:8081 docker compose -f deploy/ui/docker-compose.yml up -d
 #
-# install-ui.sh auto-detects ZETOMESH_API_PORT of the zeptomesh-* containers;
+# install-ui.sh auto-detects ZEPTOMESH_API_PORT of the zeptomesh-* containers;
 # this file is the documented static equivalent.
 # ---------------------------------------------------------------------------
 
@@ -29,21 +29,21 @@ services:
     environment:
       # 0.0.0.0 is required inside a container: a published port reaches the
       # container's routable address, not its loopback.
-      ZETOMESH_UI_LISTEN: "0.0.0.0:28090"
+      ZEPTOMESH_UI_LISTEN: "0.0.0.0:28090"
       # Seed list only; nodes.json in the volume is the source of truth and is
       # edited from the UI's "Агенты" tab afterwards.
-      ZETOMESH_UI_NODES: "${ZETOMESH_UI_NODES:-http://zepto-0:8081}"
-      ZETOMESH_UI_TOKEN: "${ZETOMESH_UI_TOKEN:-}"
-      ZETOMESH_UI_API_TOKEN: "${ZETOMESH_UI_API_TOKEN:-${ZETOMESH_API_TOKEN:-}}"
-      ZETOMESH_UI_POLL_INTERVAL: "${ZETOMESH_UI_POLL_INTERVAL:-5s}"
-      ZETOMESH_UI_LOG_LEVEL: "${ZETOMESH_UI_LOG_LEVEL:-info}"
-      ZETOMESH_UI_DATA: "/var/lib/zeptomesh-ui"
+      ZEPTOMESH_UI_NODES: "${ZEPTOMESH_UI_NODES:-http://zepto-0:8081}"
+      ZEPTOMESH_UI_TOKEN: "${ZEPTOMESH_UI_TOKEN:-}"
+      ZEPTOMESH_UI_API_TOKEN: "${ZEPTOMESH_UI_API_TOKEN:-${ZEPTOMESH_API_TOKEN:-}}"
+      ZEPTOMESH_UI_POLL_INTERVAL: "${ZEPTOMESH_UI_POLL_INTERVAL:-5s}"
+      ZEPTOMESH_UI_LOG_LEVEL: "${ZEPTOMESH_UI_LOG_LEVEL:-info}"
+      ZEPTOMESH_UI_DATA: "/var/lib/zeptomesh-ui"
       TZ: "${TZ:-UTC}"
     ports:
-      # Контейнер слушает 0.0.0.0:28090 (ZETOMESH_UI_LISTEN); проброска на тот
+      # Контейнер слушает 0.0.0.0:28090 (ZEPTOMESH_UI_LISTEN); проброска на тот
       # же порт. 0.0.0.0 на хосте — доступ с других машин; для loopback-only
       # перезапустите install-ui.sh или смените биндинг здесь.
-      - "0.0.0.0:${ZETOMESH_UI_PORT:-28090}:28090"
+      - "0.0.0.0:${ZEPTOMESH_UI_PORT:-28090}:28090"
     volumes:
       - zeptomesh-ui-data:/var/lib/zeptomesh-ui
     networks:

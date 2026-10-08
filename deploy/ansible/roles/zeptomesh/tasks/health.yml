@@ -3,7 +3,7 @@
 #
 # Источник истины — HTTP-API самого узла (internal/api/admin.go):
 #   GET /healthz        — без токена; {"status":"ok","peer_id":"12D3K…"}
-#   GET /api/v1/status  — с bearer-токеном (api.auth_token_env = ZETOMESH_API_TOKEN);
+#   GET /api/v1/status  — с bearer-токеном (api.auth_token_env = ZEPTOMESH_API_TOKEN);
 #                         отдаёт Node.Status, поле addrs = Node.DiscoverableAddrs()
 #                         — адреса, которые узел сам себе анонсирует.
 #
@@ -115,7 +115,7 @@
     fail_msg: >-
       Экземпляры без соседей: {{ zeptomesh_isolated_instances | join(', ') }}.
       Типичные причины: разный PSK у узлов (см. docs/RUNBOOK.md §4.3), пустой или
-      неверный ZETOMESH_BOOTSTRAP (нужен /ip4/…/tcp/…/p2p/<peer id>), закрытые
+      неверный ZEPTOMESH_BOOTSTRAP (нужен /ip4/…/tcp/…/p2p/<peer id>), закрытые
       межхостовым файрволом tcp+udp mesh-порты. Для самой первой партии узлов это
       норма — пропустите проверку (-e zeptomesh_require_peers=false), соберите
       Peer ID (collect_peerids.yml) и повторите запуск с

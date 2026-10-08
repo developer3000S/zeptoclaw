@@ -43,7 +43,7 @@ mesh `4001` (tcp+udp QUIC), админ-API `8081` (tcp), метрики `9464` (
 sudo ./install.sh install --mode local --nodes 3
 # подключиться к действующей сети (bootstrap = публичный адрес первого узла):
 sudo ./install.sh install --mode local --nodes 1 \
-     --bootstrap /ip4/203.0.113.10/tcp/4001/p2p/12D3KooW… --psk "$ZETOMESH_PSK"
+     --bootstrap /ip4/203.0.113.10/tcp/4001/p2p/12D3KooW… --psk "$ZEPTOMESH_PSK"
 # docker-вариант той же тройки:
 ./install.sh install --mode docker --nodes 3
 ```
@@ -55,7 +55,7 @@ sudo ./install.sh install --mode local --nodes 1 \
    `/usr/local/bin` (system) или `~/.local/bin` (user).
 2. Рендерит **один общий шаблон** `$DATA_DIR/etc/node.yaml` (на базе
    `configs/node.yaml`); различия экземпляров — только переменные окружения
-   из `$DATA_DIR/<i>/instance.env` (`ZETOMESH_INDEX`, порты, пути).
+   из `$DATA_DIR/<i>/instance.env` (`ZEPTOMESH_INDEX`, порты, пути).
 3. Для каждого экземпляра: `genkey --out $DATA_DIR/<i>/keys/peer.key`
    (права 0600/0700), Peer ID в `peer_id.txt`.
 4. Экземплярам `1..N-1` в `instance.env` дописывается bootstrap экземпляра 0
@@ -83,7 +83,7 @@ sudo ./install.sh install --mode local --nodes 1 \
 
 Образ: многоэтапная сборка `golang:1.26-bookworm` → `debian:bookworm-slim`,
 non-root (`zeptomesh`), шаблон конфига в `/etc/zeptomesh/node.yaml`,
-`ENV ZETOMESH_API_HOST=0.0.0.0` (иначе published-порт недоступен извне
+`ENV ZEPTOMESH_API_HOST=0.0.0.0` (иначе published-порт недоступен извне
 контейнера; наружу API всё равно публикуется на 127.0.0.1 хоста).
 
 ---
@@ -96,15 +96,15 @@ GOFLAGS=-mod=mod go build -trimpath -o bin/ ./cmd/zeptomesh-node
 DATA=$HOME/.local/share/zeptomesh; mkdir -p "$DATA/0" "$DATA/etc"
 bin/zeptomesh-node genkey --out "$DATA/0/keys/peer.key" > "$DATA/0/peer_id.txt"
 cp configs/node.yaml "$DATA/etc/node.yaml"   # или готовый профиль из configs/examples
-ZETOMESH_DATA="$DATA" ZETOMESH_INDEX=0 bin/zeptomesh-node run -config "$DATA/etc/node.yaml"
+ZEPTOMESH_DATA="$DATA" ZEPTOMESH_INDEX=0 bin/zeptomesh-node run -config "$DATA/etc/node.yaml"
 ```
 
 Второй экземпляр на том же хосте — другой индекс, порты и каталог данных:
 
 ```bash
 bin/zeptomesh-node genkey --out "$DATA/1/keys/peer.key" > "$DATA/1/peer_id.txt"
-ZETOMESH_DATA="$DATA" ZETOMESH_INDEX=1 \
-ZETOMESH_MESH_PORT=4002 ZETOMESH_API_PORT=8082 ZETOMESH_PROM_LISTEN=127.0.0.1:9465 \
+ZEPTOMESH_DATA="$DATA" ZEPTOMESH_INDEX=1 \
+ZEPTOMESH_MESH_PORT=4002 ZEPTOMESH_API_PORT=8082 ZEPTOMESH_PROM_LISTEN=127.0.0.1:9465 \
 bin/zeptomesh-node run -config "$DATA/etc/node.yaml"   # тот же шаблон конфига
 ```
 
@@ -118,10 +118,10 @@ bin/zeptomesh-node run -config "$DATA/etc/node.yaml"   # тот же шабло�
 
 Экземпляр `i` получает порты от базы: `mesh 4001+i`, `API 8081+i`,
 `метрики 9464+i`. В конфигу шаблона порт экземпляра задаётся переменными
-`ZETOMESH_MESH_PORT` / `ZETOMESH_API_PORT` (слушатель метрик —
-`ZETOMESH_PROM_LISTEN` адресом целиком); `install.sh` считает их от баз,
-которые сдвигаются переменными `ZETOMESH_BASE_MESH_PORT`,
-`ZETOMESH_BASE_API_PORT`, `ZETOMESH_BASE_PROM_PORT`.
+`ZEPTOMESH_MESH_PORT` / `ZEPTOMESH_API_PORT` (слушатель метрик —
+`ZEPTOMESH_PROM_LISTEN` адресом целиком); `install.sh` считает их от баз,
+которые сдвигаются переменными `ZEPTOMESH_BASE_MESH_PORT`,
+`ZEPTOMESH_BASE_API_PORT`, `ZEPTOMESH_BASE_PROM_PORT`.
 Firewall между хостами: откройте **tcp+udp** `4001+i` (QUIC и TCP резервный).
 API и метрики наружу не открывайте — доступ через SSH-туннель:
 
@@ -131,21 +131,21 @@ ssh -L 8081:127.0.0.1:8081 host '…'
 
 | Переменная | Что задаёт |
 |---|---|
-| `ZETOMESH_DATA` | корень data_dir (в шаблоне `…/${ZETOMESH_INDEX:-0}`) |
-| `ZETOMESH_INDEX` | номер экземпляра (имя `zepto-<i>`, пути) |
-| `ZETOMESH_MESH_PORT` / `ZETOMESH_API_PORT` | порты mesh и API этого экземпляра |
-| `ZETOMESH_PROM_LISTEN` | адрес слушателя метрик (`host:port`; пусто → выключен) |
-| `ZETOMESH_BASE_MESH_PORT` / `ZETOMESH_BASE_API_PORT` / `ZETOMESH_BASE_PROM_PORT` | базы портов для `install.sh` |
-| `ZETOMESH_API_HOST` | bind API |
-| `ZETOMESH_PSK` | закрытая сеть (одинакова на всех узлах сети!) |
-| `ZETOMESH_BOOTSTRAP` | через запятую — дописывается в `discovery.bootstrap` |
-| `ZETOMESH_TRUST_MODE` / `ZETOMESH_PICO_MODE` / `ZETOMESH_LOG_LEVEL` | политики/агент/логи (`PICO_MODE` — `stub` \| `binary` \| `http` \| `ollama`) |
-| `ZETOMESH_PICO_MODEL` | модель по умолчанию локального агента (`picoclaw.model`, ТЗ 10.3; передаётся как `--model` только в режиме `binary`) |
-| `ZETOMESH_LLM_ENDPOINTS` | через запятую — дописывается в `brain.endpoints` (Ollama-совместимые base_url; для `picoclaw.mode: ollama`) |
-| `ZETOMESH_LLM_API_KEY` | ключ для всех эндпоинтов из `ZETOMESH_LLM_ENDPOINTS` (подставляется им как `api_key_env`); нужен шлюзам, которые аутентифицируют `/api/tags` |
-| `ZETOMESH_PICO_WORKSPACE` | корень рабочих каталогов задач (`picoclaw.workspace_root`; пусто → `<data_dir>/picoclaw/workspaces`) |
-| `ZETOMESH_PUB_IP` | публичный адрес для `announce` (WAN-профиль) |
-| `ZETOMESH_API_TOKEN` | bearer-токен API (если задан `api.auth_token_env`) |
+| `ZEPTOMESH_DATA` | корень data_dir (в шаблоне `…/${ZEPTOMESH_INDEX:-0}`) |
+| `ZEPTOMESH_INDEX` | номер экземпляра (имя `zepto-<i>`, пути) |
+| `ZEPTOMESH_MESH_PORT` / `ZEPTOMESH_API_PORT` | порты mesh и API этого экземпляра |
+| `ZEPTOMESH_PROM_LISTEN` | адрес слушателя метрик (`host:port`; пусто → выключен) |
+| `ZEPTOMESH_BASE_MESH_PORT` / `ZEPTOMESH_BASE_API_PORT` / `ZEPTOMESH_BASE_PROM_PORT` | базы портов для `install.sh` |
+| `ZEPTOMESH_API_HOST` | bind API |
+| `ZEPTOMESH_PSK` | закрытая сеть (одинакова на всех узлах сети!) |
+| `ZEPTOMESH_BOOTSTRAP` | через запятую — дописывается в `discovery.bootstrap` |
+| `ZEPTOMESH_TRUST_MODE` / `ZEPTOMESH_PICO_MODE` / `ZEPTOMESH_LOG_LEVEL` | политики/агент/логи (`PICO_MODE` — `stub` \| `binary` \| `http` \| `ollama`) |
+| `ZEPTOMESH_PICO_MODEL` | модель по умолчанию локального агента (`picoclaw.model`, ТЗ 10.3; передаётся как `--model` только в режиме `binary`) |
+| `ZEPTOMESH_LLM_ENDPOINTS` | через запятую — дописывается в `brain.endpoints` (Ollama-совместимые base_url; для `picoclaw.mode: ollama`) |
+| `ZEPTOMESH_LLM_API_KEY` | ключ для всех эндпоинтов из `ZEPTOMESH_LLM_ENDPOINTS` (подставляется им как `api_key_env`); нужен шлюзам, которые аутентифицируют `/api/tags` |
+| `ZEPTOMESH_PICO_WORKSPACE` | корень рабочих каталогов задач (`picoclaw.workspace_root`; пусто → `<data_dir>/picoclaw/workspaces`) |
+| `ZEPTOMESH_PUB_IP` | публичный адрес для `announce` (WAN-профиль) |
+| `ZEPTOMESH_API_TOKEN` | bearer-токен API (если задан `api.auth_token_env`) |
 | `PICOCLAW_MESH_PICO_TOKEN` | токен Pico Protocol для `picoclaw.mode: http` |
 
 ---
@@ -160,7 +160,7 @@ ssh -L 8081:127.0.0.1:8081 host '…'
 |---|---|---|
 | `configs/node.yaml` (шаблон install.sh) | базовый, любой хост | env-параметризован, `trust_mode` по умолчанию |
 | `configs/examples/lan.yaml` | узлы в одном L2 | mDNS вкл, bootstrap `[]`, быстрые heartbeat, `accept_external_tasks: true`, `trust limited` |
-| `configs/examples/wan.yaml` | узлы в Интернете | mDNS выкл, `announce: ZETOMESH_PUB_IP`, DHT `server`, `advertise_as_relay` по желанию, `accept_external_tasks: false`, rate-limit строже, allow/blocked-файлы |
+| `configs/examples/wan.yaml` | узлы в Интернете | mDNS выкл, `announce: ZEPTOMESH_PUB_IP`, DHT `server`, `advertise_as_relay` по желанию, `accept_external_tasks: false`, rate-limit строже, allow/blocked-файлы |
 
 ### Closed network (PSK)
 
@@ -197,7 +197,7 @@ allow-list skills); `private` — только allow-список. `min_trust_fo
    `announce`, DHT `server`; при желании — `relay.advertise_as_relay: true`
    для пиров за строгим NAT).
 2. Его адрес: `/ip4/<PUB_IP>/tcp/4001/p2p/<Peer ID из peer_id.txt>`.
-3. Остальным узлам: `ZETOMESH_BOOTSTRAP=<тот адрес>` (несколько — через
+3. Остальным узлам: `ZEPTOMESH_BOOTSTRAP=<тот адрес>` (несколько — через
    запятую). Дальше PEX + gossip + DHT сами распространяют состав.
 
 ---
@@ -206,11 +206,11 @@ allow-list skills); `private` — только allow-список. `min_trust_fo
 
 ```bash
 # якорь (host-a, 203.0.113.10):
-sudo ZETOMESH_PSK=… ./install.sh install --mode local --nodes 1
+sudo ZEPTOMESH_PSK=… ./install.sh install --mode local --nodes 1
 BOOT="/ip4/203.0.113.10/tcp/4001/p2p/$(cat /var/lib/zeptomesh/0/peer_id.txt)"
 
 # узлы-исполнители (host-b/c, за NAT):
-sudo ZETOMESH_PSK=<тот же> ./install.sh install --mode local --nodes 2 \
+sudo ZEPTOMESH_PSK=<тот же> ./install.sh install --mode local --nodes 2 \
      --bootstrap "$BOOT" --trust-mode limited
 ```
 
@@ -246,7 +246,7 @@ ansible-playbook -i inventory.yml --check --diff deploy.yml --ask-vault-pass \
 ansible-playbook -i inventory.yml deploy.yml --ask-vault-pass \
     --limit anchors -e zeptomesh_require_peers=false
 ansible-playbook -i inventory.yml collect_peerids.yml --ask-vault-pass --limit anchors
-cat collected/mesh_nodes.bootstrap.txt        # готовое ZETOMESH_BOOTSTRAP
+cat collected/mesh_nodes.bootstrap.txt        # готовое ZEPTOMESH_BOOTSTRAP
 
 # остальные узлы: роль подставит точки входа сама (zeptomesh_auto_bootstrap)
 ansible-playbook -i inventory.yml deploy.yml --ask-vault-pass
@@ -261,7 +261,7 @@ ansible-playbook -i inventory.yml deploy.yml --ask-vault-pass
 | 3. Сгенерировать и доставить конфигурацию | `config.yml` + `templates/instance.env.j2` (env-файл на экземпляр, секреты из vault) |
 | 4. Запустить контейнер | `image.yml` + `run.yml`; тег образа закреплён (`zeptomesh_image_tag: "0.1.0"`), `latest` не используется |
 | 5. Проверить здоровье узла | `health.yml` — `GET /healthz` (ожидание с ретраями) и `GET /api/v1/status` с bearer-токеном |
-| 6. Собрать начальные Peer ID | `collect.yml` + `templates/peerids.{yml,csv}.j2`, `bootstrap.txt` — готовое значение `ZETOMESH_BOOTSTRAP` |
+| 6. Собрать начальные Peer ID | `collect.yml` + `templates/peerids.{yml,csv}.j2`, `bootstrap.txt` — готовое значение `ZEPTOMESH_BOOTSTRAP` |
 
 `collect_peerids.yml` ничего не устанавливает и не перезапускает: он только
 опрашивает уже работающие узлы (`zeptomesh_stage=collect`), поэтому его можно
@@ -297,7 +297,7 @@ RUNBOOK §3–4; бэкап ключей — RUNBOOK §5 (ключ `peer.key` к
 ## 8. Безопасность развёртывания (чеклист)
 
 - [ ] PSK сгенерирован (`zeptomesh-node psk`), одинаков у узлов одной сети, не в git.
-- [ ] API (`8081+i`) и метрики (`9464+i`) не опубликованы наружу; при необходимости — `ZETOMESH_API_TOKEN`.
+- [ ] API (`8081+i`) и метрики (`9464+i`) не опубликованы наружу; при необходимости — `ZEPTOMESH_API_TOKEN`.
 - [ ] `accept_external_tasks: false` на узлах, торчащих в Интернет, пока не решено, кому служить.
 - [ ] `trust_mode: limited|private` + allow/blocked-файлы для WAN.
 - [ ] `allow_shell: false`, `allow_network_tools: false` по умолчанию (ТЗ 11.4).

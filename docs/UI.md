@@ -20,7 +20,7 @@
 
 ```text
 браузер ──HTTP──► BFF (Go: cmd/zeptomesh-ui, статика web/ через go:embed)
-                   │  ├ конфиг узлов: env ZETOMESH_UI_NODES + nodes.json (редактируется из UI)
+                   │  ├ конфиг узлов: env ZEPTOMESH_UI_NODES + nodes.json (редактируется из UI)
                    │  └ фоновый опрос узлов каждые N секунд → кэш-снимок сети
                    └──HTTP/JSON──► админ-API каждого узла (healthz/status/peers/tasks/…)
 ```
@@ -29,7 +29,7 @@ BFF нужен по трём причинам, проверенным по ко�
 
 1. **В админ-API нет CORS** (`internal/api/admin.go` его не отдаёт) — браузер не
    сможет ходить в API узлов напрямую.
-2. **Токен `ZETOMESH_API_TOKEN` не должен попадать в браузер** — BFF хранит его
+2. **Токен `ZEPTOMESH_API_TOKEN` не должен попадать в браузер** — BFF хранит его
    у себя и прокладывает в заголовке.
 3. Именно BFF объединяет данные нескольких узлов в **один граф сети**.
 
@@ -71,14 +71,14 @@ install-ui.sh                         # независимый инсталля�
 
 | Env | Назначение | По умолчанию |
 |---|---|---|
-| `ZETOMESH_UI_LISTEN` | адрес слушателя | `127.0.0.1:28090` |
-| `ZETOMESH_UI_NODES` | seed-список узлов через запятую (`http://zepto-0:33498,...`) | пусто |
-| `ZETOMESH_UI_NODES_FILE` | persistent-список узлов (JSON: `[{name,url,token?}]`), пишется из UI | `<data>/nodes.json` |
-| `ZETOMESH_UI_TOKEN` | токен доступа к UI (пусто — без авторизации) | пусто |
-| `ZETOMESH_UI_API_TOKEN` | bearer-токен для узлов по умолчанию (если у узла нет своего) | пусто |
-| `ZETOMESH_UI_POLL_INTERVAL` | интервал фонового опроса узлов | `5s` |
-| `ZETOMESH_UI_DATA` | каталог для nodes.json | `./zeptomesh-ui-data` |
-| `ZETOMESH_UI_LOG_LEVEL` | уровень логов | `info` |
+| `ZEPTOMESH_UI_LISTEN` | адрес слушателя | `127.0.0.1:28090` |
+| `ZEPTOMESH_UI_NODES` | seed-список узлов через запятую (`http://zepto-0:33498,...`) | пусто |
+| `ZEPTOMESH_UI_NODES_FILE` | persistent-список узлов (JSON: `[{name,url,token?}]`), пишется из UI | `<data>/nodes.json` |
+| `ZEPTOMESH_UI_TOKEN` | токен доступа к UI (пусто — без авторизации) | пусто |
+| `ZEPTOMESH_UI_API_TOKEN` | bearer-токен для узлов по умолчанию (если у узла нет своего) | пусто |
+| `ZEPTOMESH_UI_POLL_INTERVAL` | интервал фонового опроса узлов | `5s` |
+| `ZEPTOMESH_UI_DATA` | каталог для nodes.json | `./zeptomesh-ui-data` |
+| `ZEPTOMESH_UI_LOG_LEVEL` | уровень логов | `info` |
 
 При старте: если `nodes.json` существует — он главный; иначе seed из env
 разворачивается в файл.
@@ -138,7 +138,7 @@ API-адреса неизвестны; граф показывает «что в
 /api/v1/nodes` `{name,url,token?}` → persist в nodes.json, `DELETE
 /api/v1/nodes/{name}`.
 
-Авторизация: при заданном `ZETOMESH_UI_TOKEN` все `/api/v1/*` (кроме
+Авторизация: при заданном `ZEPTOMESH_UI_TOKEN` все `/api/v1/*` (кроме
 `/healthz`) отдают 401 без `Authorization: Bearer`; статика отдаётся открыто,
 токен хранится в localStorage и подставляется в заголовки.
 
@@ -188,8 +188,8 @@ non-root пользователь `zeptomesh`, `VOLUME /var/lib/zeptomesh-ui` (n
 `EXPOSE 28090`, `HEALTHCHECK` по `/healthz`.
 
 `deploy/ui/docker-compose.yml` — отдельный проект `name: zeptomesh-ui`, сервис
-`zeptomesh-ui`, порт `0.0.0.0:${ZETOMESH_UI_PORT:-28090}:28090` (контейнер
-слушает `ZETOMESH_UI_LISTEN=0.0.0.0:28090`), volume и
+`zeptomesh-ui`, порт `0.0.0.0:${ZEPTOMESH_UI_PORT:-28090}:28090` (контейнер
+слушает `ZEPTOMESH_UI_LISTEN=0.0.0.0:28090`), volume и
 подключение к сети агентов как `external: name: zeptomesh_default`.
 
 `install-ui.sh` (инсталлятор, независимый от `install.sh`):
@@ -199,8 +199,8 @@ non-root пользователь `zeptomesh`, `VOLUME /var/lib/zeptomesh-ui` (n
   host-gateway`, узлы через `http://host.docker.internal:<порт>` — для
   локальной/systemd установки агентов);
 - **автоконфигурация адресов узлов** из работающего стека: для каждого
-  контейнера `zeptomesh-*` читает env `ZETOMESH_API_PORT` через `docker inspect`
-  и формирует `ZETOMESH_UI_NODES=http://zepto-0:<порт>,…`;
+  контейнера `zeptomesh-*` читает env `ZEPTOMESH_API_PORT` через `docker inspect`
+  и формирует `ZEPTOMESH_UI_NODES=http://zepto-0:<порт>,…`;
 - собирает образ и поднимает стек; печатает URL `http://127.0.0.1:28090`;
 - управление: `install-ui.sh status|start|stop|uninstall` — трогает только
   UI-контейнер, агенты не затрагивает.
@@ -209,7 +209,7 @@ non-root пользователь `zeptomesh`, `VOLUME /var/lib/zeptomesh-ui` (n
 
 - Токены узлов хранятся только в BFF; `GET /api/v1/nodes` не отдаёт их в
   браузер.
-- Опциональный `ZETOMESH_UI_TOKEN` на доступ к API UI; статика доступна.
+- Опциональный `ZEPTOMESH_UI_TOKEN` на доступ к API UI; статика доступна.
 - BFF слушает `127.0.0.1` по умолчанию (как админ-API агентов) — доступ только с
   хоста, если не перенастроить.
 - Прокси — только к узлам из вайт-листа (nodes.json); новые узлы добавляет
@@ -239,7 +239,7 @@ non-root пользователь `zeptomesh`, `VOLUME /var/lib/zeptomesh-ui` (n
 
 ```bash
 make build-ui
-ZETOMESH_UI_NODES=http://127.0.0.1:8081,http://127.0.0.1:8082 ./bin/zeptomesh-ui
+ZEPTOMESH_UI_NODES=http://127.0.0.1:8081,http://127.0.0.1:8082 ./bin/zeptomesh-ui
 # UI: http://127.0.0.1:28090
 ```
 

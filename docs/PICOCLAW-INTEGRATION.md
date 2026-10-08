@@ -207,7 +207,7 @@ picoclaw agent -m <prompt> [-s <session_key>] [--model <picoclaw.model>] <picocl
 Имя `http` исторически из ТЗ (внутренний API «gRPC или HTTP/JSON»). Фактически
 это WebSocket-клиент: у PicoClaw нет эндпоинта для постановки задачи, и
 адаптер его не выдумывает. Порты: gateway-канал Pico — 18790 (вниманию: это не
-`ZETOMESH_API_PORT` админ-API mesh'а и не порт лаунчера).
+`ZEPTOMESH_API_PORT` админ-API mesh'а и не порт лаунчера).
 
 ---
 
@@ -349,7 +349,7 @@ picoclaw:
 
 Ключевое правило: **секреты не хранятся в `node.yaml`.** Для PicoClaw они
 приходят из окружения демона (`PICOCLAW_*`, ключи провайдеров), для mesh —
-через `api.auth_token_env`, `security.*_peers_file`, `ZETOMESH_PSK`.
+через `api.auth_token_env`, `security.*_peers_file`, `ZEPTOMESH_PSK`.
 
 ---
 

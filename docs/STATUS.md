@@ -502,7 +502,7 @@ content-addressed артефакты sha256 (`StoreArtifact/LoadArtifact/Artifac
   `rotate`, `revoke`, `rebinds`.
 - Конфигурация [12.1]: `internal/config` — дефолты, YAML-слияние,
   `${VAR:-default}` (+вложенные ссылки, `config_test.go`), `Validate()` с
-  выводом относительных путей и `applyEnvOverrides` (`ZETOMESH_BOOTSTRAP`).
+  выводом относительных путей и `applyEnvOverrides` (`ZEPTOMESH_BOOTSTRAP`).
 
 ### Сборка и развёртывание [15/22]
 
@@ -562,7 +562,7 @@ content-addressed артефакты sha256 (`StoreArtifact/LoadArtifact/Artifac
   `latest` запрещён документально), PSK и API-токены — только из
   `ansible-vault` (`.vault.example.yml`). Шаг 6 собирает начальные адреса через
   `GET /api/v1/status` (поле `addrs`) и складывает их в `mesh_nodes.bootstrap.txt`
-  — готовое значение `ZETOMESH_BOOTSTRAP` для второй волны; `zeptomesh_auto_bootstrap`
+  — готовое значение `ZEPTOMESH_BOOTSTRAP` для второй волны; `zeptomesh_auto_bootstrap`
   подставляет точки входа остальным узлам сам. Проверено на этой машине:
   `ansible-playbook --syntax-check` обоих плейбуков и `ansible-lint
   --profile production` → «0 failure(s), 0 warning(s) on 15 files»; живой
@@ -579,7 +579,7 @@ content-addressed артефакты sha256 (`StoreArtifact/LoadArtifact/Artifac
 | `internal/security/security_test.go` | генерация/загрузка идентичности, подписи task/result/caps/ack, отказ неподписанным и подписанным не тем узлом, trust-политика, limiter (в т.ч. `Wait`: ждёт токен, уважает дедлайн и не тратит его при отмене), audit JSONL |
 | `internal/p2p/service_test.go` | in-process libp2p: ответы RPC/задач/результатов на малых и больших фреймах (регрессия на premature stream reset), отказ oversized-кадра и здоровье сервера после него, нотификаторы соединений |
 | `internal/p2p/host_psk_test.go` | регрессия на дефект, найденный живой приёмкой E.6: узел с PSK не стартовал вообще (QUIC-транспорт go-libp2p отказывается строиться под `PrivateNetwork`). Теперь: `tcpOnlyAddrs` отбрасывает quic/quic-v1/webtransport из listen/announce (остальное сохраняет, невалидное — на совести libp2p); под PSK хост поднимается TCP-only; два пира с одной PSK соединяются, с разными — нет (живой handshake) |
-| `internal/config/config_test.go` | expandEnv (вложенные default'ы), `ZETOMESH_BOOTSTRAP`, раскрытие поставляемого шаблона, `picoclaw.model` — литерал и `${ZETOMESH_PICO_MODEL:-}` (пустая переменная обязана схлопываться в «нет мнения») |
+| `internal/config/config_test.go` | expandEnv (вложенные default'ы), `ZEPTOMESH_BOOTSTRAP`, раскрытие поставляемого шаблона, `picoclaw.model` — литерал и `${ZEPTOMESH_PICO_MODEL:-}` (пустая переменная обязана схлопываться в «нет мнения») |
 | `internal/picoclaw/cli_test.go` | аргументы CLI-адаптера против фиктивного исполняемого файла, печатающего собственный argv: модель узла как ровно один `--model` (второй сделал бы выбор CLI неопределённым), `extra_args` хвостом после модели, переопределение `Request.Model` заменяет default, отсутствие `--model` при пустой/пробельной конфигурации, порядок относительно `-s`, шаблон промпта вместе с моделью, `Model()`/`ModelOf()` (stub его не реализует → mesh молчит) |
 | `internal/tasks/search_relay_test.go` | навыки-покрытие, дедуп PeerRecord, wire-roundtrip SkillLookup (full_refresh/relay_budget/visited) |
 | `internal/tasks/decomposition_test.go` | декомпозиция/агрегация сквозняком на живом узле: план → дети через обычный конвейер → один подписанный итог с digest'ом и порядком плана; журнал parent/child; ретрай retryable-ребёна ровно один раз и оседание non-retryable без ретрая; отказ заведомо неверных планов (размер, пустая инструкция, `allow_subtasks=false`, исчерпанный TTL) |

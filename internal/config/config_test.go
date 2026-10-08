@@ -34,26 +34,26 @@ func TestExpandEnv(t *testing.T) {
 }
 
 // The multi-instance template nests references:
-// data_dir: ${ZETOMESH_DATA:-./zeptomesh-data}/${ZETOMESH_INDEX:-0}. The old
+// data_dir: ${ZEPTOMESH_DATA:-./zeptomesh-data}/${ZEPTOMESH_INDEX:-0}. The old
 // first-'}' scan cut the expression early and leaked "}" into names.
 func TestExpandEnvNestedDefaults(t *testing.T) {
-	t.Setenv("ZETOMESH_DATA", "/srv/zm")
-	t.Setenv("ZETOMESH_INDEX", "3")
-	in := "name: ${ZETOMESH_NAME:-zepto-${ZETOMESH_INDEX:-0}}"
+	t.Setenv("ZEPTOMESH_DATA", "/srv/zm")
+	t.Setenv("ZEPTOMESH_INDEX", "3")
+	in := "name: ${ZEPTOMESH_NAME:-zepto-${ZEPTOMESH_INDEX:-0}}"
 	want := "name: zepto-3"
 	if got := expandEnv(in); got != want {
 		t.Fatalf("expandEnv(%q) = %q, want %q", in, got, want)
 	}
-	in2 := "dir: ${ZETOMESH_DATA:-./zeptomesh-data}/${ZETOMESH_INDEX:-0}/keys"
+	in2 := "dir: ${ZEPTOMESH_DATA:-./zeptomesh-data}/${ZEPTOMESH_INDEX:-0}/keys"
 	want2 := "dir: /srv/zm/3/keys"
 	if got := expandEnv(in2); got != want2 {
 		t.Fatalf("expandEnv(%q) = %q, want %q", in2, got, want2)
 	}
 
 	// With nothing set, both defaults apply inside out.
-	os.Unsetenv("ZETOMESH_DATA")
-	os.Unsetenv("ZETOMESH_INDEX")
-	in3 := "${ZETOMESH_DATA:-./zeptomesh-data}/${ZETOMESH_INDEX:-0}"
+	os.Unsetenv("ZEPTOMESH_DATA")
+	os.Unsetenv("ZEPTOMESH_INDEX")
+	in3 := "${ZEPTOMESH_DATA:-./zeptomesh-data}/${ZEPTOMESH_INDEX:-0}"
 	if got := expandEnv(in3); got != "./zeptomesh-data/0" {
 		t.Fatalf("expandEnv(%q) = %q, want ./zeptomesh-data/0", in3, got)
 	}
@@ -66,7 +66,7 @@ func TestLoadAppliesBootstrapFromEnv(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ZETOMESH_BOOTSTRAP", "/ip4/10.0.0.1/tcp/4001/p2p/A, /dns4/b.example/tcp/4001/p2p/B")
+	t.Setenv("ZEPTOMESH_BOOTSTRAP", "/ip4/10.0.0.1/tcp/4001/p2p/A, /dns4/b.example/tcp/4001/p2p/B")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -82,7 +82,7 @@ func TestLoadAppliesBootstrapFromEnv(t *testing.T) {
 	}
 }
 
-// ZETOMESH_LLM_ENDPOINTS feeds brain.endpoints the same way bootstrap feeds
+// ZEPTOMESH_LLM_ENDPOINTS feeds brain.endpoints the same way bootstrap feeds
 // discovery.bootstrap: a single mounted config template serves every node of a
 // mesh, each pointing at the operator's Ollama-compatible gateways.
 func TestLoadAppliesLLMEndpointsFromEnv(t *testing.T) {
@@ -92,7 +92,7 @@ func TestLoadAppliesLLMEndpointsFromEnv(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ZETOMESH_LLM_ENDPOINTS", "http://172.17.0.1:8080/, http://10.0.0.5:11434,http://172.17.0.1:8080")
+	t.Setenv("ZEPTOMESH_LLM_ENDPOINTS", "http://172.17.0.1:8080/, http://10.0.0.5:11434,http://172.17.0.1:8080")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -111,7 +111,7 @@ func TestLoadAppliesLLMEndpointsFromEnv(t *testing.T) {
 	}
 }
 
-// ZETOMESH_LLM_API_KEY pairs with ZETOMESH_LLM_ENDPOINTS: a gateway that
+// ZEPTOMESH_LLM_API_KEY pairs with ZEPTOMESH_LLM_ENDPOINTS: a gateway that
 // authenticates would reject the pool's probe as a dead endpoint without it,
 // so every env-added endpoint must carry the key's env name.
 func TestLoadAppliesLLMAPIKeyFromEnv(t *testing.T) {
@@ -121,8 +121,8 @@ func TestLoadAppliesLLMAPIKeyFromEnv(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ZETOMESH_LLM_ENDPOINTS", "http://172.17.0.1:8080")
-	t.Setenv("ZETOMESH_LLM_API_KEY", "foa_live_example")
+	t.Setenv("ZEPTOMESH_LLM_ENDPOINTS", "http://172.17.0.1:8080")
+	t.Setenv("ZEPTOMESH_LLM_API_KEY", "foa_live_example")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -130,8 +130,8 @@ func TestLoadAppliesLLMAPIKeyFromEnv(t *testing.T) {
 	if len(cfg.Brain.Endpoints) != 1 {
 		t.Fatalf("brain endpoints = %v, want 1", cfg.Brain.Endpoints)
 	}
-	if got := cfg.Brain.Endpoints[0].APIKeyEnv; got != "ZETOMESH_LLM_API_KEY" {
-		t.Fatalf("api_key_env = %q, want ZETOMESH_LLM_API_KEY (the pool resolves the key from it)", got)
+	if got := cfg.Brain.Endpoints[0].APIKeyEnv; got != "ZEPTOMESH_LLM_API_KEY" {
+		t.Fatalf("api_key_env = %q, want ZEPTOMESH_LLM_API_KEY (the pool resolves the key from it)", got)
 	}
 }
 
@@ -144,8 +144,8 @@ func TestLoadWithoutLLMAPIKeyLeavesEndpointsKeyless(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ZETOMESH_LLM_ENDPOINTS", "http://10.0.0.5:11434")
-	t.Setenv("ZETOMESH_LLM_API_KEY", "")
+	t.Setenv("ZEPTOMESH_LLM_ENDPOINTS", "http://10.0.0.5:11434")
+	t.Setenv("ZEPTOMESH_LLM_API_KEY", "")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -158,7 +158,7 @@ func TestLoadWithoutLLMAPIKeyLeavesEndpointsKeyless(t *testing.T) {
 // The shipped template must survive expansion with an empty environment:
 // one broken expression makes every instance misconfigured the same way.
 func TestDefaultTemplateExpands(t *testing.T) {
-	for _, v := range []string{"ZETOMESH_DATA", "ZETOMESH_INDEX", "ZETOMESH_NAME", "ZETOMESH_MESH_PORT", "ZETOMESH_API_PORT", "ZETOMESH_PROM_LISTEN", "ZETOMESH_BOOTSTRAP", "ZETOMESH_PSK"} {
+	for _, v := range []string{"ZEPTOMESH_DATA", "ZEPTOMESH_INDEX", "ZEPTOMESH_NAME", "ZEPTOMESH_MESH_PORT", "ZEPTOMESH_API_PORT", "ZEPTOMESH_PROM_LISTEN", "ZEPTOMESH_BOOTSTRAP", "ZEPTOMESH_PSK"} {
 		t.Setenv(v, "")
 	}
 	tmpl := filepath.Join("..", "..", "configs", "node.yaml")
@@ -184,14 +184,14 @@ func TestDefaultTemplateExpands(t *testing.T) {
 // typo in a key or a value Normalize rejects is a real defect. Validate also
 // normalises skill_exchange, so this is where those defaults get pinned.
 func TestShippedConfigsLoadAndValidate(t *testing.T) {
-	for _, v := range []string{"ZETOMESH_DATA", "ZETOMESH_INDEX", "ZETOMESH_NAME", "ZETOMESH_MESH_PORT",
-		"ZETOMESH_API_PORT", "ZETOMESH_PROM_PORT", "ZETOMESH_PROM_LISTEN", "ZETOMESH_BOOTSTRAP",
-		"ZETOMESH_PSK", "ZETOMESH_PICO_MODE", "ZETOMESH_PICO_BIN", "ZETOMESH_PICO_CONFIG",
-		"ZETOMESH_PICO_WS_URL", "ZETOMESH_PICO_MODEL", "ZETOMESH_PICO_WORKSPACE", "ZETOMESH_NODES"} {
+	for _, v := range []string{"ZEPTOMESH_DATA", "ZEPTOMESH_INDEX", "ZEPTOMESH_NAME", "ZEPTOMESH_MESH_PORT",
+		"ZEPTOMESH_API_PORT", "ZEPTOMESH_PROM_PORT", "ZEPTOMESH_PROM_LISTEN", "ZEPTOMESH_BOOTSTRAP",
+		"ZEPTOMESH_PSK", "ZEPTOMESH_PICO_MODE", "ZEPTOMESH_PICO_BIN", "ZEPTOMESH_PICO_CONFIG",
+		"ZEPTOMESH_PICO_WS_URL", "ZEPTOMESH_PICO_MODEL", "ZEPTOMESH_PICO_WORKSPACE", "ZEPTOMESH_NODES"} {
 		t.Setenv(v, "")
 	}
 	dir := t.TempDir()
-	t.Setenv("ZETOMESH_DATA", filepath.Join(dir, "data"))
+	t.Setenv("ZEPTOMESH_DATA", filepath.Join(dir, "data"))
 
 	for _, name := range []string{"node.yaml", "examples/lan.yaml", "examples/wan.yaml", "examples/dev-node.yaml"} {
 		t.Run(name, func(t *testing.T) {
@@ -244,9 +244,9 @@ func TestPicoClawModelConfig(t *testing.T) {
 		t.Fatalf("model = %q", cfg.PicoClaw.Model)
 	}
 
-	t.Setenv("ZETOMESH_PICO_MODEL", "llm-env")
+	t.Setenv("ZEPTOMESH_PICO_MODEL", "llm-env")
 	body = "node:\n  name: t\n  data_dir: " + filepath.Join(dir, "d2") +
-		"\npicoclaw:\n  model: ${ZETOMESH_PICO_MODEL:-}\n"
+		"\npicoclaw:\n  model: ${ZEPTOMESH_PICO_MODEL:-}\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestPicoClawModelConfig(t *testing.T) {
 		t.Fatalf("expanded model = %q", cfg.PicoClaw.Model)
 	}
 	// An unset variable must collapse to "no opinion", not the literal text.
-	t.Setenv("ZETOMESH_PICO_MODEL", "")
+	t.Setenv("ZEPTOMESH_PICO_MODEL", "")
 	cfg, err = Load(path)
 	if err != nil {
 		t.Fatalf("Load with empty env: %v", err)

@@ -14,7 +14,7 @@
 #
 # Экземпляры нумеруются с 0; по умолчанию каждому выбирается случайный
 # свободный пятизначный порт (10000–65535). Если заданы переменные
-# ZETOMESH_BASE_MESH_PORT, ZETOMESH_BASE_API_PORT или ZETOMESH_BASE_PROM_PORT,
+# ZEPTOMESH_BASE_MESH_PORT, ZEPTOMESH_BASE_API_PORT или ZEPTOMESH_BASE_PROM_PORT,
 # порты назначаются последовательно от указанной базы (base + index).
 # ---------------------------------------------------------------------------
 set -euo pipefail
@@ -22,14 +22,14 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_DIR
 
-MESH_BASE_PORT="${ZETOMESH_BASE_MESH_PORT:-4001}"
-API_BASE_PORT="${ZETOMESH_BASE_API_PORT:-8081}"
-PROM_BASE_PORT="${ZETOMESH_BASE_PROM_PORT:-9464}"
+MESH_BASE_PORT="${ZEPTOMESH_BASE_MESH_PORT:-4001}"
+API_BASE_PORT="${ZEPTOMESH_BASE_API_PORT:-8081}"
+PROM_BASE_PORT="${ZEPTOMESH_BASE_PROM_PORT:-9464}"
 
 # Если ни один базовый порт не задан явно — используем автоматический поиск
 # свободных случайных пятизначных портов (10000–65535).
 AUTO_PORTS=1
-if [[ -n "${ZETOMESH_BASE_MESH_PORT:-}" || -n "${ZETOMESH_BASE_API_PORT:-}" || -n "${ZETOMESH_BASE_PROM_PORT:-}" ]]; then
+if [[ -n "${ZEPTOMESH_BASE_MESH_PORT:-}" || -n "${ZEPTOMESH_BASE_API_PORT:-}" || -n "${ZEPTOMESH_BASE_PROM_PORT:-}" ]]; then
   AUTO_PORTS=0
 fi
 
@@ -38,7 +38,7 @@ NODES=""                # количество экземпляров
 DATA_DIR=""             # корень данных
 API_HOST="127.0.0.1"    # адрес админ-API в local-режиме
 TRUST_MODE="limited"    # open | limited | private
-PICO_MODE="${ZETOMESH_PICO_MODE:-stub}"        # stub | binary | http | ollama
+PICO_MODE="${ZEPTOMESH_PICO_MODE:-stub}"        # stub | binary | http | ollama
 BOOTSTRAP=""            # multiaddr через запятую
 PSK=""                  # общий ключ закрытой сети
 LOG_LEVEL="info"
@@ -163,7 +163,7 @@ usage() {
   --api-host HOST        адрес админ-API (default: 127.0.0.1)
   --trust-mode M         open | limited | private (default: limited)
   --pico-mode M          stub | binary | http | ollama (default: stub, или
-                         значение ZETOMESH_PICO_MODE из окружения)
+                         значение ZEPTOMESH_PICO_MODE из окружения)
   --bootstrap ADDRS      точки входа mesh через запятую
   --psk KEY              общий ключ закрытой сети (одинаковый у всех узлов)
   --run-user NAME        пользователь сервисов (default: zeptomesh для root)
@@ -290,7 +290,7 @@ systemd_kind() { # -> system | user | (пусто)
 
 systemctl_kind() { local k="$1"; shift; if [[ "$k" == user ]]; then systemctl --user "$@"; else systemctl "$@"; fi; }
 
-bin_path() { printf '%s' "${ZETOMESH_BIN:-$DATA_DIR/bin/zeptomesh-node}"; }
+bin_path() { printf '%s' "${ZEPTOMESH_BIN:-$DATA_DIR/bin/zeptomesh-node}"; }
 
 build_binary() {
   local out="$1" commit date
@@ -323,24 +323,24 @@ write_instance_env() {
   ( umask 077
     cat > "$dir/instance.env" <<EOF
 # сгенерировано install.sh: экземпляр $idx
-ZETOMESH_INDEX=$idx
-ZETOMESH_NAME=$SERVICE-$idx
-ZETOMESH_DATA=$DATA_DIR
-ZETOMESH_MESH_PORT=$mesh
-ZETOMESH_API_PORT=$api
-ZETOMESH_PROM_LISTEN=$API_HOST:$prom
-ZETOMESH_API_HOST=$API_HOST
-ZETOMESH_TRUST_MODE=$TRUST_MODE
-ZETOMESH_PICO_MODE=$PICO_MODE
-ZETOMESH_PICO_MODEL=${ZETOMESH_PICO_MODEL:-}
-ZETOMESH_MDNS=true
-ZETOMESH_DHT_MODE=auto
-ZETOMESH_LOG_LEVEL=$LOG_LEVEL
-ZETOMESH_PSK=${PSK:-}
-ZETOMESH_BOOTSTRAP=${BOOTSTRAP:-}
-ZETOMESH_API_TOKEN=${ZETOMESH_API_TOKEN:-}
-ZETOMESH_LLM_ENDPOINTS=${ZETOMESH_LLM_ENDPOINTS:-}
-ZETOMESH_LLM_API_KEY=${ZETOMESH_LLM_API_KEY:-}
+ZEPTOMESH_INDEX=$idx
+ZEPTOMESH_NAME=$SERVICE-$idx
+ZEPTOMESH_DATA=$DATA_DIR
+ZEPTOMESH_MESH_PORT=$mesh
+ZEPTOMESH_API_PORT=$api
+ZEPTOMESH_PROM_LISTEN=$API_HOST:$prom
+ZEPTOMESH_API_HOST=$API_HOST
+ZEPTOMESH_TRUST_MODE=$TRUST_MODE
+ZEPTOMESH_PICO_MODE=$PICO_MODE
+ZEPTOMESH_PICO_MODEL=${ZEPTOMESH_PICO_MODEL:-}
+ZEPTOMESH_MDNS=true
+ZEPTOMESH_DHT_MODE=auto
+ZEPTOMESH_LOG_LEVEL=$LOG_LEVEL
+ZEPTOMESH_PSK=${PSK:-}
+ZEPTOMESH_BOOTSTRAP=${BOOTSTRAP:-}
+ZEPTOMESH_API_TOKEN=${ZEPTOMESH_API_TOKEN:-}
+ZEPTOMESH_LLM_ENDPOINTS=${ZEPTOMESH_LLM_ENDPOINTS:-}
+ZEPTOMESH_LLM_API_KEY=${ZEPTOMESH_LLM_API_KEY:-}
 EOF
   )
   chmod 0600 "$dir/instance.env"
@@ -363,7 +363,7 @@ install_local() {
   local kind; kind="$(systemd_kind)"
   if [[ -z "$kind" ]]; then
     die "systemd недоступен. Установите в Docker (--mode docker) либо запустите узел вручную:
-    <бинарник> run -config $REPO_DIR/configs/node.yaml (передав ZETOMESH_* переменные)"
+    <бинарник> run -config $REPO_DIR/configs/node.yaml (передав ZEPTOMESH_* переменные)"
   fi
   check_go
   DATA_DIR="${DATA_DIR:-$(default_data_dir)}"
@@ -416,7 +416,7 @@ install_local() {
     [[ -n "$first_ip" ]] || warn "не определён адрес хоста: узлы найдут друг друга по mDNS"
     first_addr="/ip4/${first_ip:-127.0.0.1}/tcp/${MESH_PORTS[0]}/p2p/$first_id"
     for ((i = 1; i < NODES; i++)); do
-      sed -i -E "s|^ZETOMESH_BOOTSTRAP=.*|ZETOMESH_BOOTSTRAP=$first_addr|" "$DATA_DIR/$i/instance.env"
+      sed -i -E "s|^ZEPTOMESH_BOOTSTRAP=.*|ZEPTOMESH_BOOTSTRAP=$first_addr|" "$DATA_DIR/$i/instance.env"
       chmod 0600 "$DATA_DIR/$i/instance.env"
     done
     log "точка входа для экземпляров 1..$((NODES - 1)): $first_addr"
@@ -447,7 +447,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 $user_line
-Environment=ZETOMESH_DATA=$DATA_DIR
+Environment=ZEPTOMESH_DATA=$DATA_DIR
 EnvironmentFile=$DATA_DIR/%i/instance.env
 ExecStart=$bin run -config $cfg_file
 WorkingDirectory=$DATA_DIR/%i
@@ -636,7 +636,7 @@ install_docker() {
       log "точка входа для узлов 1..$((NODES-1)): $addr"
       sed -i -E "s|%%ANCHOR%%|$addr|g" "$compose_file"
     else
-      warn "peer ID якоря не получен за 60 с: остальные узлы стартуют без bootstrap — сойдутся через DHT/PEX или после ручного заполнения ZETOMESH_BOOTSTRAP (команда ниже)"
+      warn "peer ID якоря не получен за 60 с: остальные узлы стартуют без bootstrap — сойдутся через DHT/PEX или после ручного заполнения ZEPTOMESH_BOOTSTRAP (команда ниже)"
       sed -i -E "s|%%ANCHOR%%||g" "$compose_file"
     fi
   fi
@@ -685,23 +685,23 @@ write_compose() {
     stop_grace_period: 30s
     init: true
     environment:
-      ZETOMESH_INDEX: "$i"
-      ZETOMESH_NAME: "zepto-$i"
-      ZETOMESH_MESH_PORT: "$mesh"
-      ZETOMESH_API_PORT: "$api"
-      ZETOMESH_PROM_LISTEN: "0.0.0.0:$prom"
-      ZETOMESH_API_HOST: "0.0.0.0"
-      ZETOMESH_TRUST_MODE: "$TRUST_MODE"
-      ZETOMESH_PICO_MODE: "$PICO_MODE"
-      ZETOMESH_PICO_MODEL: "\${ZETOMESH_PICO_MODEL:-}"
-      ZETOMESH_MDNS: "false"
-      ZETOMESH_DHT_MODE: "auto"
-      ZETOMESH_LOG_LEVEL: "$LOG_LEVEL"
-      ZETOMESH_BOOTSTRAP: "$boot"
-      ZETOMESH_PSK: "\${ZETOMESH_PSK:-}"
-      ZETOMESH_API_TOKEN: "\${ZETOMESH_API_TOKEN:-}"
-      ZETOMESH_LLM_ENDPOINTS: "\${ZETOMESH_LLM_ENDPOINTS:-}"
-      ZETOMESH_LLM_API_KEY: "\${ZETOMESH_LLM_API_KEY:-}"
+      ZEPTOMESH_INDEX: "$i"
+      ZEPTOMESH_NAME: "zepto-$i"
+      ZEPTOMESH_MESH_PORT: "$mesh"
+      ZEPTOMESH_API_PORT: "$api"
+      ZEPTOMESH_PROM_LISTEN: "0.0.0.0:$prom"
+      ZEPTOMESH_API_HOST: "0.0.0.0"
+      ZEPTOMESH_TRUST_MODE: "$TRUST_MODE"
+      ZEPTOMESH_PICO_MODE: "$PICO_MODE"
+      ZEPTOMESH_PICO_MODEL: "\${ZEPTOMESH_PICO_MODEL:-}"
+      ZEPTOMESH_MDNS: "false"
+      ZEPTOMESH_DHT_MODE: "auto"
+      ZEPTOMESH_LOG_LEVEL: "$LOG_LEVEL"
+      ZEPTOMESH_BOOTSTRAP: "$boot"
+      ZEPTOMESH_PSK: "\${ZEPTOMESH_PSK:-}"
+      ZEPTOMESH_API_TOKEN: "\${ZEPTOMESH_API_TOKEN:-}"
+      ZEPTOMESH_LLM_ENDPOINTS: "\${ZEPTOMESH_LLM_ENDPOINTS:-}"
+      ZEPTOMESH_LLM_API_KEY: "\${ZEPTOMESH_LLM_API_KEY:-}"
       TZ: "${TZ:-UTC}"
     ports:
       - "$mesh:$mesh/tcp"

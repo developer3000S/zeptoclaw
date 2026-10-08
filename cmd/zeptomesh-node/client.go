@@ -26,7 +26,7 @@ type client struct {
 
 func newClient(addr, tokenEnv string) (*client, error) {
 	if addr == "" {
-		cfgPath := os.Getenv("ZETOMESH_CONFIG")
+		cfgPath := os.Getenv("ZEPTOMESH_CONFIG")
 		if cfgPath != "" {
 			if cfg, err := config.Load(cfgPath); err == nil {
 				addr = cfg.API.Listen
@@ -116,7 +116,7 @@ func truncate(s string, n int) string {
 
 // clientFlags parses the shared client flags.
 func clientFlags(fs *flag.FlagSet) (*string, *string) {
-	addr := fs.String("addr", "", "admin API address (default: from ZETOMESH_CONFIG or 127.0.0.1:8081)")
+	addr := fs.String("addr", "", "admin API address (default: from ZEPTOMESH_CONFIG or 127.0.0.1:8081)")
 	tokenEnv := fs.String("token-env", "", "environment variable holding the bearer token")
 	return addr, tokenEnv
 }

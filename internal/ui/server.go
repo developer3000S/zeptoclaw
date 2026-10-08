@@ -23,7 +23,7 @@ var StaticFS = staticFS
 
 // Server is the dashboard backend: static UI + mesh snapshot + node action
 // proxy. It is loopback-first like the agent admin API; the auth gate only
-// activates when ZETOMESH_UI_TOKEN is set.
+// activates when ZEPTOMESH_UI_TOKEN is set.
 type Server struct {
 	log     *slog.Logger
 	agg     *Aggregator
