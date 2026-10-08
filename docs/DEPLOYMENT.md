@@ -140,7 +140,7 @@ ssh -L 8081:127.0.0.1:8081 host '…'
 | `ZEPTOMESH_PSK` | закрытая сеть (одинакова на всех узлах сети!) |
 | `ZEPTOMESH_BOOTSTRAP` | через запятую — дописывается в `discovery.bootstrap` |
 | `ZEPTOMESH_TRUST_MODE` / `ZEPTOMESH_PICO_MODE` / `ZEPTOMESH_LOG_LEVEL` | политики/агент/логи (`PICO_MODE` — `stub` \| `binary` \| `http` \| `ollama`) |
-| `ZEPTOMESH_PICO_MODEL` | модель по умолчанию локального агента (`picoclaw.model`, ТЗ 10.3; передаётся как `--model` только в режиме `binary`) |
+| `ZEPTOMESH_PICO_MODEL` | модель по умолчанию локального агента (`picoclaw.model`, ТЗ 10.3; в `binary` передаётся как `--model`, в `ollama` закрепляет модель инференса — иначе пул возьмёт самую крупную модель быстрейшего бэкенда) |
 | `ZEPTOMESH_LLM_ENDPOINTS` | через запятую — дописывается в `brain.endpoints` (Ollama-совместимые base_url; для `picoclaw.mode: ollama`) |
 | `ZEPTOMESH_LLM_API_KEY` | ключ для всех эндпоинтов из `ZEPTOMESH_LLM_ENDPOINTS` (подставляется им как `api_key_env`); нужен шлюзам, которые аутентифицируют `/api/tags` |
 | `ZEPTOMESH_PICO_WORKSPACE` | корень рабочих каталогов задач (`picoclaw.workspace_root`; пусто → `<data_dir>/picoclaw/workspaces`) |

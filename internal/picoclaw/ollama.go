@@ -113,14 +113,20 @@ func (a *OllamaAdapter) Capabilities(context.Context) ([]string, error) {
 // Execute resolves the brain-selected backend, sends the instruction to its
 // chat endpoint and returns the model's answer. The Ollama-native /api/chat is
 // tried first, the OpenAI-compatible /v1/chat/completions second — the same
-// order the pool uses to learn a backend's model list.
+// order the pool uses to learn a backend's model list. Model choice follows
+// the Request contract: the per-task model overrides the node's configured
+// picoclaw.model, and when neither is set the pool picks by itself.
 func (a *OllamaAdapter) Execute(ctx context.Context, req Request) (*Response, error) {
 	if a.pool == nil {
 		return nil, ErrUnavailable
 	}
-	b, model, ok := a.pool.SelectModel(req.Model)
+	preferred := req.Model
+	if preferred == "" {
+		preferred = a.cfg.Model
+	}
+	b, model, ok := a.pool.SelectModel(preferred)
 	if !ok {
-		return nil, fmt.Errorf("%w: no usable brain backend for model %q", ErrUnavailable, req.Model)
+		return nil, fmt.Errorf("%w: no usable brain backend for model %q", ErrUnavailable, preferred)
 	}
 	if req.Timeout > 0 {
 		var cancel context.CancelFunc

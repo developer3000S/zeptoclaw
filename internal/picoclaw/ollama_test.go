@@ -210,6 +210,53 @@ func TestOllamaAdapter_PrefersRequestedModel(t *testing.T) {
 	}
 }
 
+// The operator's pinned picoclaw.model is the executable choice in ollama
+// mode, not just the status-card label (ТЗ 10.3): without a per-task override
+// the node must think with the pinned model even when the pool would have
+// picked a bigger one.
+func TestOllamaAdapter_HonoursPinnedModel(t *testing.T) {
+	fg := newFakeGateway(t, "qwen2.5:0.5b", "qwen2.5:7b")
+	pool := ollamaPool(t, fg)
+	cfg := ollamaCfg()
+	cfg.Model = "qwen2.5:0.5b"
+	a := NewOllama(pool, cfg, nil, nil)
+
+	resp, err := a.Execute(context.Background(), Request{
+		TaskID:      "t-pin",
+		Instruction: "x",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if resp.Model != "qwen2.5:0.5b" {
+		t.Fatalf("Model = %q, want the pinned qwen2.5:0.5b", resp.Model)
+	}
+	if bodyModel := fg.bodyModel(); bodyModel != "qwen2.5:0.5b" {
+		t.Fatalf("chat request model = %q, want the pinned qwen2.5:0.5b", bodyModel)
+	}
+}
+
+// The per-task model keeps precedence over the configured one.
+func TestOllamaAdapter_TaskModelOverridesPinned(t *testing.T) {
+	fg := newFakeGateway(t, "qwen2.5:0.5b", "qwen2.5:7b")
+	pool := ollamaPool(t, fg)
+	cfg := ollamaCfg()
+	cfg.Model = "qwen2.5:0.5b"
+	a := NewOllama(pool, cfg, nil, nil)
+
+	_, err := a.Execute(context.Background(), Request{
+		TaskID:      "t-override",
+		Instruction: "x",
+		Model:       "qwen2.5:7b",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if bodyModel := fg.bodyModel(); bodyModel != "qwen2.5:7b" {
+		t.Fatalf("chat request model = %q, want the per-task qwen2.5:7b", bodyModel)
+	}
+}
+
 // Nothing usable in the pool: the adapter refuses instead of echoing.
 func TestOllamaAdapter_NoBackendIsUnavailable(t *testing.T) {
 	pool := brain.NewBackendPool("", nil, nil, nil)

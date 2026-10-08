@@ -168,8 +168,11 @@ docker run --rm -v "$PWD":/src -w /src golang:1.26 bash -c 'go test ./...'
   `-d/-m/-s/--model`; unknown flags crash it; model knobs (temperature, max
   tokens, etc.) are env-only (`PICOCLAW_AGENTS_DEFAULTS_*`); the Pico WS outbound
   `message.send` carries no model. In the adapter: `picoclaw.model` is a
-  node-level param applied only in `binary` mode as `--model`; other knobs go
-  under `picoclaw.env`. Do not invent raw flag passthrough.
+  node-level param — in `binary` mode it becomes `--model`, in `ollama` mode it
+  pins the inference model (when the task carries no model, the adapter passes
+  the pin to the brain pool instead of letting it pick the largest model of the
+  fastest backend); other knobs go under `picoclaw.env`. Do not invent raw flag
+  passthrough.
 - **Module path / repo**: the canonical repo is
   `git@github.com:developer3000S/zeptoclaw.git` (SSH origin; don't switch to
   HTTPS). Go module path is `github.com/developer3000S/zeptoclaw`. Anything
