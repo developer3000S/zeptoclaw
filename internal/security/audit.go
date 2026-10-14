@@ -114,6 +114,7 @@ type AuditEvent struct {
 	Trust  string    `json:"trust,omitempty"`
 	Bytes  int64     `json:"bytes,omitempty"`
 	Detail string    `json:"detail,omitempty"`
+	Role   string    `json:"role,omitempty"` // new field for role-based access control
 }
 
 // Audit is an append-only JSONL journal of security events.
@@ -158,7 +159,7 @@ func (a *Audit) Log(ev AuditEvent) {
 			name = "security_event"
 		}
 		a.logger.Warn(name,
-			"peer_id", ev.PeerID, "task_id", ev.TaskID, "reason", ev.Reason)
+			"peer_id", ev.PeerID, "task_id", ev.TaskID, "reason", ev.Reason, "role", ev.Role)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()

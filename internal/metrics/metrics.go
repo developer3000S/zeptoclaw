@@ -50,6 +50,8 @@ type Collector struct {
 	ForwardAttempts     *prometheus.CounterVec
 	NeighborScore       *prometheus.GaugeVec
 	BuildInfo           prometheus.Gauge
+	HTTPRequests        *prometheus.CounterVec // new metric for HTTP requests
+	TaskStatusGauge     *prometheus.GaugeVec  // new metric for task inventory by status
 
 	mu sync.Mutex
 }
@@ -222,6 +224,22 @@ func (c *Collector) Security(event string) {
 		return
 	}
 	c.SecurityEvents.WithLabelValues(event).Inc()
+}
+
+// HTTPRequest increments a named HTTP request counter.
+func (c *Collector) HTTPRequest(method string, path string, status int) {
+	if c == nil {
+		return
+	}
+	c.HTTPRequests.WithLabelValues(method, path, strconv.Itoa(status)).Inc()
+}
+
+// TaskStatus increments a named task status gauge.
+func (c *Collector) TaskStatus(status string) {
+	if c == nil {
+		return
+	}
+	c.TaskStatusGauge.WithLabelValues(status).Inc()
 }
 
 // Forward increments a delegation outcome counter.

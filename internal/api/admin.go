@@ -153,6 +153,11 @@ func (s *Server) authed(mux *http.ServeMux, pattern string, h func(http.Response
 			writeErr(w, http.StatusUnauthorized, "missing or bad bearer token")
 			return
 		}
+		// Check role-based access control
+		if !s.checkRole(r, pattern) {
+			writeErr(w, http.StatusForbidden, "insufficient permissions")
+			return
+		}
 		h(w, r)
 	})
 }
@@ -167,7 +172,11 @@ func (s *Server) authorize(r *http.Request) bool {
 		return false
 	}
 	got := strings.TrimSpace(auth[len(prefix):])
-	return subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) == 1
+	if subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
+		return false
+	}
+	// Check role-based access control
+	return s.checkRole(r, r.URL.Path)
 }
 
 func (s *Server) limitBody(next http.Handler) http.Handler {

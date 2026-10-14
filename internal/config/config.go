@@ -404,13 +404,58 @@ type RateLimitConfig struct {
 	Burst             int     `yaml:"burst"`
 }
 
+// APIRole describes what a token is permitted to do.
+type APIRole int
+
+const (
+	RoleViewer   APIRole = iota // read-only: GET endpoints
+	RoleOperator                // GET + task/skill/trigger/scan/brain mutations
+	RoleAdmin                   // everything, including admin/* operations
+)
+
+func (r APIRole) String() string {
+	switch r {
+	case RoleViewer:
+		return "viewer"
+	case RoleOperator:
+		return "operator"
+	case RoleAdmin:
+		return "admin"
+	default:
+		return "unknown"
+	}
+}
+
+// ParseRole converts a string to APIRole.
+func ParseRole(s string) (APIRole, bool) {
+	switch s {
+	case "viewer":
+		return RoleViewer, true
+	case "operator":
+		return RoleOperator, true
+	case "admin":
+		return RoleAdmin, true
+	default:
+		return 0, false
+	}
+}
+
+// APIToken describes one named, env-sourced bearer credential.
+type APIToken struct {
+	Name     string `yaml:"name"`     // identifier shown in audit events
+	Role     string `yaml:"role"`     // viewer | operator | admin
+	TokenEnv string `yaml:"token_env"` // env var holding the raw bearer token
+}
+
 // APIConfig configures the local administrative HTTP API.
 type APIConfig struct {
-	Enabled      bool     `yaml:"enabled"`
-	Listen       string   `yaml:"listen"`
-	AuthTokenEnv string   `yaml:"auth_token_env"`
-	ReadTimeout  Duration `yaml:"read_timeout"`
-	WriteTimeout Duration `yaml:"write_timeout"`
+	Enabled      bool        `yaml:"enabled"`
+	Listen       string      `yaml:"listen"`
+	AuthTokenEnv string      `yaml:"auth_token_env"` // legacy single-token; maps to RoleAdmin
+	Tokens       []APIToken  `yaml:"tokens"`         // named tokens with explicit roles (OCE-style IAM-lite)
+	ReadTimeout  Duration    `yaml:"read_timeout"`
+	WriteTimeout Duration    `yaml:"write_timeout"`
+	Role         string      `yaml:"role"` // new field for role-based access control
 }
 
 // TelemetryConfig configures metrics and logs.
