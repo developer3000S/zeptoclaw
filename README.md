@@ -17,6 +17,13 @@
 > Что из пунктов ТЗ сделано частично или не сделано — честный и актуальный
 > отчёт: [docs/STATUS.md](docs/STATUS.md).
 
+> **Rust-порт (`zeptoclaw_rust/`).** Ведётся параллельный порт демона на Rust:
+> crate `zeptomesh` + бинарь `zeptomesh-node`. Протокольный слой (protobuf,
+> wire-энкодеры), идентичность Ed25519, конфигурация, p2p-framing, хранилище,
+> маршрутизация, менеджер задач, PicoClaw-адаптеры, HTTP admin-API и CLI —
+> компилируются, тесты зелёные. Состав, статус и список непокрытых пакетов —
+> в [zeptoclaw_rust/RUST_PORT.md](zeptoclaw_rust/RUST_PORT.md).
+
 ---
 
 ## Содержание
@@ -274,6 +281,11 @@ zeptoclaw/
 ├── docs/                       # ARCHITECTURE · PROTOCOLS · PICOCLAW-INTEGRATION ·
 │                               # DEPLOYMENT · RUNBOOK · STATUS · LOADTEST · TESTREPORT
 ├── install.sh                  # установка: локально (systemd) или Docker, N экземпляров, автостарт
+├── zeptoclaw_rust/             # Rust-порт демона (crate `zeptomesh`, бинарь `zeptomesh-node`):
+│   ├── src/                    #   proto · wire · multiformat · security · config · p2p ·
+│   │                           #   storage · routing · tasks · picoclaw · api · node · main
+│   ├── tests/smoke_e2e.rs      #   сквозной smoke-тест (запуск узла + admin-API)
+│   └── RUST_PORT.md            #   состав, статус переноса, инструкция по сборке
 ├── LICENSE                     # Apache License 2.0 (полный текст)
 ├── ТЗ.md                       # исходное техническое задание
 ├── .env.example                # переменные LLM/каналов для PicoClaw
@@ -352,6 +364,22 @@ CI-конвейер (ТЗ 15.1) — GitHub Actions, `.github/workflows/ci.yml`: 
 испытания `scripts/acceptance.sh`, родной arm64-раннер и сборка Docker-образа.
 Гейты совпадают с разделом 5 TESTREPORT; `make ci` — локальный эквивалент
 быстрого подмножества.
+
+### Rust-порт (`zeptoclaw_rust/`)
+
+```bash
+cd zeptoclaw_rust
+cargo build --release        # бинарь target/release/zeptomesh-node
+cargo test                   # юнит + smoke_e2e (70 тестов)
+target/debug/zeptomesh-node version
+target/debug/zeptomesh-node genkey --out ./n0/keys/peer.key --print-id
+ZEPTOMESH_DATA=./n0 ZEPTOMESH_INDEX=0 \
+  target/debug/zeptomesh-node run -c ../configs/node.yaml &
+../bin/zeptomesh-node status -addr http://127.0.0.1:8081   # CLI совместим с Go-узлом
+```
+
+Состав, статус переноса по модулям и известные ограничения —
+[zeptoclaw_rust/RUST_PORT.md](zeptoclaw_rust/RUST_PORT.md).
 
 ---
 
@@ -540,6 +568,8 @@ security:
 - [STATUS.md](docs/STATUS.md) — статус реализации ТЗ.
 - [LOADTEST.md](docs/LOADTEST.md) — нагрузочное тестирование (ТЗ 17.3).
 - [TESTREPORT.md](docs/TESTREPORT.md) — отчёт о тестировании.
+- [zeptoclaw_rust/RUST_PORT.md](zeptoclaw_rust/RUST_PORT.md) — Rust-порт:
+  состав модулей, статус переноса Go → Rust, сборка и известные ограничения.
 
 ---
 

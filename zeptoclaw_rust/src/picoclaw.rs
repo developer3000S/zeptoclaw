@@ -1016,7 +1016,6 @@ pub struct OllamaAdapter {
     pool: Option<std::sync::Arc<BackendPool>>,
     cfg: PicoClawConfig,
     skills: Vec<String>,
-    timeout: Duration,
     http: reqwest::Client,
     proto: Mutex<HashMap<String, String>>,
 }
@@ -1032,7 +1031,6 @@ impl OllamaAdapter {
             pool,
             cfg: cfg.clone(),
             skills,
-            timeout,
             http: reqwest::Client::builder()
                 .timeout(timeout)
                 .build()
