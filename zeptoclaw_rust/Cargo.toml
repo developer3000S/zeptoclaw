@@ -1,8 +1,46 @@
 [package]
-name = "zeptoclaw_rust"
+name = "zeptomesh"
 version = "0.1.0"
 edition = "2021"
+description = "ZeptoClaw Agent Mesh — децентрализованная P2P-сеть автономных AI-агентов (Rust-порт)"
+license = "Apache-2.0"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "zeptomesh"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zeptomesh-node"
+path = "src/main.rs"
 
 [dependencies]
+anyhow = "1"
+async-trait = "0.1"
+base32 = "0.5"
+bs58 = "0.5"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+clap = { version = "4", features = ["derive", "env"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+futures = "0.3"
+hex = "0.4"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+varint-rs = "2"
+hyper = { version = "1.12.0", features = ["server", "http1", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }
+http-body-util = "0.1"
+subtle = "2"
+tokio-util = { version = "0.7.20", features = ["codec"] }
+bytes = "1.12.1"
+
+[dev-dependencies]
+tempfile = "3"
