@@ -291,6 +291,26 @@ func privateIPv4(ip string) bool {
 
 // ---------- maintenance ----------
 
+// publishTaskInventory refreshes the task_inventory gauge: the number of task
+// journal records per status. It is the operator's view of how much work the
+// node carries, computed on a slow tick rather than on every transition.
+func (n *Node) publishTaskInventory() {
+	if n.Metrics == nil || n.Manager == nil {
+		return
+	}
+	// The journal is retention-bounded; a generous limit reads it whole.
+	recs, err := n.Manager.ListTasks(10_000, "")
+	if err != nil {
+		n.log.Debug("task_inventory", "err", err.Error())
+		return
+	}
+	counts := make(map[string]int, 8)
+	for _, rec := range recs {
+		counts[rec.Status]++
+	}
+	n.Metrics.SetTaskInventory(counts)
+}
+
 // maintenance is the node's slow loop: local-registry sync, full gossip sync,
 // peer exchange when thin, stale pruning and metric refresh.
 func (n *Node) maintenance(ctx context.Context) {
@@ -304,6 +324,9 @@ func (n *Node) maintenance(ctx context.Context) {
 		skillEvery = 30 * time.Second
 	}
 	skillTick := time.NewTicker(skillEvery)
+	// Task inventory: the journal tally by status, refreshed on a slow tick —
+	// cheap enough to be honest, rare enough to stay out of the hot path.
+	inv := time.NewTicker(15 * time.Second)
 	// Optional proactive environment sweep: a slow, periodic scan so a newly
 	// added neighbour is found without waiting for an operator command. The
 	// ticker only exists when discovery.scan.enabled is set.
@@ -319,6 +342,7 @@ func (n *Node) maintenance(ctx context.Context) {
 	defer local.Stop()
 	defer rtt.Stop()
 	defer skillTick.Stop()
+	defer inv.Stop()
 
 	for {
 		select {
@@ -331,9 +355,8 @@ func (n *Node) maintenance(ctx context.Context) {
 			n.syncDHT(ctx)
 		case <-rtt.C:
 			n.measureRTT(ctx)
-		case <-skillTick.C:
-			n.reconcileSkills(ctx)
-			n.Metrics.SkillsVersion.Set(float64(n.Skills.Epoch()))
+		case <-inv.C:
+			n.publishTaskInventory()
 		case <-t.C:
 			if n.Table.ConnectedCount() < n.Cfg.Neighbors.Min && n.Cfg.Discovery.PeerExchange {
 				n.requestPeerExchange(ctx)

@@ -2,6 +2,7 @@
 package metrics
 
 import (
+	"strconv"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -50,10 +51,17 @@ type Collector struct {
 	ForwardAttempts     *prometheus.CounterVec
 	NeighborScore       *prometheus.GaugeVec
 	BuildInfo           prometheus.Gauge
-	HTTPRequests        *prometheus.CounterVec // new metric for HTTP requests
-	TaskStatusGauge     *prometheus.GaugeVec  // new metric for task inventory by status
+	// HTTPRequests counts admin API requests by method, route pattern and
+	// response status. The label is the mux pattern, never the raw URL.
+	HTTPRequests *prometheus.CounterVec
+	// TaskInventory is the task journal tally by status (updated on a slow
+	// tick by the node, not on every transition).
+	TaskInventory *prometheus.GaugeVec
 
 	mu sync.Mutex
+	// taskStatuses remembers which status labels the inventory last reported so
+	// a status that no longer occurs is reset to zero instead of going stale.
+	taskStatuses map[string]struct{}
 }
 
 // New registers the metrics on a private registry, so a test binary can build
@@ -179,6 +187,14 @@ func New(namespace string) *Collector {
 	c.BuildInfo = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace, Name: "build_info", Help: "Constant 1; labels carry the build stamp.",
 	})
+	c.HTTPRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Name: "http_requests_total",
+		Help: "Admin API requests by method, route pattern and status code.",
+	}, []string{"method", "path", "status"})
+	c.TaskInventory = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace, Name: "task_inventory", Help: "Task journal records by status.",
+	}, []string{"status"})
+	c.taskStatuses = map[string]struct{}{}
 
 	for _, col := range []prometheus.Collector{
 		c.PeersTotal, c.PeersConnected, c.TasksReceived, c.TasksCompleted, c.TasksFailed,
@@ -189,6 +205,7 @@ func New(namespace string) *Collector {
 		c.NeighborScore, c.BuildInfo, c.SearchRelays, c.SearchRelayHits, c.FullRefreshes,
 		c.SearchTopicRequests, c.SearchTopicAnswers, c.SearchTopicRejected,
 		c.SkillsSynced, c.SkillsImported, c.SkillsRefused, c.SkillsVersion, c.RebindsApplied,
+		c.HTTPRequests, c.TaskInventory,
 	} {
 		reg.MustRegister(col)
 	}
@@ -226,7 +243,9 @@ func (c *Collector) Security(event string) {
 	c.SecurityEvents.WithLabelValues(event).Inc()
 }
 
-// HTTPRequest increments a named HTTP request counter.
+// HTTPRequest counts one admin API request by method, route pattern and
+// response status. path is the mux pattern ("GET /api/v1/tasks/{id}"), never
+// the raw URL, so label cardinality stays bounded.
 func (c *Collector) HTTPRequest(method string, path string, status int) {
 	if c == nil {
 		return
@@ -234,12 +253,26 @@ func (c *Collector) HTTPRequest(method string, path string, status int) {
 	c.HTTPRequests.WithLabelValues(method, path, strconv.Itoa(status)).Inc()
 }
 
-// TaskStatus increments a named task status gauge.
-func (c *Collector) TaskStatus(status string) {
+// SetTaskInventory publishes the task journal tally by status. Statuses that
+// no longer occur are reset to zero rather than left stale, so a scrape never
+// mistakes an old series for live state.
+func (c *Collector) SetTaskInventory(counts map[string]int) {
 	if c == nil {
 		return
 	}
-	c.TaskStatusGauge.WithLabelValues(status).Inc()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for status, n := range counts {
+		c.TaskInventory.WithLabelValues(status).Set(float64(n))
+		delete(c.taskStatuses, status)
+	}
+	for status := range c.taskStatuses {
+		c.TaskInventory.WithLabelValues(status).Set(0)
+	}
+	c.taskStatuses = make(map[string]struct{}, len(counts))
+	for status := range counts {
+		c.taskStatuses[status] = struct{}{}
+	}
 }
 
 // Forward increments a delegation outcome counter.

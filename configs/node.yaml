@@ -282,7 +282,23 @@ security:
 api:
   enabled: true
   listen: ${ZEPTOMESH_API_HOST:-127.0.0.1}:${ZEPTOMESH_API_PORT:-8081}
+  # Один legacy-токен на весь API (полный admin). Значение — из env, не из файла.
   auth_token_env: ZEPTOMESH_API_TOKEN
+  # RBAC: именованные токены с ролями (viewer | operator | admin).
+  # Значения — из env, в конфиг секреты не пишутся. Токены из этого списка
+  # проверяются наравне с legacy-токеном; роли задают права: viewer — только
+  # чтение, operator — ещё и мутации задач/навыков/триггеров + сканирование,
+  # admin — всё, включая /api/v1/admin/*. Раскомментируйте пример:
+  #tokens:
+  #  - name: dashboard
+  #    role: viewer
+  #    token_env: ZEPTOMESH_UI_VIEWER_TOKEN
+  #  - name: bot
+  #    role: operator
+  #    token_env: ZEPTOMESH_OPERATOR_TOKEN
+  #  - name: admin
+  #    role: admin
+  #    token_env: ZEPTOMESH_ADMIN_TOKEN
   read_timeout: 15s
   write_timeout: 600s
 

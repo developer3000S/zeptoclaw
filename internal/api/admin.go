@@ -26,6 +26,7 @@ import (
 	"github.com/developer3000S/zeptoclaw/internal/config"
 	"github.com/developer3000S/zeptoclaw/internal/metrics"
 	"github.com/developer3000S/zeptoclaw/internal/node"
+	"github.com/developer3000S/zeptoclaw/internal/security"
 	"github.com/developer3000S/zeptoclaw/internal/skills"
 	"github.com/developer3000S/zeptoclaw/internal/tasks"
 	"github.com/developer3000S/zeptoclaw/internal/triggers"
@@ -38,21 +39,67 @@ type Server struct {
 	httpSrv *http.Server
 	node    *node.Node
 	cfg     *config.Config
-	token   string
-	log     *slog.Logger
+	mets    *metrics.Collector
+	// tokens maps the raw bearer value to the identity it authenticates.
+	// An empty map means "no auth configured": the surface stays loopback-first
+	// and every caller is treated as a full admin, as before RBAC existed.
+	tokens map[string]apiIdentity
+	log    *slog.Logger
+}
+
+// apiIdentity is the authenticated caller: which configured token answered and
+// the role that token carries. The raw bearer value is never kept or logged.
+type apiIdentity struct {
+	Name string
+	Role config.APIRole
+}
+
+// resolveTokens materialises the bearer credentials: the legacy single token
+// becomes a full-admin identity, and every named token takes its configured
+// role. Misconfigured tokens are skipped with a warning instead of disabling
+// auth silently.
+func resolveTokens(cfg *config.Config, log *slog.Logger) map[string]apiIdentity {
+	tokens := map[string]apiIdentity{}
+	if env := cfg.API.AuthTokenEnv; env != "" {
+		if v := os.Getenv(env); v != "" {
+			tokens[v] = apiIdentity{Name: env, Role: config.RoleAdmin}
+		}
+	}
+	for _, t := range cfg.API.Tokens {
+		role, ok := config.ParseRole(t.Role)
+		if !ok {
+			log.Warn("admin_api_token_bad_role", "token", t.Name, "role", t.Role)
+			continue
+		}
+		if t.TokenEnv == "" {
+			log.Warn("admin_api_token_env_missing", "token", t.Name)
+			continue
+		}
+		v := os.Getenv(t.TokenEnv)
+		if v == "" {
+			log.Warn("admin_api_token_env_unset", "token", t.Name, "env", t.TokenEnv)
+			continue
+		}
+		name := t.Name
+		if name == "" {
+			name = t.TokenEnv
+		}
+		tokens[v] = apiIdentity{Name: name, Role: role}
+	}
+	return tokens
 }
 
 // New wires routes.
 func New(n *node.Node, cfg *config.Config, mets *metrics.Collector, logger *slog.Logger) *Server {
-	token := ""
-	if cfg.API.AuthTokenEnv != "" {
-		token = os.Getenv(cfg.API.AuthTokenEnv)
-	}
-	if cfg.API.Enabled && cfg.Security.TrustMode == "private" && token == "" {
-		logger.Warn("admin_api_unauthenticated", "hint", "set "+cfg.API.AuthTokenEnv+" or bind api.listen to localhost")
+	if logger == nil {
+		logger = slog.Default()
 	}
 	mux := http.NewServeMux()
-	s := &Server{node: n, cfg: cfg, token: token, log: logger}
+	s := &Server{node: n, cfg: cfg, mets: mets, tokens: resolveTokens(cfg, logger), log: logger}
+	if cfg.API.Enabled && len(s.tokens) == 0 && cfg.Security.TrustMode == "private" {
+		logger.Warn("admin_api_unauthenticated", "hint",
+			"configure api.tokens (or api.auth_token_env) or bind api.listen to localhost")
+	}
 
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	s.authed(mux, "GET /api/v1/status", s.handleStatus)
@@ -105,7 +152,7 @@ func New(n *node.Node, cfg *config.Config, mets *metrics.Collector, logger *slog
 	}
 	s.httpSrv = &http.Server{
 		Addr:         cfg.API.Listen,
-		Handler:      s.limitBody(mux),
+		Handler:      s.instrument(s.limitBody(mux)),
 		ReadTimeout:  readTimeout,
 		WriteTimeout: writeTimeout,
 		IdleTimeout:  60 * time.Second,
@@ -119,7 +166,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("api: listen %s: %w", s.httpSrv.Addr, err)
 	}
-	s.log.Info("admin_api_listening", "addr", ln.Addr().String(), "auth", s.token != "")
+	s.log.Info("admin_api_listening", "addr", ln.Addr().String(), "auth", len(s.tokens) > 0)
 	errCh := make(chan error, 1)
 	go func() { errCh <- s.httpSrv.Serve(ln) }()
 	select {
@@ -143,40 +190,162 @@ func (s *Server) ListenAndServe() error { return s.httpSrv.ListenAndServe() }
 func (s *Server) Shutdown(ctx context.Context) error { return s.httpSrv.Shutdown(ctx) }
 
 // Handler exposes the router for in-process tests.
-func (s *Server) Handler() http.Handler { return s.limitBody(s.httpSrv.Handler) }
+func (s *Server) Handler() http.Handler { return s.httpSrv.Handler }
 
 // ---------- middleware ----------
 
 func (s *Server) authed(mux *http.ServeMux, pattern string, h func(http.ResponseWriter, *http.Request)) {
 	mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-		if !s.authorize(r) {
+		// Pass pattern to instrument via statusWriter: instrument creates the
+		// statusWriter and it flows here as w; we annotate it before the handler
+		// runs so instrument can read the label after ServeHTTP returns.
+		if sw, ok := w.(*statusWriter); ok {
+			sw.pattern = pattern
+		}
+		ident, ok := s.identify(r)
+		if !ok {
+			s.auditAPI(r, nil, "api_auth_denied")
+			s.mets.Security("api_auth_denied")
 			writeErr(w, http.StatusUnauthorized, "missing or bad bearer token")
 			return
 		}
-		// Check role-based access control
-		if !s.checkRole(r, pattern) {
+		if !roleAllows(ident.Role, r.Method, pattern) {
+			s.auditAPI(r, &ident, "api_role_denied")
+			s.mets.Security("api_role_denied")
 			writeErr(w, http.StatusForbidden, "insufficient permissions")
 			return
+		}
+		if r.Method != http.MethodGet {
+			s.auditAPI(r, &ident, "api_mutation")
 		}
 		h(w, r)
 	})
 }
 
-func (s *Server) authorize(r *http.Request) bool {
-	if s.token == "" {
-		return true
+// identify resolves the bearer token to its configured identity, comparing
+// candidates in constant time. With no tokens configured every caller is a
+// loopback admin — the historical, unauthenticated behaviour.
+func (s *Server) identify(r *http.Request) (apiIdentity, bool) {
+	if len(s.tokens) == 0 {
+		return apiIdentity{Name: "loopback", Role: config.RoleAdmin}, true
 	}
 	const prefix = "Bearer "
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, prefix) {
-		return false
+		return apiIdentity{}, false
 	}
 	got := strings.TrimSpace(auth[len(prefix):])
-	if subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
+	if got == "" {
+		return apiIdentity{}, false
+	}
+	for raw, ident := range s.tokens {
+		if subtle.ConstantTimeCompare([]byte(got), []byte(raw)) == 1 {
+			return ident, true
+		}
+	}
+	return apiIdentity{}, false
+}
+
+// roleAllows decides whether an identity may hit the route behind pattern
+// ("GET /api/v1/tasks/{id}", "POST /api/v1/tasks", …). viewer reads; operator
+// also mutates tasks/skills/triggers/brain and runs scans; admin does
+// everything. /api/v1/admin/* moves, rotates or retires the node, so it stays
+// admin-only with one exception: the environment scan is operator-grade.
+func roleAllows(role config.APIRole, method string, pattern string) bool {
+	switch role {
+	case config.RoleAdmin:
+		return true
+	case config.RoleViewer:
+		return method == http.MethodGet
+	case config.RoleOperator:
+		if method == http.MethodGet {
+			return true
+		}
+		path := pattern
+		if i := strings.IndexByte(pattern, ' '); i >= 0 {
+			path = pattern[i+1:]
+		}
+		// Everything task-adjacent is operator-grade; /api/v1/admin/* moves,
+		// rotates or retires the node and stays admin-only, with the single
+		// exception of the environment scan.
+		if strings.HasPrefix(path, "/api/v1/admin/") {
+			return path == "/api/v1/admin/scan"
+		}
+		return true
+	default:
 		return false
 	}
-	// Check role-based access control
-	return s.checkRole(r, r.URL.Path)
+}
+
+// auditAPI records the security-relevant admin-API outcomes: every mutation
+// and every denial (bad token, insufficient role). It is silent when the node
+// has no journal (tests, minimal wiring).
+func (s *Server) auditAPI(r *http.Request, ident *apiIdentity, event string) {
+	if s.node == nil || s.node.Audit == nil {
+		return
+	}
+	ev := security.AuditEvent{
+		Event:  event,
+		Remote: r.RemoteAddr,
+		Detail: r.Method + " " + r.URL.Path,
+	}
+	if ident != nil && ident.Name != "" {
+		ev.Actor = ident.Name
+		ev.Role = ident.Role.String()
+	}
+	s.node.Audit.Log(ev)
+}
+
+// instrument counts every request into http_requests_total, labelled by the
+// matched route pattern — never the raw URL — so per-task-id requests cannot
+// explode label cardinality. Unknown paths (mux 404s) count as "unmatched".
+func (s *Server) instrument(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusWriter{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+		if s.mets == nil {
+			return
+		}
+		path := rec.pattern
+		if path == "" {
+			path = "unmatched"
+		}
+		s.mets.HTTPRequest(r.Method, path, rec.code)
+	})
+}
+
+// statusWriter captures the response code for the metrics middleware and
+// carries the route pattern set by authed so instrument can read it without
+// depending on http.Request.Pattern.
+type statusWriter struct {
+	http.ResponseWriter
+	pattern string // route pattern set by authed before the handler runs
+	code    int
+	wrote   bool
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if !w.wrote {
+		w.code = code
+		w.wrote = true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if !w.wrote {
+		w.code = http.StatusOK
+		w.wrote = true
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// Flush forwards to the underlying writer so streaming handlers (leave,
+// revoke) still reach the client before the process begins its shutdown.
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func (s *Server) limitBody(next http.Handler) http.Handler {

@@ -153,6 +153,18 @@ h2 { font-size: 16px; }
 .pill.warn    { color: var(--yellow); border-color: #54442a; }
 .pill.accent  { color: var(--accent); border-color: #1c3a5e; }
 
+/* ---------- distribution (сводка задач по статусам) ---------- */
+
+.distribution {
+  margin: 10px 0 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-bg, transparent);
+}
+.distribution h3 { margin: 0 0 6px; font-size: 12.5px; color: var(--muted); }
+.distribution-bars { display: flex; flex-wrap: wrap; gap: 6px; }
+
 /* ---------- forms ---------- */
 
 label { display: block; font-size: 12.5px; color: var(--muted); margin: 8px 0 2px; }

@@ -28,6 +28,8 @@ export function initTasks(nodeHint) {
       </label>
     </div>
 
+    <div id="task-distribution" class="distribution"></div>
+
     <div class="split">
       <div class="panel">
         <h3>Последние задачи</h3>
@@ -68,6 +70,8 @@ export function initTasks(nodeHint) {
   if (nodeHint) selectedNode = nodeHint;
 
   subscribe(renderNodeSelector);
+  subscribe(renderDistribution);
+  renderDistribution(store);
   renderNodeSelector(store);
   if (selectedNode) {
     nodeSel.value = selectedNode;
@@ -85,6 +89,27 @@ function renderNodeSelector(s) {
     `<option value="">нет reachable-узлов</option>`;
   if (nodes.some((n) => n.name === prev)) sel.value = prev;
   selectedNode = sel.value;
+}
+
+// renderDistribution показывает сводку по журналам всех управляемых узлов,
+// посчитанную BFF-агрегатором (store.mesh.tasks_by_status).
+function renderDistribution(s) {
+  const el = document.getElementById("task-distribution");
+  if (!el) return;
+  const counts = s.mesh?.tasks_by_status ?? {};
+  const entries = Object.entries(counts);
+  if (!entries.length) {
+    el.innerHTML = `<p class="hint">Задач в журналах узлов нет.</p>`;
+    return;
+  }
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  el.innerHTML = `
+    <h3>Распределение по статусам (все узлы)</h3>
+    <div class="distribution-bars">
+      ${entries.map(([st, n]) =>
+        `<span class="pill ${taskStatusClass(st)}" title="${esc(st)}">${esc(st)} ${n}</span>`).join("")}
+      <span class="pill" title="всего">всего ${total}</span>
+    </div>`;
 }
 
 async function loadTasks() {

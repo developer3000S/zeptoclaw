@@ -109,12 +109,15 @@ type AuditEvent struct {
 	Event  string    `json:"event"`
 	PeerID string    `json:"peer_id,omitempty"`
 	TaskID string    `json:"task_id,omitempty"`
-	Remote string    `json:"remote,omitempty"`
-	Reason string    `json:"reason,omitempty"`
-	Trust  string    `json:"trust,omitempty"`
-	Bytes  int64     `json:"bytes,omitempty"`
-	Detail string    `json:"detail,omitempty"`
-	Role   string    `json:"role,omitempty"` // new field for role-based access control
+	// Actor names the authenticated caller of an admin API mutation (the
+	// configured token's name). The raw bearer value is never recorded.
+	Actor  string `json:"actor,omitempty"`
+	Remote string `json:"remote,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	Trust  string `json:"trust,omitempty"`
+	Bytes  int64  `json:"bytes,omitempty"`
+	Detail string `json:"detail,omitempty"`
+	Role   string `json:"role,omitempty"`
 }
 
 // Audit is an append-only JSONL journal of security events.
@@ -159,7 +162,8 @@ func (a *Audit) Log(ev AuditEvent) {
 			name = "security_event"
 		}
 		a.logger.Warn(name,
-			"peer_id", ev.PeerID, "task_id", ev.TaskID, "reason", ev.Reason, "role", ev.Role)
+			"peer_id", ev.PeerID, "task_id", ev.TaskID, "reason", ev.Reason,
+			"actor", ev.Actor, "role", ev.Role)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()

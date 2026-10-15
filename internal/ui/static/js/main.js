@@ -43,6 +43,8 @@ window.addEventListener("DOMContentLoaded", () => {
   route();
   window.addEventListener("hashchange", route);
   subscribe(renderRefresh);
+  subscribe(renderVersion);
+  renderVersion(store);
   renderRefresh(store);
 });
 
@@ -181,6 +183,34 @@ function fmtDuration(sec) {
   if (m < 60) return `${m}м`;
   const h = Math.floor(m / 60);
   return `${h}ч`;
+}
+
+// ---------- версия и время работы ----------
+
+// renderVersion показывает версию и аптайм в шапке: берём первый reachable
+// узел — в заголовке достаточно одного снимка состояния.
+function renderVersion(s) {
+  const el = document.getElementById("version-indicator");
+  if (!el) return;
+  const node = (s.mesh?.nodes ?? []).find((n) => n.reachable && n.status);
+  if (!node || !node.status) {
+    el.textContent = "";
+    return;
+  }
+  const st = node.status;
+  const parts = [];
+  if (st.version) parts.push("v" + st.version);
+  if (typeof st.uptime_sec === "number") parts.push("up " + fmtUptime(st.uptime_sec));
+  el.textContent = parts.join(" · ");
+}
+
+function fmtUptime(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (h >= 24) return `${Math.floor(h / 24)}д ${h % 24}ч`;
+  if (h) return `${h}ч ${m}м`;
+  if (m) return `${m}м`;
+  return `${sec}с`;
 }
 
 // ---------- toast ----------

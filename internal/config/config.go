@@ -442,20 +442,19 @@ func ParseRole(s string) (APIRole, bool) {
 
 // APIToken describes one named, env-sourced bearer credential.
 type APIToken struct {
-	Name     string `yaml:"name"`     // identifier shown in audit events
-	Role     string `yaml:"role"`     // viewer | operator | admin
+	Name     string `yaml:"name"`      // identifier shown in audit events
+	Role     string `yaml:"role"`      // viewer | operator | admin
 	TokenEnv string `yaml:"token_env"` // env var holding the raw bearer token
 }
 
 // APIConfig configures the local administrative HTTP API.
 type APIConfig struct {
-	Enabled      bool        `yaml:"enabled"`
-	Listen       string      `yaml:"listen"`
-	AuthTokenEnv string      `yaml:"auth_token_env"` // legacy single-token; maps to RoleAdmin
-	Tokens       []APIToken  `yaml:"tokens"`         // named tokens with explicit roles (OCE-style IAM-lite)
-	ReadTimeout  Duration    `yaml:"read_timeout"`
-	WriteTimeout Duration    `yaml:"write_timeout"`
-	Role         string      `yaml:"role"` // new field for role-based access control
+	Enabled      bool       `yaml:"enabled"`
+	Listen       string     `yaml:"listen"`
+	AuthTokenEnv string     `yaml:"auth_token_env"` // legacy single-token; maps to RoleAdmin
+	Tokens       []APIToken `yaml:"tokens"`         // named tokens with explicit roles (OCE-style IAM-lite)
+	ReadTimeout  Duration   `yaml:"read_timeout"`
+	WriteTimeout Duration   `yaml:"write_timeout"`
 }
 
 // TelemetryConfig configures metrics and logs.
@@ -1038,6 +1037,14 @@ func (c *Config) Validate() error {
 	}
 	if c.API.Enabled && c.API.Listen == "" {
 		errs = append(errs, errors.New("api.listen is required when api.enabled"))
+	}
+	for _, t := range c.API.Tokens {
+		if _, ok := ParseRole(t.Role); !ok {
+			errs = append(errs, fmt.Errorf("api: token %q has unknown role %q (viewer|operator|admin)", t.Name, t.Role))
+		}
+		if t.TokenEnv == "" {
+			errs = append(errs, fmt.Errorf("api: token %q must name its token_env", t.Name))
+		}
 	}
 	// Tracing (ТЗ 14.3): only checked when it is on — a disabled section must
 	// never be able to stop the node. The format rules are the ones that would

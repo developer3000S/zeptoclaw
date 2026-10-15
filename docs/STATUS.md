@@ -444,7 +444,10 @@ content-addressed артефакты sha256 (`StoreArtifact/LoadArtifact/Artifac
   Мост stdlib→slog (`logging.BridgeStdlib`) идёт через ту же политику.
 - Метрики: `internal/metrics` — полный набор обязательных метрик ТЗ 14.2.1
   (+ дедуп/таймауты/security/relay); приватный реестр (безопасно N узлов в
-  одном процессе).
+  одном процессе). Дополнительно: `zeptomesh_http_requests_total{method,path,status}`
+  (запросы админ-API, лейбл `path` — паттерн маршрута, не сырой URL) и
+  `zeptomesh_task_inventory{status}` (гейдж-сводка журнала задач по статусу,
+  обновляется в фоне каждые 15 c).
 - [14.2] Выделенный Prometheus-слушатель: `telemetry.prometheus_listen` +
   `metrics.Collector.ServeMetrics` (`internal/metrics/serve.go`), `/healthz`
   на том же порту; поднимается в `cmd/zeptomesh-node/main.go`.
@@ -491,6 +494,12 @@ content-addressed артефакты sha256 (`StoreArtifact/LoadArtifact/Artifac
   `POST /api/v1/admin/rotate-key`, `POST /api/v1/admin/revoke`,
   `POST /api/v1/admin/leave`, `GET /metrics`; bearer-токен через
   `api.auth_token_env`.
+  Аутентификация/авторизация [12.5]: именованные токены `api.tokens` с ролями
+  (`viewer` — чтение, `operator` — чтение + мутации задач/навыков/триггеров +
+  `POST /api/v1/admin/scan`, `admin` — всё) поверх legacy-токена; неверный токен
+  → `401`, недостаточная роль → `403`. Аудит-журнал фиксирует исходы запросов
+  (`api_mutation`, `api_auth_denied`, `api_role_denied`) с именем токена (`actor`)
+  и ролью в `<data_dir>/audit/security.jsonl`.
 - [13.1.1] Горячая перезагрузка конфигурации: `Node.ReloadConfig` перечитывает файл,
   с которым узел запущен, и применяет только те поля, у которых есть
   синхронизированный владелец (posture trust-политики, имя/содержимое allow/deny-

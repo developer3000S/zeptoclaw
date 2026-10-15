@@ -46,6 +46,9 @@ type MeshSnapshot struct {
 	Nodes          []NodePoll `json:"nodes"`
 	Graph          Graph      `json:"graph"`
 	ManagedPeerIDs []string   `json:"managed_peer_ids"`
+	// TasksByStatus tallies recent task journals across all reachable managed
+	// nodes, so the dashboard can show the work distribution at a glance.
+	TasksByStatus map[string]int `json:"tasks_by_status,omitempty"`
 }
 
 // Aggregator polls the configured nodes on a ticker and keeps the last
@@ -134,6 +137,20 @@ func buildSnapshot(polls []NodePoll, intervalMS int, now int64) MeshSnapshot {
 		Nodes:          polls,
 		Graph:          Graph{Vertices: []Vertex{}, Edges: []Edge{}},
 		ManagedPeerIDs: []string{},
+		TasksByStatus:  map[string]int{},
+	}
+
+	// Task inventory: tally every task record from every reachable node.
+	for _, p := range polls {
+		if !p.Reachable {
+			continue
+		}
+		for _, t := range p.Tasks {
+			if t.Status == "" {
+				continue
+			}
+			snap.TasksByStatus[t.Status]++
+		}
 	}
 
 	managed := make(map[string]*Vertex, len(polls))
