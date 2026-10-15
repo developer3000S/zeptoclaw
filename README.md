@@ -42,6 +42,8 @@
 ./install.sh install --mode local --nodes 3      # sudo не обязателен: user-юниты
 ./install.sh install --mode docker --nodes 3
 ./install.sh status
+# Повторный запуск поверх существующего стека сохраняет прежний --pico-mode
+# (например ollama), если он не задан явно — режим не сбрасывается на stub.
 
 # Вариант B — из исходников, два узла на одной машине
 

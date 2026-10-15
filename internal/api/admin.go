@@ -126,11 +126,32 @@ func New(n *node.Node, cfg *config.Config, mets *metrics.Collector, logger *slog
 	s.authed(mux, "POST /api/v1/admin/leave", s.handleLeave)
 	// Agent environment scan: probe the local host, the LAN and the Internet
 	// for other agents, dial them and verify their capabilities.
+	s.authed(mux, "POST /api/v1/chat", s.handleChat)
+	s.authed(mux, "GET /api/v1/chat/history", s.handleChatHistory)
+	// Brain: the discovered-LLM catalog, the verified backend pool, the
+	// autonomous promotion, and the two inter-agent skills — asking a friend to
+	// promote a candidate and handing it search credentials.
+	s.authed(mux, "POST /api/v1/chat", s.handleChat)
+	s.authed(mux, "GET /api/v1/chat/history", s.handleChatHistory)
+	s.authed(mux, "GET /api/v1/skills", s.handleSkills)
+	s.authed(mux, "POST /api/v1/skills", s.handleUpsertSkill)
+	s.authed(mux, "DELETE /api/v1/skills/{name}", s.handleDropSkillDoc)
+	s.authed(mux, "POST /api/v1/skills/sync", s.handleSyncSkills)
+	s.authed(mux, "GET /api/v1/config", s.handleConfigView)
+	s.authed(mux, "POST /api/v1/config", s.handleUpdateConfig)
 	s.authed(mux, "POST /api/v1/admin/scan", s.handleScan)
 	s.authed(mux, "GET /api/v1/admin/scan", s.handleScanLast)
 	// Brain: the discovered-LLM catalog, the verified backend pool, the
 	// autonomous promotion, and the two inter-agent skills — asking a friend to
 	// promote a candidate and handing it search credentials.
+	s.authed(mux, "POST /api/v1/chat", s.handleChat)
+	s.authed(mux, "GET /api/v1/chat/history", s.handleChatHistory)
+	s.authed(mux, "GET /api/v1/skills", s.handleSkills)
+	s.authed(mux, "POST /api/v1/skills", s.handleUpsertSkill)
+	s.authed(mux, "DELETE /api/v1/skills/{name}", s.handleDropSkillDoc)
+	s.authed(mux, "POST /api/v1/skills/sync", s.handleSyncSkills)
+	s.authed(mux, "GET /api/v1/config", s.handleConfigView)
+	s.authed(mux, "POST /api/v1/config", s.handleUpdateConfig)
 	s.authed(mux, "POST /api/v1/candidates/promote", s.handlePromoteCandidate)
 	s.authed(mux, "GET /api/v1/brain/candidates", s.handleBrainCandidates)
 	s.authed(mux, "GET /api/v1/brain/backends", s.handleBrainBackends)

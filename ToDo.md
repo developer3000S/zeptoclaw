@@ -24,3 +24,11 @@
 
 5. **Обновить документацию** — ✅ готово
    - README.md, ToDo.md, docs/STATUS.md, docs/UI.md приведены в соответствие
+
+6. **install.sh: сохранять режим picoclaw при переустановке** — ✅ готово
+   - Повторный `install.sh` поверх существующего стека больше не сбрасывает
+     `--pico-mode` по умолчанию на `stub`: если режим не задан явно
+     (`--pico-mode` или env `ZEPTOMESH_PICO_MODE`), берётся прежний режим
+     из `docker-compose.yml` (docker) или `instance.env` (local) — например
+     `ollama` — и сохраняется
+   - Обновлена документация (README.md, docs/DEPLOYMENT.md)

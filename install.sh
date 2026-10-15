@@ -39,6 +39,8 @@ DATA_DIR=""             # корень данных
 API_HOST="127.0.0.1"    # адрес админ-API в local-режиме
 TRUST_MODE="limited"    # open | limited | private
 PICO_MODE="${ZEPTOMESH_PICO_MODE:-stub}"        # stub | binary | http | ollama
+PICO_MODE_EXPLICIT=0                            # 1, если режим задан явно (--pico-mode/env) — иначе переустановка сохраняет прежний
+[[ -n "${ZEPTOMESH_PICO_MODE:-}" ]] && PICO_MODE_EXPLICIT=1
 BOOTSTRAP=""            # multiaddr через запятую
 PSK=""                  # общий ключ закрытой сети
 LOG_LEVEL="info"
@@ -215,7 +217,7 @@ while [[ $# -gt 0 ]]; do
     --data-dir)   DATA_DIR="${2:-}"; shift 2 ;;
     --api-host)   API_HOST="${2:-}"; shift 2 ;;
     --trust-mode) TRUST_MODE="${2:-}"; shift 2 ;;
-    --pico-mode)  PICO_MODE="${2:-}"; shift 2 ;;
+    --pico-mode)  PICO_MODE="${2:-}"; PICO_MODE_EXPLICIT=1; shift 2 ;;
     --bootstrap)  BOOTSTRAP="${2:-}"; shift 2 ;;
     --psk)        PSK="${2:-}"; shift 2 ;;
     --run-user)   RUN_USER="${2:-}"; shift 2 ;;
@@ -735,6 +737,23 @@ installed_nodes() {
 
 docker_stack() { printf '%s' "$DATA_DIR/docker/docker-compose.yml"; }
 
+# prior_pico_mode — прежний режим picoclaw из существующей установки
+# (docker: docker-compose.yml; local: instance.env). Пусто, если установки нет.
+prior_pico_mode() {
+  if [[ "$MODE" == docker && -f "$(docker_stack)" ]]; then
+    sed -nE 's/^[[:space:]]*ZEPTOMESH_PICO_MODE:[[:space:]]*"?([^"]*)"?.*/\1/p' "$(docker_stack)" | head -1
+    return 0
+  fi
+  [[ -d "$DATA_DIR" ]] || { printf ''; return 0; }
+  local f
+  for f in "$DATA_DIR"/[0-9]*/instance.env; do
+    [[ -f "$f" ]] || continue
+    sed -nE 's/^ZEPTOMESH_PICO_MODE=(.*)/\1/p' "$f" | head -1
+    return 0
+  done
+  printf ''
+}
+
 cmd_status() {
   DATA_DIR="${DATA_DIR:-$(guess_data_dir)}"
   [[ -n "$DATA_DIR" && -d "$DATA_DIR" ]] || die "установка не найдена (укажите --data-dir)"
@@ -810,6 +829,18 @@ main() {
   esac
 
   prompt_settings
+  # Переустановка поверх существующего стека: если режим picoclaw не задан
+  # явно (--pico-mode или ZEPTOMESH_PICO_MODE), сохраняем прежний режим из
+  # существующей установки, а не сбрасываем по умолчанию на stub.
+  if [[ "$PICO_MODE_EXPLICIT" -eq 0 ]]; then
+    DATA_DIR="${DATA_DIR:-$(default_data_dir)}"
+    local prior
+    prior="$(prior_pico_mode)"
+    if [[ -n "$prior" && "$prior" =~ ^(stub|binary|http|ollama)$ ]]; then
+      PICO_MODE="$prior"
+      log "режим picoclaw не задан явно — сохраняю прежний: $PICO_MODE"
+    fi
+  fi
   log "режим=$MODE экземпляров=$NODES trust=$TRUST_MODE pico=$PICO_MODE"
   case "$MODE" in
     docker) install_docker ;;

@@ -23,6 +23,7 @@ type Vertex struct {
 	Load      float64  `json:"load"`
 	Source    string   `json:"source,omitempty"` // node that reported it
 	Self      bool     `json:"self,omitempty"`   // the managed node itself
+	ChatEnabled bool     `json:"chat_enabled,omitempty"` // whether chat is enabled for this node
 }
 
 // Edge is one "A knows B" relation from a managed node's neighbour table.
@@ -49,6 +50,12 @@ type MeshSnapshot struct {
 	// TasksByStatus tallies recent task journals across all reachable managed
 	// nodes, so the dashboard can show the work distribution at a glance.
 	TasksByStatus map[string]int `json:"tasks_by_status,omitempty"`
+	// ChatHistory stores recent chat messages for the dashboard
+	ChatHistory   []ChatMessage `json:"chat_history,omitempty"`
+	// Skills stores the list of available skills
+	Skills        []Skill      `json:"skills,omitempty"`
+	// Config stores the current node configuration
+	Config        NodeConfig  `json:"config,omitempty"`
 }
 
 // Aggregator polls the configured nodes on a ticker and keeps the last
@@ -58,9 +65,32 @@ type Aggregator struct {
 	log      *slog.Logger
 	clients  []*NodeClient
 	interval time.Duration
+	chatManager *chat.ChatManager
 
 	mu       sync.RWMutex
 	snapshot MeshSnapshot
+}
+
+// ChatMessage represents a single chat message
+type ChatMessage struct {
+	Message   string `json:"message"`
+	UserID    string `json:"user_id"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+// Skill represents a node skill
+type Skill struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Version     string `json:"version"`
+}
+
+// NodeConfig represents the node configuration
+type NodeConfig struct {
+	DataDir     string `json:"data_dir"`
+	ListenAddr  string `json:"listen_addr"`
+	APIPort     int    `json:"api_port"`
+	MeshPort    int    `json:"mesh_port"`
 }
 
 // NewAggregator wires clients for the configured nodes.

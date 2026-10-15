@@ -30,7 +30,7 @@ mesh `4001` (tcp+udp QUIC), админ-API `8081` (tcp), метрики `9464` (
 | `--data-dir PATH` | корень данных: экземпляры в `PATH/<i>/`, общий конфиг в `PATH/etc/` (default `/var/lib/zeptomesh`; без root — `~/.local/share/zeptomesh`) |
 | `--api-host` | bind админ-API (default `127.0.0.1` — наружу не светим) |
 | `--trust-mode open\|limited\|private` | политика доверия |
-| `--pico-mode stub\|binary\|http` | режим адаптера PicoClaw (см. [PICOCLAW-INTEGRATION.md](PICOCLAW-INTEGRATION.md)) |
+| `--pico-mode stub\|binary\|http\|ollama` | режим адаптера PicoClaw (см. [PICOCLAW-INTEGRATION.md](PICOCLAW-INTEGRATION.md)); при переустановке поверх существующего стека не заданный явно режим сохраняется из прежнего compose/`instance.env` |
 | `--bootstrap MULTIADDR[,…]` | точки входа существующей сети (формат `/ip4/…/tcp/4001/p2p/12D3K…`) |
 | `--psk VALUE` | ключ закрытой сети (`zeptomesh-node psk` печатает валидный) |
 | `--run-user NAME` | пользователь для systemd (default `zeptomesh` при root) |

@@ -1,6 +1,6 @@
 module github.com/developer3000S/zeptoclaw
 
-go 1.26.0
+go 1.19
 
 require (
 	github.com/dgraph-io/badger/v4 v4.9.6
