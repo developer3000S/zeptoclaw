@@ -11,14 +11,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::config::Config;
 use crate::p2p;
 use crate::picoclaw::{self, Adapter, BackendPool};
 use crate::proto::{
-    Capabilities, CapabilitiesRequest, CapabilitiesResponse, CancelRequest, CancelResponse,
+    Capabilities, CapabilitiesRequest, CancelRequest, CancelResponse,
     Message, PeerState, TaskEnvelope, TaskResult,
 };
 use crate::routing::{Neighbor, Table, CAT_LAN, CAT_LOCAL, CAT_WAN};
@@ -36,7 +36,8 @@ fn now_unix() -> i64 {
 
 /// Один конн: id + writer-половина (читает отдельная задача-приёмник).
 /// `tokio::sync::Mutex` — потому что запись идёт из async-контекста.
-struct Conn {
+pub(crate) struct Conn {
+    #[allow(dead_code)] // идентификатор конна (ключ в self.conns; отладка/логи)
     id: u64,
     peer_id: Option<String>,
     write: Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,

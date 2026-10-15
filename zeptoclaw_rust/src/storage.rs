@@ -437,7 +437,6 @@ impl Store {
         let now = now_unix();
         let key = format!("{PFX_DEDUP}{task_id}");
         let mut prev = DedupRecord::default();
-        let mut claimed = false;
         let mut guard = self.inner.lock().unwrap();
         if let Some(bytes) = guard.kv.get(key.as_bytes()) {
             let rec: DedupRecord = serde_json::from_slice(bytes)?;
@@ -456,9 +455,8 @@ impl Store {
         guard
             .kv
             .insert(key.into_bytes(), serde_json::to_vec(&rec)?);
-        claimed = true;
         drop(guard);
-        Ok((claimed, prev))
+        Ok((true, prev))
     }
 
     // ---- Дерево подзадач ----

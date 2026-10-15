@@ -19,8 +19,6 @@ pub const CODEC_DAG_PB: u64 = 0x70;
 // base58 (алфавит Bitcoin)
 // ---------------------------------------------------------------------------
 
-const B58_ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-
 pub fn base58_encode(data: &[u8]) -> String {
     bs58::encode(data).with_alphabet(bs58::Alphabet::BITCOIN).into_string()
 }

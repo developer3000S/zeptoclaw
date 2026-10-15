@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use bytes::Bytes;
 use chrono::Utc;
 use http_body_util::combinators::BoxBody;

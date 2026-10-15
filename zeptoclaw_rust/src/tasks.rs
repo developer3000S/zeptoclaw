@@ -778,14 +778,6 @@ impl Manager {
         let _ = self.store.put_task(rec);
     }
 
-    /// Подписывает результат поверх схемы ed25519-sha256-v1 (Go: signResult).
-    fn sign_result(&self, res: &mut TaskResult) {
-        res.result_digest = wire::result_digest(res);
-        res.signature_scheme = "ed25519-sha256-v1".into();
-        res.signature = self.identity.sign(&wire::result_body(res));
-        res.worker_signature = res.signature.clone();
-    }
-
     /// Последний известный envelope задачи (для агрегатов/relay-доставки).
     fn envelope_of(&self, task_id: &str) -> Result<TaskEnvelope> {
         if let Some(e) = self.envelopes.lock().unwrap().get(task_id) {
@@ -993,7 +985,11 @@ impl Manager {
     }
 
     async fn complete_aggregate(self: &Arc<Self>, parent_id: String, mut agg: TaskResult) -> Result<bool> {
-        self.sign_result(&mut agg);
+        // Подпись результата поверх схемы ed25519-sha256-v1 (Go: signResult).
+        agg.result_digest = wire::result_digest(&agg);
+        agg.signature_scheme = "ed25519-sha256-v1".into();
+        agg.signature = self.identity.sign(&wire::result_body(&agg));
+        agg.worker_signature = agg.signature.clone();
         self.results.lock().unwrap().insert(parent_id.clone(), agg.clone());
         if let Ok(mut t) = self.store.get_task(&parent_id) {
             t.status = Status::from_proto(agg.status).as_str().into();
@@ -1012,10 +1008,16 @@ impl Manager {
         // Доставка aggregate автору, если корень пришёл извне.
         if let Ok(env) = self.envelope_of(&parent_id) {
             if env.origin_peer_id != self.self_id() {
-                if let Some(f) = self.deliver_result_ref() {
-                    let _ = f(env.origin_peer_id.clone(), agg).await;
-                }
+                let _ = self.call_deliver_result(env.origin_peer_id.clone(), agg).await;
             }
+        } else if self.instructions.lock().unwrap().contains_key(&parent_id) {
+            // Корень создан локально: доставляем результат самому себе через
+            // тот же конвейер, что и удалённые результаты (Go: local delivery).
+            let this = self.clone();
+            let res = agg.clone();
+            tokio::spawn(async move {
+                let _ = this.handle_result(res).await;
+            });
         }
         Ok(true)
     }
@@ -1117,28 +1119,38 @@ impl Manager {
                     timestamp: now_unix(),
                     signature: vec![],
                 };
-                if let Some(f) = self.deliver_result_ref() {
-                    // ACK — часть envelope-канала в Go; здесь шлём пустой
-                    // result c error_message, чтобы транспорт был один.
-                    let res = TaskResult {
-                        task_id: ack.task_id.clone(),
-                        worker_peer_id: self.self_id().into(),
-                        status: TaskStatus::Rejected,
-                        error_message: ack.reason.clone(),
-                        error_class: error_class(TaskStatus::Rejected, &ack.reason),
-                        sender_peer_id: self.self_id().into(),
-                        started_at: ack.timestamp,
-                        finished_at: ack.timestamp,
-                        ..Default::default()
-                    };
-                    let _ = f(prev.to_string(), res).await;
-                }
+                // ACK — часть envelope-канала в Go; здесь шлём пустой
+                // result c error_message, чтобы транспорт был один.
+                let res = TaskResult {
+                    task_id: ack.task_id.clone(),
+                    worker_peer_id: self.self_id().into(),
+                    status: TaskStatus::Rejected,
+                    error_message: ack.reason.clone(),
+                    error_class: error_class(TaskStatus::Rejected, &ack.reason),
+                    sender_peer_id: self.self_id().into(),
+                    started_at: ack.timestamp,
+                    finished_at: ack.timestamp,
+                    ..Default::default()
+                };
+                let _ = self.call_deliver_result(prev.to_string(), res).await;
             }
         }
     }
 
-    fn deliver_result_ref(&self) -> Option<DeliverResult> {
-        self.deliver_result.lock().unwrap().clone()
+    fn has_deliver_result(&self) -> bool {
+        self.deliver_result.lock().unwrap().is_some()
+    }
+    /// Заимствует колбэк только на время вызова: `Option<DeliverResult>`-копия
+    /// живёт через `.await` и делает будущий код не-`Send` (MutexGuard в Rust 2021).
+    async fn call_deliver_result(&self, peer: String, res: TaskResult) -> Result<()> {
+        let fut = {
+            let guard = self.deliver_result.lock().unwrap();
+            guard.as_ref().map(|f| f(peer, res))
+        };
+        match fut {
+            Some(f) => f.await,
+            None => Ok(()),
+        }
     }
     fn deliver_ref(&self) -> Option<Deliver> {
         self.deliver.lock().unwrap().clone()
@@ -1158,10 +1170,13 @@ impl Manager {
         rec.delegated_to = vec![peer.into()];
         self.put_journal(&mut rec);
         tracing::info!("tasks: forward {} -> {}", e.task_id, peer);
-        if let Some(f) = self.deliver_ref() {
-            f(peer.to_string(), e).await
-        } else {
-            bail!("tasks: no delivery hook installed")
+        let fut = {
+            let guard = self.deliver.lock().unwrap();
+            guard.as_ref().map(|f| f(peer.to_string(), e))
+        };
+        match fut {
+            Some(f) => f.await,
+            None => bail!("tasks: no delivery hook installed"),
         }
     }
 
@@ -1324,12 +1339,17 @@ impl Manager {
             self.results.lock().unwrap().insert(env.task_id.clone(), result);
             return Ok(());
         };
-        if let Some(f) = self.deliver_result_ref() {
-            f(target, result).await
-        } else {
-            tracing::warn!("tasks: no result delivery hook; result stored locally");
-            self.results.lock().unwrap().insert(env.task_id.clone(), result);
-            Ok(())
+        let fut = {
+            let guard = self.deliver_result.lock().unwrap();
+            guard.as_ref().map(|f| f(target, result.clone()))
+        };
+        match fut {
+            Some(f) => f.await,
+            None => {
+                tracing::warn!("tasks: no result delivery hook; result stored locally");
+                self.results.lock().unwrap().insert(env.task_id.clone(), result);
+                Ok(())
+            }
         }
     }
 
@@ -1352,15 +1372,11 @@ impl Manager {
         Ok(out)
     }
 
-    fn table_semaphore(&self, _permits: usize) -> Arc<tokio::sync::Semaphore> {
-        self.sem.clone()
-    }
-
     // ---- Обработка результатов и отмен на стороне автора ------------------
 
     /// Принятый из сети результат: верификация подписи работника, сохранение,
     /// доставка автору (если мы relay) или завершение локальной задачи.
-    pub async fn handle_result(&self, res: TaskResult) -> Result<()> {
+    pub async fn handle_result(self: &Arc<Self>, res: TaskResult) -> Result<()> {
         if !res.worker_peer_id.is_empty() && !res.signature.is_empty() {
             let vk = crate::security::extract_key_from_peer_id(&res.worker_peer_id)?;
             verify(&vk.to_bytes().to_vec(), &wire::result_body(&res), &res.signature)
@@ -1383,6 +1399,11 @@ impl Manager {
             ..Default::default()
         };
         let _ = self.store.put_result(&rr);
+        // Если это результат подзадачи, которую мы разослали (мы — автор
+        // корня): поглощаем в агрегат и не трогаем журнал корня до сборки.
+        if self.absorb_child_result(&res).await? {
+            return Ok(());
+        }
         if let Ok(mut t) = self.store.get_task(&res.task_id) {
             if !Status::parse(&t.status).terminal() {
                 t.status = status.as_str().into();
@@ -1417,10 +1438,8 @@ impl Manager {
             None
         };
         if let Some(next) = next.or_else(|| Some(res.sender_peer_id.clone())) {
-            if next != self.self_id() {
-                if let Some(f) = self.deliver_result_ref() {
-                    return f(next, res).await;
-                }
+            if next != self.self_id() && self.has_deliver_result() {
+                return self.call_deliver_result(next, res).await;
             }
         }
         self.results.lock().unwrap().insert(res.task_id.clone(), res);
@@ -1436,10 +1455,8 @@ impl Manager {
         result.worker_signature = result.signature.clone();
         self.store_result(&result);
         let target = result.sender_peer_id.clone();
-        if !target.is_empty() && target != self.self_id() {
-            if let Some(f) = self.deliver_result_ref() {
-                return f(target, result).await;
-            }
+        if !target.is_empty() && target != self.self_id() && self.has_deliver_result() {
+            return self.call_deliver_result(target, result).await;
         }
         self.results.lock().unwrap().insert(result.task_id.clone(), result);
         Ok(())
@@ -1480,8 +1497,12 @@ impl Manager {
         t.status = Status::Canceled.as_str().into();
         self.put_journal(&mut t);
         for peer in &t.delegated_to {
-            if let Some(f) = self.cancel_ref() {
-                f(peer.clone(), task_id.to_string()).await;
+            let fut = {
+                let guard = self.cancel_peer.lock().unwrap();
+                guard.as_ref().map(|f| f(peer.clone(), task_id.to_string()))
+            };
+            if let Some(f) = fut {
+                f.await;
             }
         }
         Ok(())
