@@ -12,6 +12,11 @@ build/
 /picoclaw-test
 cmd/**/workspace
 
+# Rust build artifacts (zeptoclaw_rust)
+target/
+**/*.rs.bk
+*.pdb
+
 # Picoclaw specific
 
 # PicoClaw
