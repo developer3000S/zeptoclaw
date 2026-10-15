@@ -69,6 +69,82 @@ where
     }
 }
 
+/// Обратная конверсия Duration → Go-подобная строка ("1h30m0s", "10s"),
+/// аналог time.Duration.String() — нужна чтобы Config::defaults() можно было
+/// сериализовать в YAML-мапу для слияния с пользовательским конфигом.
+pub fn format_duration(d: Duration) -> String {
+    if d.is_zero() {
+        return "0s".into();
+    }
+    let total_ns = d.as_nanos();
+    let h = total_ns / 3_600_000_000_000;
+    let m = (total_ns % 3_600_000_000_000) / 60_000_000_000;
+    let s = (total_ns % 60_000_000_000) / 1_000_000_000;
+    let ms = (total_ns % 1_000_000_000) / 1_000_000;
+    let us = (total_ns % 1_000_000) / 1_000;
+    let ns = total_ns % 1_000;
+    let mut out = String::new();
+    macro_rules! push_unit {
+        ($v:expr, $u:literal, $force:expr) => {
+            if $v > 0 || ($force && !out.is_empty()) {
+                out.push_str(&$v.to_string());
+                out.push_str($u);
+            }
+        };
+    }
+    push_unit!(h, "h", false);
+    push_unit!(m, "m", h > 0);
+    push_unit!(s, "s", (h > 0 || m > 0) && !(ms == 0 && us == 0 && ns == 0));
+    push_unit!(ms, "ms", (h > 0 || m > 0 || s > 0) && !(us == 0 && ns == 0));
+    push_unit!(us, "µs", (h > 0 || m > 0 || s > 0 || ms > 0) && ns == 0);
+    push_unit!(ns, "ns", h > 0 || m > 0 || s > 0 || ms > 0 || us > 0);
+    if out.is_empty() {
+        out = format!("{}ns", total_ns);
+    }
+    out
+}
+
+fn se_duration<S: serde::Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&format_duration(*d))
+}
+
+/// Поле-обёртка Duration с Go-совместимой сериализацией (строка) и гибкой
+/// десериализацией (строка «1h30m» или число секунд). Используется вместо
+/// `#[serde(with)]` на каждом поле, чтобы весь Config оставался round-trip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Dur(pub Duration);
+
+impl Default for Dur {
+    fn default() -> Self {
+        Dur(Duration::ZERO)
+    }
+}
+
+impl From<Duration> for Dur {
+    fn from(d: Duration) -> Self {
+        Dur(d)
+    }
+}
+
+impl std::ops::Deref for Dur {
+    type Target = Duration;
+    fn deref(&self) -> &Duration {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for Dur {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        de_duration(d).map(Dur)
+    }
+}
+
+impl Serialize for Dur {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        se_duration(&self.0, s)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Секции конфигурации
 // ---------------------------------------------------------------------------
@@ -128,25 +204,19 @@ pub struct IdentityConfig {
 pub struct GossipConfig {
     pub enabled: bool,
     pub topic: String,
-    #[serde(deserialize_with = "de_duration")]
-    pub heartbeat: Duration,
-    #[serde(deserialize_with = "de_duration")]
-    pub full_sync: Duration,
-    #[serde(deserialize_with = "de_duration")]
-    pub failure_timeout: Duration,
+    pub heartbeat: Dur,
+    pub full_sync: Dur,
+    pub failure_timeout: Dur,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ScanConfig {
     pub enabled: bool,
-    #[serde(deserialize_with = "de_duration")]
-    pub interval: Duration,
+    pub interval: Dur,
     pub subnet_scan: bool,
-    #[serde(deserialize_with = "de_duration")]
-    pub dial_timeout: Duration,
-    #[serde(deserialize_with = "de_duration")]
-    pub timeout: Duration,
+    pub dial_timeout: Dur,
+    pub timeout: Dur,
     pub max_candidates: i32,
 }
 
@@ -162,8 +232,7 @@ pub struct DiscoveryConfig {
     pub dht_mode: String, // server | client | auto
     pub peer_exchange: bool,
     pub gossip: GossipConfig,
-    #[serde(deserialize_with = "de_duration")]
-    pub bootstrap_interval: Duration,
+    pub bootstrap_interval: Dur,
     pub scan: ScanConfig,
 }
 
@@ -180,11 +249,9 @@ pub struct NeighborsConfig {
 pub struct SearchTopicConfig {
     pub enabled: bool,
     pub name: String,
-    #[serde(deserialize_with = "de_duration")]
-    pub request_ttl: Duration,
+    pub request_ttl: Dur,
     pub max_answers: i32,
-    #[serde(deserialize_with = "de_duration")]
-    pub answer_cooldown: Duration,
+    pub answer_cooldown: Dur,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -193,10 +260,8 @@ pub struct SearchRelayConfig {
     pub enabled: bool,
     pub max_depth: i32,
     pub fanout: i32,
-    #[serde(deserialize_with = "de_duration")]
-    pub request_timeout: Duration,
-    #[serde(deserialize_with = "de_duration")]
-    pub cache_ttl: Duration,
+    pub request_timeout: Dur,
+    pub cache_ttl: Dur,
     pub topic: SearchTopicConfig,
 }
 
@@ -205,11 +270,9 @@ pub struct SearchRelayConfig {
 pub struct ForwardingConfig {
     pub max_parallel_candidates: i32,
     pub max_fanout: i32,
-    #[serde(deserialize_with = "de_duration")]
-    pub retry_interval_seconds: Duration,
+    pub retry_interval_seconds: Dur,
     pub max_retries: i32,
-    #[serde(deserialize_with = "de_duration")]
-    pub attempt_timeout: Duration,
+    pub attempt_timeout: Dur,
     pub search_relay: SearchRelayConfig,
 }
 
@@ -227,11 +290,9 @@ pub struct TasksConfig {
     pub max_workspace_bytes: i64,
     pub min_free_disk_bytes: i64,
     pub max_task_memory_bytes: i64,
-    #[serde(deserialize_with = "de_duration")]
-    pub dedup_window: Duration,
+    pub dedup_window: Dur,
     pub forwarding: ForwardingConfig,
-    #[serde(deserialize_with = "de_duration")]
-    pub retention: Duration,
+    pub retention: Dur,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -249,8 +310,7 @@ pub struct SkillDocConfig {
 pub struct SkillExchangeConfig {
     pub enabled: bool,
     pub disclose_to: String, // trusted | known | any
-    #[serde(deserialize_with = "de_duration")]
-    pub interval: Duration,
+    pub interval: Dur,
     pub max_descriptors: i32,
     pub import_limit: i32,
     pub persist: bool,
@@ -284,8 +344,7 @@ pub struct PicoClawHTTPConfig {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StubConfig {
-    #[serde(deserialize_with = "de_duration")]
-    pub latency: Duration,
+    pub latency: Dur,
     pub echo: bool,
 }
 
@@ -343,10 +402,8 @@ pub struct APIConfig {
     pub listen: String,
     pub auth_token_env: String,
     pub tokens: Vec<APIToken>,
-    #[serde(deserialize_with = "de_duration")]
-    pub read_timeout: Duration,
-    #[serde(deserialize_with = "de_duration")]
-    pub write_timeout: Duration,
+    pub read_timeout: Dur,
+    pub write_timeout: Dur,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -425,8 +482,56 @@ impl Default for Config {
     }
 }
 
-fn dur(s: &str) -> Duration {
-    parse_duration(s).unwrap_or(Duration::ZERO)
+fn dur(s: &str) -> Dur {
+    Dur(parse_duration(s).unwrap_or(Duration::ZERO))
+}
+
+/// Аналог expandEnv из Go-конфига: подставляет ${VAR} и ${VAR:-default}.
+pub fn expand_env(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find("${") {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + 2..];
+        match after.find('}') {
+            Some(end) => {
+                let inner = &after[..end];
+                let value = match inner.split_once(":-") {
+                    Some((name, def)) => std::env::var(name).unwrap_or_else(|_| def.to_string()),
+                    None => std::env::var(inner).unwrap_or_default(),
+                };
+                out.push_str(&value);
+                rest = &after[end + 1..];
+            }
+            None => {
+                // Незакрытая последовательность — печатаем как есть.
+                out.push_str("${");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Рекурсивное слияние YAML-значений: overlay поверх base (мапы сливаются,
+/// скаляры/массивы из overlay выигрывают). Эмулирует декодирование Go-yaml
+/// поверх предзаполненной структуры.
+fn merge_yaml(base: serde_yaml::Value, overlay: serde_yaml::Value) -> serde_yaml::Value {
+    use serde_yaml::Value;
+    match (base, overlay) {
+        (Value::Mapping(mut b), Value::Mapping(o)) => {
+            for (k, v) in o {
+                let merged = match b.remove(&k) {
+                    Some(bv) => merge_yaml(bv, v),
+                    None => v,
+                };
+                b.insert(k, merged);
+            }
+            Value::Mapping(b)
+        }
+        (_, o) => o,
+    }
 }
 
 impl Config {
@@ -573,16 +678,26 @@ impl Config {
         }
     }
 
-    /// Аналог config.Load(path): дефолты + YAML поверх.
+    /// Аналог config.Load(path): дефолты + YAML поверх (Go: `dec.Decode(cfg)`
+    /// в структуру, предзаполненную Default()). Реализация: сериализуем
+    /// дефолты в мапу, рекурсивно перекрываем мапой из YAML и десериализуем
+    /// результат — partial-YAML сохраняет значения всех непомянутых полей.
     pub fn load(path: &str) -> anyhow::Result<Config> {
-        let mut cfg = Config::defaults();
-        if !path.is_empty() {
-            let text = std::fs::read_to_string(path)?;
-            cfg = serde_yaml::from_str(&text)?;
-            // serde(default)+deny_unknown не сливает с дефолтами рекурсивно —
-            // Go-версия декодирует поверх Default(), эмулируем повторным
-            // заполнением пустых обязательных полей через validate-путь.
-        }
+        let defaults = Config::defaults();
+        let mut cfg = if path.is_empty() {
+            defaults
+        } else {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("config: read {}: {}", path, e))?;
+            let text = expand_env(&text);
+            let yaml_val: serde_yaml::Value = serde_yaml::from_str(&text)
+                .map_err(|e| anyhow::anyhow!("config: parse {}: {}", path, e))?;
+            let def_val = serde_yaml::to_value(&defaults)
+                .map_err(|e| anyhow::anyhow!("config: defaults: {}", e))?;
+            let merged = merge_yaml(def_val, yaml_val);
+            serde_yaml::from_value(merged)
+                .map_err(|e| anyhow::anyhow!("config: parse {}: {}", path, e))?
+        };
         cfg.apply_env_overrides();
         cfg.validate()?;
         Ok(cfg)
@@ -616,8 +731,9 @@ impl Config {
         }
     }
 
-    /// Аналог Validate(): базовые проверки согласованности.
-    pub fn validate(&self) -> anyhow::Result<()> {
+    /// Аналог Validate(): проверки согласованности + вывод путей-по-умолчанию
+    /// относительно data_dir (Go: derived paths).
+    pub fn validate(&mut self) -> anyhow::Result<()> {
         let ok_modes = ["open", "limited", "private"];
         if !ok_modes.contains(&self.security.trust_mode.as_str()) {
             anyhow::bail!("config: security.trust_mode must be one of {ok_modes:?}");
@@ -634,6 +750,19 @@ impl Config {
         }
         if self.node.data_dir.is_empty() {
             anyhow::bail!("config: node.data_dir is required");
+        }
+        // Derived paths (Go config.go:928-940).
+        if self.identity.key_file.is_empty() {
+            self.identity.key_file = format!("{}/keys/peer.key", self.node.data_dir);
+        }
+        if self.storage.dir.is_empty() {
+            self.storage.dir = format!("{}/db", self.node.data_dir);
+        }
+        if self.discovery.local_socket_dir.is_empty() {
+            self.discovery.local_socket_dir = format!("{}/run", self.node.data_dir);
+        }
+        if self.picoclaw.workspace_root.is_empty() {
+            self.picoclaw.workspace_root = format!("{}/picoclaw/workspaces", self.node.data_dir);
         }
         for t in &self.triggers {
             if t.schedule.is_empty() {
@@ -653,11 +782,7 @@ impl Config {
         format!("{}/audit", self.node.data_dir)
     }
     pub fn key_file(&self) -> String {
-        if self.identity.key_file.is_empty() {
-            format!("{}/identity.key", self.node.data_dir)
-        } else {
-            self.identity.key_file.clone()
-        }
+        self.identity.key_file.clone()
     }
 
     /// Эффективные навыки: skills минус disabled_skills (аналог EffectiveSkills).
@@ -685,7 +810,7 @@ mod tests {
 
     #[test]
     fn defaults_validate() {
-        let c = Config::defaults();
+        let mut c = Config::defaults();
         c.validate().unwrap();
     }
 
@@ -695,5 +820,39 @@ mod tests {
         let c: Config = serde_yaml::from_str(y).unwrap();
         assert_eq!(c.node.name, "alpha");
         assert_eq!(c.tasks.default_ttl, 3);
+    }
+
+    #[test]
+    fn load_partial_yaml_keeps_defaults() {
+        let dir = std::env::temp_dir().join(format!("zm-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node.yaml");
+        std::fs::write(
+            &path,
+            format!(
+                "node:\n  name: alpha\n  data_dir: {}\n  listen:\n    - /ip4/127.0.0.1/tcp/1\ntasks:\n  default_ttl: 3\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+        let c = Config::load(path.to_str().unwrap()).unwrap();
+        assert_eq!(c.node.name, "alpha");
+        // непомянутые поля сохранены из Default():
+        assert_eq!(c.security.trust_mode, Config::defaults().security.trust_mode);
+        assert_eq!(c.neighbors.target, Config::defaults().neighbors.target);
+        // derived paths:
+        assert_eq!(c.identity.key_file, format!("{}/keys/peer.key", dir.display()));
+        assert_eq!(c.storage.dir, format!("{}/db", dir.display()));
+        assert_eq!(c.picoclaw.workspace_root, format!("{}/picoclaw/workspaces", dir.display()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn expand_env_substitution() {
+        std::env::set_var("ZM_TEST_VAR", "hello");
+        assert_eq!(expand_env("a ${ZM_TEST_VAR} b"), "a hello b");
+        assert_eq!(expand_env("x ${ZM_UNSET_XX:-fallback} y"), "x fallback y");
+        assert_eq!(expand_env("no vars here"), "no vars here");
+        assert_eq!(expand_env("broken ${NOPE"), "broken ${NOPE");
     }
 }

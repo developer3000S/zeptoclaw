@@ -1075,7 +1075,7 @@ impl Manager {
         if !is_local {
             let (claimed, prev) = self
                 .store
-                .claim_dedup(&env.task_id, self.cfg.tasks.dedup_window)?;
+                .claim_dedup(&env.task_id, self.cfg.tasks.dedup_window.0)?;
             if !claimed {
                 tracing::debug!(
                     "tasks: duplicate delivery of {} (first seen {}s ago)",

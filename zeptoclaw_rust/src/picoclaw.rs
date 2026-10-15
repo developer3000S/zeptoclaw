@@ -525,7 +525,7 @@ pub struct StubAdapter {
 impl StubAdapter {
     pub fn new(cfg: StubConfig, skills: Vec<String>) -> Self {
         Self {
-            latency: cfg.latency,
+            latency: cfg.latency.0,
             echo: cfg.echo,
             skills,
             calls: AtomicI64::new(0),

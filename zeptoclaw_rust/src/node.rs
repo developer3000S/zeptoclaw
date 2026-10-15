@@ -347,7 +347,7 @@ impl Node {
         let period = if self.cfg.discovery.gossip.heartbeat.is_zero() {
             Duration::from_secs(10)
         } else {
-            self.cfg.discovery.gossip.heartbeat
+            *self.cfg.discovery.gossip.heartbeat
         };
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(period);
