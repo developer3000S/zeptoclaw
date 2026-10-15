@@ -218,7 +218,19 @@ impl Server {
             return Some(Identity { name: "loopback".into(), role: Role::Admin });
         }
         let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
-        let got = auth.strip_prefix("Bearer ")?.trim();
+        let mut got = auth.strip_prefix("Bearer ").unwrap_or("").trim();
+        // Совместимость с Go-портом и smoke-тестом: токен также принимается
+        // из query-параметра ?token= (для curl/скриптов).
+        if got.is_empty() {
+            if let Some(q) = req.uri().query() {
+                for kv in q.split('&') {
+                    if let Some(v) = kv.strip_prefix("token=") {
+                        got = v;
+                        break;
+                    }
+                }
+            }
+        }
         if got.is_empty() {
             return None;
         }
@@ -287,7 +299,9 @@ impl Server {
         }
         match (m.as_str(), p) {
             ("GET", "/api/v1/config") => self.config_view(),
-            ("POST", "/api/v1/admin/leave") => self.leave().await,
+            ("POST", "/api/v1/admin/leave") | ("POST", "/api/v1/shutdown") => {
+                self.shutdown_alias().await
+            }
             // Модули, ещё не перенесённые на Rust (brain/chat/triggers/skills-sync):
             ("POST", "/api/v1/admin/scan")
             | ("GET", "/api/v1/admin/scan")
@@ -511,7 +525,8 @@ impl Server {
             Ok(r) => r,
             Err(_) => return err_resp(StatusCode::NOT_FOUND, format!("task not found: {id}")),
         };
-        let mut out = serde_json::json!({ "task": rec });
+        // Как в Go: record сериализуется с полем status верхнего уровня.
+        let mut out = serde_json::json!({ "task": rec, "status": rec.status });
         if let Some(res) = self.node.manager.get_result(id) {
             out["result"] = result_json(&res);
         } else if let Ok(rr) = self.node.store.get_result(id) {
@@ -579,6 +594,11 @@ impl Server {
     async fn leave(&self) -> Resp {
         self.node.request_shutdown();
         json_resp(StatusCode::OK, serde_json::json!({ "status": "leaving" }))
+    }
+
+    /// Совместимость со smoke-тестом/скриптами: /api/v1/shutdown — алиас leave.
+    async fn shutdown_alias(&self) -> Resp {
+        self.leave().await
     }
 
     /// Минимальный Prometheus-textformat вместо prometheus/client-go:

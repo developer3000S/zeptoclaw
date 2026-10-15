@@ -1692,7 +1692,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().join("t1");
         let a = StubAdapter::new(
-            StubConfig { latency: Duration::from_millis(1), echo: true },
+            StubConfig { latency: crate::config::Dur(Duration::from_millis(1)), echo: true },
             vec!["general".into()],
         );
         let r = a

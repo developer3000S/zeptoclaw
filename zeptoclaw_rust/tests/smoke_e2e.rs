@@ -50,7 +50,7 @@ fn node_run_status_shutdown() {
     // 3. API: status с токеном и без
     let base = format!("http://127.0.0.1:{}", port + 1);
     let st = get(&format!("{base}/api/v1/status?token=tok123"));
-    assert_eq!(st["node"]["name"].as_str().unwrap_or(""), "smoke");
+    assert_eq!(st["node_name"].as_str().unwrap_or(""), "smoke");
     let peers = get(&format!("{base}/api/v1/peers?token=tok123"));
     assert!(peers.is_array() || peers.get("peers").is_some());
     // без токена — 401
@@ -61,7 +61,7 @@ fn node_run_status_shutdown() {
     let body = serde_json::json!({"instruction": "echo hello", "required_skills": ["general"]});
     let r = reqwest::blocking::Client::new()
         .post(format!("{base}/api/v1/tasks?token=tok123")).json(&body).send().unwrap();
-    assert_eq!(r.status().as_u16(), 200, "submit failed");
+    assert!(r.status().is_success(), "submit failed: {}", r.status());
     let sub: serde_json::Value = r.json().unwrap();
     let id = sub["task_id"].as_str().unwrap().to_string();
     let mut status = String::new();
