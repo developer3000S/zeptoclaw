@@ -71,7 +71,7 @@ impl Conn {
     }
 }
 
-pub type Conns = Arc<Mutex<HashMap<u64, Arc<Conn>>>>;
+pub(crate) type Conns = Arc<Mutex<HashMap<u64, Arc<Conn>>>>;
 
 /// Узел mesh (Go: node.Node).
 pub struct Node {
@@ -443,7 +443,7 @@ impl Node {
 
     /// Подключение нового TCP-конна: split, handshake (для исходящих),
     /// регистрация в conns и запуск читательского цикла.
-    pub async fn attach(self: &Arc<Self>, stream: TcpStream, known_peer: Option<String>) -> Result<Arc<Conn>> {
+    pub(crate) async fn attach(self: &Arc<Self>, stream: TcpStream, known_peer: Option<String>) -> Result<Arc<Conn>> {
         let id = self.next_conn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (mut r, mut w) = stream.into_split();
         let mut peer_id = known_peer;

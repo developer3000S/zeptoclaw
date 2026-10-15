@@ -9,6 +9,10 @@
 [PROTOCOLS.md](PROTOCOLS.md), [PICOCLAW-INTEGRATION.md](PICOCLAW-INTEGRATION.md),
 [DEPLOYMENT.md](DEPLOYMENT.md), [RUNBOOK.md](RUNBOOK.md).
 
+> Данный документ описывает **Go-реализацию**. Параллельный Rust-порт
+> (`zeptoclaw_rust/`) живёт по своему статусу:
+> [../zeptoclaw_rust/RUST_PORT.md](../zeptoclaw_rust/RUST_PORT.md).
+
 ---
 
 ## 1. Реализовано
