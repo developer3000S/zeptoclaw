@@ -1,0 +1,110 @@
+# ---------------------------------------------------------------------------
+# ZeptoClaw Agent Mesh — локальная сеть узлов.
+#
+#   ZEPTOMESH_NODES=3 docker compose -f deploy/docker/docker-compose.yml up -d
+#
+# Порты задаются через переменные окружения и по умолчанию подбираются
+# автоматически скриптом install.sh (случайные свободные пятизначные порты).
+# Для ручного запуска через docker compose используйте переменные:
+#   ZEPTO0_MESH_PORT, ZEPTO0_API_PORT, ZEPTO0_PROM_PORT, …
+#
+# Bootstrap обязан содержать /p2p/<peer id> — адрес без идентичности узел
+# отвергает на старте («bad bootstrap addrs: … has no /p2p/<peer id> part»).
+# Peer ID якоря известен только после его первого запуска (он выводится из
+# ключа на томе), поэтому он не зашит в файл, а подаётся переменной:
+#
+#   docker compose -f deploy/docker/docker-compose.yml up -d zepto-0
+#   PEER=$(docker exec zeptomesh-0 sh -c \
+#            'curl -fsS http://127.0.0.1:8081/healthz' \
+#          | sed -nE 's/.*"peer_id":"([^"]+)".*/\1/p')
+#   ZEPTOMESH_ANCHOR="/dns4/zepto-0/tcp/4001/p2p/$PEER" \
+#     docker compose -f deploy/docker/docker-compose.yml up -d
+#
+# Без ZEPTOMESH_ANCHOR узлы 1+ стартуют с пустым bootstrap и сходятся через
+# DHT/peer-exchange (медленнее, но работоспособно: DHT в образе включён).
+# ---------------------------------------------------------------------------
+
+x-node-base: &node-base
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile
+  image: zeptomesh-node:latest
+  restart: unless-stopped
+  stop_grace_period: 30s
+  environment: &node-env
+    ZEPTOMESH_PICO_MODE: ${ZEPTOMESH_PICO_MODE:-stub}
+    ZEPTOMESH_TRUST_MODE: ${ZEPTOMESH_TRUST_MODE:-open}
+    ZEPTOMESH_MDNS: "false"
+    ZEPTOMESH_LOG_LEVEL: ${ZEPTOMESH_LOG_LEVEL:-info}
+    ZEPTOMESH_API_HOST: 0.0.0.0
+    ZEPTOMESH_API_TOKEN: ${ZEPTOMESH_API_TOKEN:-}
+    ZEPTOMESH_PSK: ${ZEPTOMESH_PSK:-}
+    TZ: ${TZ:-UTC}
+  command: ["run"]
+
+services:
+  zepto-0:
+    <<: *node-base
+    hostname: zepto-0
+    environment:
+      <<: *node-env
+      ZEPTOMESH_INDEX: "0"
+      ZEPTOMESH_NAME: zepto-0
+      ZEPTOMESH_MESH_PORT: "${ZEPTO0_MESH_PORT:-14001}"
+      ZEPTOMESH_API_PORT: "${ZEPTO0_API_PORT:-18081}"
+      ZEPTOMESH_PROM_LISTEN: "0.0.0.0:${ZEPTO0_PROM_PORT:-19464}"
+      ZEPTOMESH_BOOTSTRAP: ""
+    ports:
+      - "${ZEPTO0_MESH_PORT:-14001}:${ZEPTO0_MESH_PORT:-14001}/tcp"
+      - "${ZEPTO0_MESH_PORT:-14001}:${ZEPTO0_MESH_PORT:-14001}/udp"
+      - "127.0.0.1:${ZEPTO0_API_PORT:-18081}:${ZEPTO0_API_PORT:-18081}"
+      - "127.0.0.1:${ZEPTO0_PROM_PORT:-19464}:${ZEPTO0_PROM_PORT:-19464}"
+    volumes:
+      - zepto-0-data:/var/lib/zeptomesh
+
+  zepto-1:
+    <<: *node-base
+    hostname: zepto-1
+    depends_on:
+      - zepto-0
+    environment:
+      <<: *node-env
+      ZEPTOMESH_INDEX: "1"
+      ZEPTOMESH_NAME: zepto-1
+      ZEPTOMESH_MESH_PORT: "${ZEPTO1_MESH_PORT:-14002}"
+      ZEPTOMESH_API_PORT: "${ZEPTO1_API_PORT:-18082}"
+      ZEPTOMESH_PROM_LISTEN: "0.0.0.0:${ZEPTO1_PROM_PORT:-19465}"
+      ZEPTOMESH_BOOTSTRAP: ${ZEPTOMESH_ANCHOR:-}
+    ports:
+      - "${ZEPTO1_MESH_PORT:-14002}:${ZEPTO1_MESH_PORT:-14002}/tcp"
+      - "${ZEPTO1_MESH_PORT:-14002}:${ZEPTO1_MESH_PORT:-14002}/udp"
+      - "127.0.0.1:${ZEPTO1_API_PORT:-18082}:${ZEPTO1_API_PORT:-18082}"
+      - "127.0.0.1:${ZEPTO1_PROM_PORT:-19465}:${ZEPTO1_PROM_PORT:-19465}"
+    volumes:
+      - zepto-1-data:/var/lib/zeptomesh
+
+  zepto-2:
+    <<: *node-base
+    hostname: zepto-2
+    depends_on:
+      - zepto-0
+    environment:
+      <<: *node-env
+      ZEPTOMESH_INDEX: "2"
+      ZEPTOMESH_NAME: zepto-2
+      ZEPTOMESH_MESH_PORT: "${ZEPTO2_MESH_PORT:-14003}"
+      ZEPTOMESH_API_PORT: "${ZEPTO2_API_PORT:-18083}"
+      ZEPTOMESH_PROM_LISTEN: "0.0.0.0:${ZEPTO2_PROM_PORT:-19466}"
+      ZEPTOMESH_BOOTSTRAP: ${ZEPTOMESH_ANCHOR:-}
+    ports:
+      - "${ZEPTO2_MESH_PORT:-14003}:${ZEPTO2_MESH_PORT:-14003}/tcp"
+      - "${ZEPTO2_MESH_PORT:-14003}:${ZEPTO2_MESH_PORT:-14003}/udp"
+      - "127.0.0.1:${ZEPTO2_API_PORT:-18083}:${ZEPTO2_API_PORT:-18083}"
+      - "127.0.0.1:${ZEPTO2_PROM_PORT:-19466}:${ZEPTO2_PROM_PORT:-19466}"
+    volumes:
+      - zepto-2-data:/var/lib/zeptomesh
+
+volumes:
+  zepto-0-data:
+  zepto-1-data:
+  zepto-2-data:

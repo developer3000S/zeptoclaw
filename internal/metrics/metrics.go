@@ -1,0 +1,284 @@
+// Package metrics exposes the node's Prometheus counters and gauges.
+package metrics
+
+import (
+	"strconv"
+	"sync"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+// Collector holds every mesh metric. It implements p2p.MetricsRecorder.
+type Collector struct {
+	reg *prometheus.Registry
+
+	PeersTotal      prometheus.Gauge
+	PeersConnected  prometheus.Gauge
+	TasksReceived   prometheus.Counter
+	TasksCompleted  prometheus.Counter
+	TasksFailed     prometheus.Counter
+	TasksRejected   prometheus.Counter
+	TasksRunning    prometheus.Gauge
+	TasksDelegated  prometheus.Counter
+	TasksDuplicate  prometheus.Counter
+	TasksTimedOut   prometheus.Counter
+	SearchRelays    prometheus.Counter
+	SearchRelayHits prometheus.Counter
+	FullRefreshes   prometheus.Counter
+	// Search-topic plane (ТЗ 6.9.5 п.5): requests this node published, requests
+	// it answered, and messages it refused to parse/verify/trust.
+	SearchTopicRequests prometheus.Counter
+	SearchTopicAnswers  prometheus.Counter
+	SearchTopicRejected prometheus.Counter
+	SkillsSynced        prometheus.Counter
+	SkillsImported      prometheus.Counter
+	SkillsRefused       prometheus.Counter
+	SkillsVersion       prometheus.Gauge
+	RebindsApplied      prometheus.Counter
+	TaskDuration        prometheus.Histogram
+	TaskRouteHops       prometheus.Histogram
+	DiscoveryMDNS       prometheus.Counter
+	DiscoveryLocal      prometheus.Counter
+	DHTLookups          prometheus.Counter
+	DHTHits             prometheus.Counter
+	GossipPublished     prometheus.Counter
+	GossipReceived      prometheus.Counter
+	BytesSent           prometheus.Counter
+	BytesReceived       prometheus.Counter
+	PicoClawRunning     prometheus.Gauge
+	PicoClawErrors      prometheus.Counter
+	SecurityEvents      *prometheus.CounterVec
+	ForwardAttempts     *prometheus.CounterVec
+	NeighborScore       *prometheus.GaugeVec
+	BuildInfo           prometheus.Gauge
+	// HTTPRequests counts admin API requests by method, route pattern and
+	// response status. The label is the mux pattern, never the raw URL.
+	HTTPRequests *prometheus.CounterVec
+	// TaskInventory is the task journal tally by status (updated on a slow
+	// tick by the node, not on every transition).
+	TaskInventory *prometheus.GaugeVec
+
+	mu sync.Mutex
+	// taskStatuses remembers which status labels the inventory last reported so
+	// a status that no longer occurs is reset to zero instead of going stale.
+	taskStatuses map[string]struct{}
+}
+
+// New registers the metrics on a private registry, so a test binary can build
+// several nodes without colliding on the default registry.
+func New(namespace string) *Collector {
+	if namespace == "" {
+		namespace = "zeptomesh"
+	}
+	reg := prometheus.NewRegistry()
+	c := &Collector{reg: reg}
+
+	c.PeersTotal = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, Name: "peers_total", Help: "Known neighbours in the table.",
+	})
+	c.PeersConnected = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, Name: "peers_connected", Help: "Connected neighbours.",
+	})
+	c.TasksReceived = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "tasks_received_total", Help: "Tasks received from any source.",
+	})
+	c.TasksCompleted = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "tasks_completed_total", Help: "Tasks that finished successfully.",
+	})
+	c.TasksFailed = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "tasks_failed_total", Help: "Tasks that finished with an error.",
+	})
+	c.TasksRejected = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "tasks_rejected_total", Help: "Tasks refused by policy or validation.",
+	})
+	c.TasksRunning = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, Name: "tasks_running", Help: "Tasks currently executing locally.",
+	})
+	c.TasksDelegated = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "tasks_delegated_total", Help: "Tasks forwarded to another peer.",
+	})
+	c.TasksDuplicate = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "tasks_duplicate_total", Help: "Deliveries suppressed by deduplication.",
+	})
+	c.TasksTimedOut = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "tasks_timeout_total", Help: "Tasks that exceeded their deadline.",
+	})
+	c.SearchRelays = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "search_relays_total", Help: "Search-relay lookups started by this node.",
+	})
+	c.SearchRelayHits = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "search_relay_hits_total", Help: "Peers discovered via search relay.",
+	})
+	c.FullRefreshes = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "skill_full_refreshes_total", Help: "Full skill-view reloads performed or requested.",
+	})
+	c.SearchTopicRequests = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "search_topic_requests_total", Help: "Skill searches published on the epidemic search topic.",
+	})
+	c.SearchTopicAnswers = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "search_topic_answers_total", Help: "Search-topic requests this node answered.",
+	})
+	c.SearchTopicRejected = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "search_topic_rejected_total", Help: "Search-topic messages refused (bad signature, stale, unsolicited, policy).",
+	})
+	c.SkillsSynced = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "skills_synced_total", Help: "Skill-descriptor syncs performed by this node.",
+	})
+	c.SkillsImported = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "skills_descriptors_imported_total", Help: "Peer skill descriptors accepted.",
+	})
+	c.SkillsRefused = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "skills_sync_refused_total", Help: "Skill sync requests refused by disclosure policy.",
+	})
+	c.SkillsVersion = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, Name: "skills_version", Help: "This node's advertised skill epoch.",
+	})
+	c.RebindsApplied = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "identity_rebinds_applied_total",
+		Help: "Verified identity handover (rotation/revocation) statements applied.",
+	})
+	c.TaskDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: namespace, Name: "task_duration_seconds", Help: "End-to-end task execution time.",
+		Buckets: []float64{0.05, 0.25, 1, 5, 15, 30, 60, 120, 300, 600, 1800},
+	})
+	c.TaskRouteHops = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: namespace, Name: "task_route_hops", Help: "Hops observed on completed tasks.",
+		Buckets: []float64{0, 1, 2, 3, 5, 8, 13, 21},
+	})
+	c.DiscoveryMDNS = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "discovery_mdns_peers_found_total", Help: "Peers found via mDNS.",
+	})
+	c.DiscoveryLocal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "discovery_local_peers_found_total", Help: "Peers found in the local registry.",
+	})
+	c.DHTLookups = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "dht_lookups_total", Help: "DHT provider lookups.",
+	})
+	c.DHTHits = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "dht_lookup_hits_total", Help: "Peers returned by DHT lookups.",
+	})
+	c.GossipPublished = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "gossip_published_total", Help: "Gossip messages published.",
+	})
+	c.GossipReceived = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "gossip_received_total", Help: "Gossip messages accepted.",
+	})
+	c.BytesSent = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "network_bytes_sent_total", Help: "Bytes written to peers.",
+	})
+	c.BytesReceived = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "network_bytes_received_total", Help: "Bytes read from peers.",
+	})
+	c.PicoClawRunning = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, Name: "picoclaw_processes_running", Help: "Concurrent local agent executions.",
+	})
+	c.PicoClawErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Name: "picoclaw_errors_total", Help: "Local agent execution failures.",
+	})
+	c.SecurityEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Name: "security_events_total", Help: "Security events by kind.",
+	}, []string{"event"})
+	c.ForwardAttempts = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Name: "forward_attempts_total", Help: "Delegation attempts by outcome.",
+	}, []string{"outcome"})
+	c.NeighborScore = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace, Name: "neighbor_score", Help: "Last computed routing score per neighbour.",
+	}, []string{"peer"})
+	c.BuildInfo = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, Name: "build_info", Help: "Constant 1; labels carry the build stamp.",
+	})
+	c.HTTPRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Name: "http_requests_total",
+		Help: "Admin API requests by method, route pattern and status code.",
+	}, []string{"method", "path", "status"})
+	c.TaskInventory = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace, Name: "task_inventory", Help: "Task journal records by status.",
+	}, []string{"status"})
+	c.taskStatuses = map[string]struct{}{}
+
+	for _, col := range []prometheus.Collector{
+		c.PeersTotal, c.PeersConnected, c.TasksReceived, c.TasksCompleted, c.TasksFailed,
+		c.TasksRejected, c.TasksRunning, c.TasksDelegated, c.TasksDuplicate, c.TasksTimedOut,
+		c.TaskDuration, c.TaskRouteHops, c.DiscoveryMDNS, c.DiscoveryLocal, c.DHTLookups,
+		c.DHTHits, c.GossipPublished, c.GossipReceived, c.BytesSent, c.BytesReceived,
+		c.PicoClawRunning, c.PicoClawErrors, c.SecurityEvents, c.ForwardAttempts,
+		c.NeighborScore, c.BuildInfo, c.SearchRelays, c.SearchRelayHits, c.FullRefreshes,
+		c.SearchTopicRequests, c.SearchTopicAnswers, c.SearchTopicRejected,
+		c.SkillsSynced, c.SkillsImported, c.SkillsRefused, c.SkillsVersion, c.RebindsApplied,
+		c.HTTPRequests, c.TaskInventory,
+	} {
+		reg.MustRegister(col)
+	}
+	return c
+}
+
+// Registry returns the private collector registry.
+func (c *Collector) Registry() *prometheus.Registry { return c.reg }
+
+// AddBytesSent implements p2p.MetricsRecorder.
+func (c *Collector) AddBytesSent(n uint64) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.BytesSent.Add(float64(n))
+}
+
+// AddBytesReceived implements p2p.MetricsRecorder.
+func (c *Collector) AddBytesReceived(n uint64) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.BytesReceived.Add(float64(n))
+}
+
+// Security increments a named security event counter.
+func (c *Collector) Security(event string) {
+	if c == nil {
+		return
+	}
+	c.SecurityEvents.WithLabelValues(event).Inc()
+}
+
+// HTTPRequest counts one admin API request by method, route pattern and
+// response status. path is the mux pattern ("GET /api/v1/tasks/{id}"), never
+// the raw URL, so label cardinality stays bounded.
+func (c *Collector) HTTPRequest(method string, path string, status int) {
+	if c == nil {
+		return
+	}
+	c.HTTPRequests.WithLabelValues(method, path, strconv.Itoa(status)).Inc()
+}
+
+// SetTaskInventory publishes the task journal tally by status. Statuses that
+// no longer occur are reset to zero rather than left stale, so a scrape never
+// mistakes an old series for live state.
+func (c *Collector) SetTaskInventory(counts map[string]int) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for status, n := range counts {
+		c.TaskInventory.WithLabelValues(status).Set(float64(n))
+		delete(c.taskStatuses, status)
+	}
+	for status := range c.taskStatuses {
+		c.TaskInventory.WithLabelValues(status).Set(0)
+	}
+	c.taskStatuses = make(map[string]struct{}, len(counts))
+	for status := range counts {
+		c.taskStatuses[status] = struct{}{}
+	}
+}
+
+// Forward increments a delegation outcome counter.
+func (c *Collector) Forward(outcome string) {
+	if c == nil {
+		return
+	}
+	c.ForwardAttempts.WithLabelValues(outcome).Inc()
+}

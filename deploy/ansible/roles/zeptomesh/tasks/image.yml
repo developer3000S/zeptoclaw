@@ -1,0 +1,88 @@
+---
+# Образ узла. Тег пинируется версией проекта (Makefile: VERSION ?= 0.1.0);
+# `latest` не используется нигде: на сотне хостов он превращает повторный запуск
+# плейбука в лотерею и делает откат невозможным.
+#
+#   zeptomesh_image_source: build — собрать из исходников на хосте (то же делает
+#     install.sh --mode docker: docker build -f deploy/docker/Dockerfile)
+#   pull                          — достать из реестра (тогда нужен
+#     community.docker.docker_login отдельным шагом/плаем)
+#   none                          — образ уже лежит на хосте (залили tar-архивом,
+#     собрали CI-пайплайном) — проверка доступности выполняется в health-блоке
+
+- name: Образ | Подготовить исходники проекта на хосте
+  ansible.builtin.git:
+    repo: "{{ zeptomesh_src_repo }}"
+    dest: "{{ zeptomesh_build_context }}"
+    version: "{{ zeptomesh_src_version }}"
+  when:
+    - zeptomesh_image_source == 'build'
+    - zeptomesh_src_from_git | bool
+
+- name: Образ | Проверить, что контекст сборки существует
+  ansible.builtin.stat:
+    path: "{{ zeptomesh_build_context }}/{{ zeptomesh_dockerfile }}"
+  register: zeptomesh_dockerfile_stat
+  when: zeptomesh_image_source == 'build'
+
+- name: Образ | Остановиться, если Dockerfile не найден
+  ansible.builtin.assert:
+    that:
+      - zeptomesh_dockerfile_stat.stat.exists
+    fail_msg: >-
+      Не найден {{ zeptomesh_build_context }}/{{ zeptomesh_dockerfile }}. Для
+      zeptomesh_image_source: build исходники должны лежать на хосте: либо
+      zeptomesh_src_from_git=true (клон в zeptomesh_build_context), либо
+      распакуйте репозиторий и укажите zeptomesh_build_context. Альтернатива —
+      zeptomesh_image_source: pull или none.
+    quiet: true
+  when: zeptomesh_image_source == 'build'
+
+# state: present + source: build + force_source: false = docker_image сам
+# проверяет наличие образа с этим тегом и пересобирает только при его отсутствии.
+# Повторный прогон по 100+ хостам не тратит время на build.
+- name: Образ | Собрать образ из Dockerfile
+  community.docker.docker_image:
+    name: "{{ zeptomesh_image }}"
+    state: present
+    source: build
+    force_source: false
+    build:
+      path: "{{ zeptomesh_build_context }}"
+      dockerfile: "{{ zeptomesh_dockerfile }}"
+      args:
+        VERSION: "{{ zeptomesh_image_tag }}"
+        GIT_COMMIT: "{{ zeptomesh_git_commit | default('unknown') }}"
+        BUILD_DATE: "{{ ansible_date_time.iso8601 | default('unknown') }}"
+  when: zeptomesh_image_source == 'build'
+
+- name: Образ | Подтянуть образ из реестра
+  community.docker.docker_image:
+    name: "{{ zeptomesh_image }}"
+    state: present
+    source: pull
+    # false — использовать уже имеющийся на хосте образ; true —always сверяться
+    # с реестром (дороже по трафику, но ловит переопубликованный тег).
+    force_source: "{{ zeptomesh_image_pull | bool }}"
+  when: zeptomesh_image_source == 'pull'
+
+- name: Образ | Проверить, что образ доступен демону
+  community.docker.docker_image_info:
+    name:
+      - "{{ zeptomesh_image }}"
+  register: zeptomesh_image_info
+
+- name: Образ | Остановиться, если образа нет на хосте
+  ansible.builtin.assert:
+    that:
+      - zeptomesh_image_info.images | default([]) | length > 0
+    fail_msg: >-
+      Образ '{{ zeptomesh_image }}' недоступен демон на {{ inventory_hostname }}:
+      соберите его (zeptomesh_image_source=build), подтяните из реестра (pull)
+      или загрузите архивом. Запуск контейнера без образа невозможен.
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Образ | Показать, какой образ пойдёт в контейнер
+  ansible.builtin.debug:
+    msg: "image = {{ zeptomesh_image }} (источник: {{ zeptomesh_image_source }})"

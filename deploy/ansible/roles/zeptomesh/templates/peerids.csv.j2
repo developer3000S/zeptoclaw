@@ -1,0 +1,9 @@
+{# Человекочитаемая таблица собранных Peer ID (ТЗ 15.4.6).
+   source: announced — адрес узел опубликовал сам (Node.DiscoverableAddrs);
+           synthesized — анонса не было, адрес собран из zeptomesh_pub_ip
+                       (проверьте, что он действительно доступен извне);
+           missing — пригодного адреса нет, в bootstrap-список узел не попал. #}
+host,instance,container,mesh_port,peer_id,source,version,neighbors_connected,addrs
+{% for r in zeptomesh_group_records | default([]) %}
+{{ r.host }},{{ r.instance }},{{ r.container }},{{ r.mesh_port }},{{ r.peer_id }},{{ r.source }},{{ r.version }},{{ r.neighbors_connected }},"{{ r.addrs | default([]) | join(' ') }}"
+{% endfor %}

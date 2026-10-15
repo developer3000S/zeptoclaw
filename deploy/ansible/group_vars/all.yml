@@ -1,0 +1,55 @@
+---
+# Общие значения группы mesh_nodes (перекрывают defaults роли, но перекрываются
+# host_vars и -e). Здесь — то, что одинаково для всех хостов сети; секреты в
+# группе хранятся только в ansible-vault (файл vault.yml в этом каталоге,
+# шаблон — ../.vault.example.yml).
+
+# ---------- образ (ТЗ 15.4.4) ----------
+# Тег = версия проекта (Makefile: VERSION ?= 0.1.0). Никаких `latest`:
+# повторный прогон не должен менять состав сети, а откат должен быть возможен.
+zeptomesh_image_repository: zeptomesh-node
+zeptomesh_image_tag: "0.1.0"
+# На боевом стенде обычно pull из своего реестра + docker_login отдельным шагом;
+# build оставлен как поведение по умолчанию, совпадающее с install.sh.
+zeptomesh_image_source: build
+
+# ---------- профиль узла (ТЗ 15.4.3) ----------
+# Интернет/WAN: ../../configs/examples/wan.yaml (там announce и DHT server).
+# Одна LAN: ../../configs/examples/lan.yaml. Базовый параметризованный шаблон:
+# ../../configs/node.yaml.
+zeptomesh_config_source: "{{ playbook_dir }}/../../configs/examples/wan.yaml"
+zeptomesh_trust_mode: limited
+zeptomesh_pico_mode: stub
+zeptomesh_log_level: info
+zeptomesh_mdns: false
+zeptomesh_dht_mode: auto
+zeptomesh_prometheus_enabled: true
+
+# ---------- планировка хоста ----------
+zeptomesh_node_count: 1
+zeptomesh_base_mesh_port: 4001
+zeptomesh_base_api_port: 8081
+zeptomesh_base_prom_port: 9464
+zeptomesh_conf_dir: /etc/zeptomesh
+zeptomesh_env_dir: /etc/zeptomesh-env
+zeptomesh_data_bind_mount: false
+
+# ---------- секреты ----------
+# НЕ здесь. Кладите в ansible-vault:
+#   ansible-vault create group_vars/mesh_nodes/vault.yml
+# и задавайте zeptomesh_psk / zeptomesh_api_token / zeptomesh_pico_token
+# (пример строк — deploy/ansible/.vault.example.yml). Значения из vault
+# попадают только в env-файлы экземпляров (0600) и в Env контейнера.
+
+# ---------- поведение плейбука ----------
+zeptomesh_auto_bootstrap: true
+zeptomesh_write_artifact: true
+zeptomesh_no_log: true
+# Размер окна развертывания (playbook `serial`): 100+ хостов партиями, чтобы
+# падение одного узла не останавливало прогон целиком. Допустимы целое число и
+# процент ("30%"). Значение `all` в ansible-core 2.14 падает с
+# "invalid literal for int() with base 10: 'all'" (это касается и литерала в
+# плейбуке, т.е. баг не наш) — чтобы партий не было, уменьшите это число до
+# размера инвентаря или уберите `serial` в плейбуке.
+#   -e zeptomesh_serial=10     /   -e 'zeptomesh_serial=30%'
+zeptomesh_serial: 25

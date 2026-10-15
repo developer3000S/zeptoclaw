@@ -1,0 +1,616 @@
+# ZeptoClaw Agent Mesh (`zeptomesh`)
+
+[![CI](https://github.com/developer3000S/zeptoclaw/actions/workflows/ci.yml/badge.svg)](https://github.com/developer3000S/zeptoclaw/actions/workflows/ci.yml)
+
+Полностью децентрализованная P2P-сеть автономных AI-агентов на базе
+[PicoClaw](https://github.com/sipeed/picoclaw). Узлы образуют сеть без
+обязательного центрального координатора и без общей базы данных: задача может
+поступить на любой узел, быть выполнена локально или рекурсивно делегирована
+соседям, а результат возвращается инициатору по пройденному маршруту.
+
+Реализовано по техническому заданию [`ТЗ.md`](ТЗ.md) («PicoClaw Agent Mesh»,
+версия 0.1).
+
+> **Статус: рабочий демон.** Сетевой стек, обнаружение, маршрутизация, задачи,
+> административный API, CLI, тесты, `install.sh` (локально/Docker, N
+> экземпляров, автостарт) — написаны, компилируются и проверяются тестами.
+> Что из пунктов ТЗ сделано частично или не сделано — честный и актуальный
+> отчёт: [docs/STATUS.md](docs/STATUS.md).
+
+---
+
+## Содержание
+
+- [Быстрый старт](#быстрый-старт)
+- [Ключевые свойства](#ключевые-свойства)
+- [Архитектура](#архитектура)
+- [Структура репозитория](#структура-репозитория)
+- [Требования](#требования)
+- [Сборка и проверка](#сборка-и-проверка)
+- [Конфигурация](#конфигурация)
+- [Протоколы](#протоколы)
+- [Безопасность](#безопасность)
+- [Интеграция с PicoClaw](#интеграция-с-picoclaw)
+- [Документация](#документация)
+
+---
+
+## Быстрый старт
+
+```bash
+# Вариант A — установщик: локально (systemd, автостарт) или в Docker, N узлов
+./install.sh install --mode local --nodes 3      # sudo не обязателен: user-юниты
+./install.sh install --mode docker --nodes 3
+./install.sh status
+# Повторный запуск поверх существующего стека сохраняет прежний --pico-mode
+# (например ollama), если он не задан явно — режим не сбрасывается на stub.
+
+# Вариант B — из исходников, два узла на одной машине
+
+export PATH=$PATH:/usr/local/go/bin
+go build -trimpath -o bin/ ./cmd/zeptomesh-node
+bin/zeptomesh-node genkey --out ./n0/keys/peer.key   # и то же для ./n1
+ZEPTOMESH_DATA=./n0 ZEPTOMESH_INDEX=0 bin/zeptomesh-node run -config configs/node.yaml &
+ZEPTOMESH_DATA=./n1 ZEPTOMESH_INDEX=1 ZEPTOMESH_MESH_PORT=4002 \
+  ZEPTOMESH_API_PORT=8082 ZEPTOMESH_PROM_LISTEN=127.0.0.1:9465 \
+  bin/zeptomesh-node run -config configs/node.yaml &
+
+# Проверка
+bin/zeptomesh-node status -addr http://127.0.0.1:8081
+bin/zeptomesh-node peers  -addr http://127.0.0.1:8081
+bin/zeptomesh-node submit -addr http://127.0.0.1:8081 -i "hello" -w
+# Если узел запущен с токеном админ-API (ZEPTOMESH_API_TOKEN в его окружении),
+# CLI должен знать имя env-переменной с ним — добавьте -token-env:
+# ZEPTOMESH_API_TOKEN=... bin/zeptomesh-node status -addr http://127.0.0.1:8081 \
+#   -token-env ZEPTOMESH_API_TOKEN
+# (или вообще без -addr: ZEPTOMESH_CONFIG=<путь к node.yaml> — CLI возьмёт
+#  адрес и имя токена из конфига)
+
+# Активный поиск других агентов: локальный хост + внешние источники
+bin/zeptomesh-node scan -addr http://127.0.0.1:8081
+# ...с перебором локальной подсети и ограничением числа кандидатов
+bin/zeptomesh-node scan -addr http://127.0.0.1:8081 -scope subnet -scope wan -max-candidates 32
+bin/zeptomesh-node scan -addr http://127.0.0.1:8081 -last   # отчёт прошлого скана
+
+# Brain: поиск LLM-эндпоинтов и автономная верификация (см. секцию brain ниже)
+bin/zeptomesh-node brain-scan   # опросить поисковики (Shodan/Censys/…) об открытых Ollama
+bin/zeptomesh-node candidates   # каталог найденных эндпоинтов (инвентарь)
+bin/zeptomesh-node backends     # пул проверенных бэкендов, которыми узел думает
+bin/zeptomesh-node promote -id <candidate_id>   # проверить эндпоинт зондом и принять
+# Передать найденные эндпоинты и поисковые ключи другу (админ-API друга):
+bin/zeptomesh-node friend-promote -friend <name> -id <candidate_id>
+bin/zeptomesh-node share-keys   # отправить другу ключи из brain.keys.share_envs
+# Если узел запущен с токеном админ-API (ZEPTOMESH_API_TOKEN в его окружении),
+# CLI должен знать имя env-переменной с ним — добавьте -token-env:
+# ZEPTOMESH_API_TOKEN=... bin/zeptomesh-node candidates -addr http://127.0.0.1:8081 \
+#   -token-env ZEPTOMESH_API_TOKEN
+# (или вообще без -addr: ZEPTOMESH_CONFIG=<путь к node.yaml> — CLI возьмёт
+#  адрес и имя токена из конфига)
+```
+
+Локальный Ollama добавляется в пул как бэкенд `local` и верифицируется тем же
+зондом (`GET /api/tags`, fallback на OpenAI-совместимый `/v1/models`).
+Например, ответ `backends` при запущенном локальном Ollama:
+
+```json
+{
+  "backends": [{
+    "id": "local", "kind": "local",
+    "base_url": "http://127.0.0.1:11434",
+    "verified": true, "reachable": true, "latency_ms": 25,
+    "models": ["qwen2.5:1.5b", "qwen3.5:0.8b", "..."]
+  }],
+  "count": 1, "enabled": true, "verified": 1
+}
+```
+
+Найденные эндпоинты также расходятся по mesh через gossip-топик
+`/zeptomesh/brain-catalog/0.1` — никакой центральной сверки, каждый узел
+верифицирует зондом сам.
+
+Полные инструкции по развёртыванию (LAN/WAN-профили, PSK, bootstrap,
+несколько экземпляров, firewall) — [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md);
+эксплуатация и восстановление — [docs/RUNBOOK.md](docs/RUNBOOK.md).
+
+---
+
+## Ключевые свойства
+
+| Область | Реализация |
+|---|---|
+| Язык сетевого слоя | Go 1.26 |
+| Идентификация узла | Ed25519, самоаттестуемый libp2p `Peer ID` |
+| Транспорт | QUIC (основной) + TCP (резервный) |
+| Шифрование | Noise (TCP-канал); TLS 1.3 внутри QUIC; сквозное и для реле |
+| Мультиплексирование | Yamux (поверх TCP) |
+| NAT-преодоление | Circuit relay v2: клиент реле + опциональное служение реле с лимитами |
+| Формат сообщений | Protocol Buffers v3, length-prefixed фреймы (потолок 8 MiB) |
+| Обнаружение (хост) | Реестр Unix-сокетов в `<data_dir>/run` |
+| Обнаружение (LAN) | mDNS (`_zeptomesh._udp`) |
+| Обнаружение (WAN) | Bootstrap-узлы, Kademlia DHT (индекс навыков), Peer Exchange |
+| Членство | GossipSub (эпидемическая рассылка `PeerState`) |
+| Поиск исполнителя | Search-relay: расширенный опрос соседей с `full_refresh` навыков |
+| Активный скан окружения | `scan` (`POST /api/v1/admin/scan`): агент сам прощупывает локальный хост, LAN (вкл. перебор подсети) и внешние источники (DHT, bootstrap, peer-exchange, search topic), находит других агентов и устанавливает с ними связь (dial + проверка подписанных capabilities → сосед в таблице); опционально медленный фоновый скан по `discovery.scan` |
+| Brain (поиск LLM) | `brain` в конфиге: каталог открытых Ollama-эндпоинтов из поисковиков (Censys/Shodan/GreyNoise/ZoomEye/CriminalIP/Netlas) + пул проверенных бэкендов; **верификация автономная** — зонд `GET /api/tags`, ответивший эндпоинт получает `verified` и трафик, центрального подтверждения нет (FOA §4.4.4 игнорируется по директиве). Обмен находками и API-ключами поиска с агентами-друзьями через их admin API и общий gossip-топик |
+| Хранилище | BadgerDB v4 (node-local) + content-addressed артефакты на диске |
+| Делегирование | TTL, маршрут без петель, дедупликация, лимиты фан-аута и параллелизма, rate limiting |
+| Декомпозиция | план подзадач (`subtasks` / `--subtask`) → дочерние конверты → один подписанный итог: секции в порядке плана, дедуп артефактов по hash, ретрай retryable-ребёна |
+| Ограничения исполнителя | `max_parallel_tasks_per_peer`, порог свободного места (`statfs`), квота workspace при сборе артефактов, `RLIMIT_AS` + отдельная группа процессов для дочернего PicoClaw |
+| Управление на ходу | hot-reload (`SIGHUP` / `POST /api/v1/admin/reload-config`) trust-режима и порога, allow/blocked-файлов, rate limit и уровня лога; `leave` — штатный уход с публикацией `status: "left"` |
+| Подписи | `TaskEnvelope`, `TaskResult` (+ `worker_signature`), `TaskAck`, `CancelRequest`, `Capabilities`, `origin_signature` (авторство задачи, не перезаписывается ретрансляторами), `KeyRebind` (переход идентичности), `SkillsSyncResponse` |
+| Навыки | Версионированные дескрипторы (name/version/digest) с epoch узла; обмен между соседями (дельта-синхронизация по RPC `skills_sync`), автообновление, если у партнёра новее; политика раскрытия, бюджет импорта, persist в `<data_dir>/skills.json` |
+| Идентичность во времени | Плановая ротация ключа (заявление, подписанное обоими ключами; самодостаточно, принимается без участия оператора) и аварийный отзыв (терминальный); доверие привязано к классу идентичностей, журнал `<data_dir>/rebinds.json` |
+| Доступ | Списки разрешённых/запрещённых пиров (ConnectionGater), уровни доверия, журнал безопасности (JSONL) |
+| Доступ к узлу | HTTP/JSON админ-API + CLI `zeptomesh-node`, bearer-токен через env |
+| Исполнитель | PicoClaw через адаптер: CLI-процесс / Pico Protocol (WebSocket `/pico/ws`) / offline-stub |
+
+---
+
+## Архитектура
+
+Один узел = mesh-демон, локальный PicoClaw и node-local хранилище. Центральных
+компонентов нет; `bootstrap.*` — необязательные точки входа в сеть.
+
+```text
+                     ┌──────────────────────── ZeptoClaw node ────────────────────────┐
+   HTTP/JSON         │                                                                │
+  (админ-API)  ────► │  internal/api          GET /healthz, /api/v1/*, POST tasks…    │
+                     │        │                                                       │
+                     │        ▼                                                       │
+                     │  internal/tasks        Manager: приём → валидация →            │
+                     │        │               выполнить | делегировать → результат    │
+                     │        │                                                       │
+                     │        ├────────────► internal/picoclaw  Adapter               │
+                     │        │                    │  stub │ cli │ pico-ws ───────────┼──► PicoClaw
+                     │        ▼                    │                                   │
+                     │  internal/routing  Table: соседи, скоринг, выбор кандидатов    │
+                     │        │                                                       │
+                     │        ▼                                                       │
+                     │  internal/p2p      Host (libp2p) + Service (task/result/rpc)   │
+                     │        ▲                                                       │
+                     │        │                                                       │
+                     │  internal/discovery  local registry │ mDNS │ bootstrap │ DHT │
+                     │        │                                  gossip (Membership)  │
+                     │        ▼                                                       │
+                     │  internal/security  identity │ signing │ trust │ ratelimit │   │
+                     │                                   audit journal                 │
+                     │  internal/storage   BadgerDB (journal, peers, dedup) +          │
+                     │                     artifacts/sha256                            │
+                     └───────────────────────────────────┬────────────────────────────┘
+                                                         │
+                            P2P: /zeptomesh/{task,result,rpc}/0.1.0,
+                                 pubsub /zeptomesh/membership/0.1.0
+                                                         │
+                                     другие узлы mesh
+```
+
+Жизненный цикл задачи:
+
+```text
+любой узел принимает задачу
+   │
+   ├─ подпись/digest ✗ ──────────────────────────────► REJECTED + audit
+   ├─ task_id в dedup-окне ──────────────────────────► ACK DUPLICATE (без повторного исполнения)
+   ├─ есть план подзадач ────────────────────────────► WAITING_SUBTASKS: каждый пункт —
+   │                                                        отдельный конверт (ttl-1,
+   │                                                        пересечение прав) в этот же
+   │                                                        конвейер → AGGREGATING →
+   │                                                        один подписанный итог
+   ├─ навыки подходят и есть слот ───────────────────► ACCEPTED → RUNNING → COMPLETED
+   │                                                        └─ результат подписывается
+   │                                                             (worker_signature) и едет
+   │                                                             назад по route_stack
+   └─ иначе ─────────────────────────────────────────► FORWARDING:
+                                                          скоринг соседей → ≤ max_fanout
+                                                          кандидатов, ≤ max_parallel_candidates
+                                                          параллельно, ttl-1
+                                                              └─ кандидатов нет → search-relay
+                                                                 (соседи с full_refresh навыков)
+                                                                 └─ все отказались/TTL=0 → FAILED
+```
+
+Подробнее: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+---
+
+## Структура репозитория
+
+```text
+zeptoclaw/
+├── api/proto/zeptomesh/v1/
+│   └── mesh.proto              # контракт: TaskEnvelope, TaskResult, Capabilities, RPC
+├── gen/zeptomesh/v1/
+│   └── mesh.pb.go              # генерируется (protoc-gen-go), в VCS для `go build` без protoc
+├── cmd/zeptomesh-node/
+│   ├── main.go                 # демон: run | version | genkey | psk | reload | leave |
+│   │                           #       rotate | revoke
+│   └── client.go               # CLI админ-API: status|peers|capabilities|submit (--subtask)|
+│                               #                   tasks|get|cancel|resubmit|reload|leave|
+│                               #                   skills|skill-set|skill-rm|skills-sync|
+│                               #                   triggers|trigger-add|trigger-rm|
+│                               #                   rebinds|rotate|revoke|scan|
+│                               #                   candidates|backends|brain-scan|promote|
+│                               #                   friend-promote|share-keys (brain)
+├── internal/
+│   ├── api/                    # HTTP/JSON админ-API (+ bearer-токен, /metrics)
+│   ├── config/                 # YAML-конфиг, дефолты, валидация, ${VAR:-default}   + тесты
+│   ├── discovery/              # local.go, mdns.go, bootstrap.go, dht.go, gossip.go,
+│   │                           #        searchtopic.go, scan.go (активный скан окружения)
+│   ├── logging/                # slog + мост для stdlib-логера libp2p
+│   ├── metrics/                # Prometheus (приватный registry) + выделенный слушатель
+│   ├── node/                   # сборка компонентов узла, композитный skill-источник
+│   ├── p2p/                    # host.go (libp2p+relay), service.go, framing.go, gater.go + тесты
+│   ├── picoclaw/               # adapter.go, cli.go, ws.go, stub.go, factory.go, limits_unix.go
+│   ├── routing/                # table.go: соседи, скоринг, Select()
+│   ├── security/               # identity.go, signing.go, trust.go, rebind.go, audit.go + тесты
+│   ├── skills/                 # registry.go: версионированные дескрипторы навыков,
+│   │                           #        обмен с соседями, дельта-синхронизация + тесты
+│   ├── simulator/              # модель mesh'а для нагрузочного теста ТЗ 17.3
+│   │                           #        (100/500/1000 узлов, `make test-load`)
+│   ├── storage/                # storage.go: BadgerDB + артефакты sha256
+│   ├── tasks/                  # manager.go (исполнение/делегирование/search-relay),
+│   │                           # decomposition.go (план/агрегация), task.go, disk_unix.go + тесты
+│   ├── telemetry/              # установка SDK OpenTelemetry + OTLP-экспортёр (ТЗ 14.3)
+│   ├── tracing/                # спаны конвейера задач; контекст едет в подписанных labels
+│   ├── triggers/               # cron.go, triggers.go, scheduler.go: плановые задачи
+│   │                           # (ТЗ 6.6.1 п.4) + тесты
+│   ├── version/                # сборочный штамп
+│   └── wire/                   # канонические энкодеры (общие для digest и подписей) + тесты
+├── configs/
+│   ├── node.yaml               # шаблон демона (env-параметризован, использует install.sh)
+│   └── examples/
+│       ├── lan.yaml            # профиль «одна локальная сеть»  (ТЗ 22.8)
+│       ├── wan.yaml            # профиль «Интернет / разные хосты»
+│       └── dev-node.yaml       # профиль «несколько узлов на одной машине» (make dev-cluster)
+├── scripts/
+│   ├── dev-cluster.sh          # поднять/остановить отладочный кластер, задачи, ротация
+│   └── acceptance.sh           # живые приёмочные испытания E.1–E.6 (ТЗ §20) на реальных процессах
+├── Makefile                    # сборка, проверка, тесты, proto, отладочный кластер
+├── deploy/ansible/             # массовое развёртывание на 100+ хостов (ТЗ 15.4):
+│                               #   роль zeptomesh — шесть шагов ТЗ по отдельным тегам
+├── deploy/docker/
+│   ├── Dockerfile              # многоэтапная сборка, non-root, HEALTHCHECK
+│   └── docker-compose.yml      # готовая сеть из 3 узлов
+├── docs/                       # ARCHITECTURE · PROTOCOLS · PICOCLAW-INTEGRATION ·
+│                               # DEPLOYMENT · RUNBOOK · STATUS · LOADTEST · TESTREPORT
+├── install.sh                  # установка: локально (systemd) или Docker, N экземпляров, автостарт
+├── LICENSE                     # Apache License 2.0 (полный текст)
+├── ТЗ.md                       # исходное техническое задание
+├── .env.example                # переменные LLM/каналов для PicoClaw
+└── go.mod / go.sum
+```
+
+---
+
+## Требования
+
+Для сборки:
+
+- Go ≥ 1.26 (`go.mod` объявляет `go 1.26.0`);
+- доступ к прокси модулей (или предварительно заполненный модульный кэш).
+
+Для регенерации protobuf-кода (опционально — `gen/` есть в репозитории):
+
+- `protoc` (проверено на libprotoc 3.21.12);
+- `protoc-gen-go` (проверено на v1.36.6):
+
+```bash
+go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6
+```
+
+Для Docker-режима — Docker 24+ с compose. Для выполнения задач реальным
+агентом — установленный `picoclaw`
+(см. [docs/PICOCLAW-INTEGRATION.md](docs/PICOCLAW-INTEGRATION.md)). Без него
+узел работает в режиме `picoclaw.mode: stub` — детерминированный
+ offline-исполнитель.
+
+---
+
+## Сборка и проверка
+
+Проект собирается `make` (цели самодокументируемы — `make help`). Напрямую
+`go`-командами — тоже; обе таблицы ниже эквивалентны.
+
+```bash
+export PATH=$PATH:/usr/local/go/bin
+
+make            # fmt-check + vet + build + test — стандартная проверка
+make ci         # локальный эквивалент CI: статика, сборка, тесты под -race
+make build      # демон в bin/zeptomesh-node (версия/коммит в ldflags)
+make cross      # linux/{amd64,arm64} (ТЗ 15.1)
+make test       # все тесты; также test-race, test-cover, test-unit, bench
+make proto      # регенерация gen/ из api/proto (нужны protoc и protoc-gen-go)
+make lint       # golangci-lint, если установлен (иначе ворота — vet + gofmt)
+make dev-cluster      # 3 узла на одной машине (scripts/dev-cluster.sh)
+make dev-status       # сводка по отладочному кластеру
+make dev-rotate       # ротация ключа узла 0 + перезапуск под новым
+make dev-cluster-down # остановить кластер
+```
+
+Эквивалент без Makefile:
+
+```bash
+go build ./...          # все пакеты
+go vet ./...
+gofmt -l .              # пустой вывод = всё отформатировано
+go test ./...           # юнит-тесты internal/{wire,security,skills,routing,discovery,config,tasks,p2p}
+go test -race ./...     # то же под детектором гонок
+go build -trimpath -o bin/ ./cmd/zeptomesh-node
+
+# Регенерация protobuf-кода (нужны protoc и protoc-gen-go в PATH):
+protoc --proto_path=api/proto --go_out=gen --go_opt=paths=source_relative \
+    api/proto/zeptomesh/v1/mesh.proto
+```
+
+Покрытие тестов и его границы — таблица в [docs/STATUS.md](docs/STATUS.md#тесты-покрытие-текущее).
+Отчёт о тестировании целиком (инвентарь, маппинг на ТЗ §17, живая приёмка
+E.1–E.6, найденные дефекты, что не проверено) — [docs/TESTREPORT.md](docs/TESTREPORT.md).
+
+CI-конвейер (ТЗ 15.1) — GitHub Actions, `.github/workflows/ci.yml`: статика
+(fmt/vet/proto-check), сборка + cross linux/{amd64,arm64}, юнит-набор под
+`-race`, интеграционные сценарии (race + стресс `-count=2`), живые приёмочные
+испытания `scripts/acceptance.sh`, родной arm64-раннер и сборка Docker-образа.
+Гейты совпадают с разделом 5 TESTREPORT; `make ci` — локальный эквивалент
+быстрого подмножества.
+
+---
+
+## Конфигурация
+
+Формат — YAML. Загрузчик (`config.Load`) применяет `config.Default()`, затем
+раскрывает в файле `${VAR}` и `${VAR:-default}` (включая вложенные default'ы),
+затем накладывает YAML и переменные окружения (`ZEPTOMESH_BOOTSTRAP`
+дописывается в `discovery.bootstrap`), после чего выполняется `Validate()`.
+Секреты в файл конфигурации не пишутся.
+
+Корневые секции и значимые значения по умолчанию (полный env-параметризованный
+шаблон — [`configs/node.yaml`](configs/node.yaml), готовые профили —
+[`configs/examples/`](configs/examples/)):
+
+```yaml
+node:
+  name: zeptomesh-node
+  data_dir: ./zeptomesh-data
+  listen:                       # QUIC — основной, TCP — резервный
+    - /ip4/0.0.0.0/tcp/4001
+    - /ip4/0.0.0.0/udp/4001/quic-v1
+  announce: []                  # фиксированные публичные адреса (NAT, несколько интерфейсов)
+  private_network_psk: ""       # закрытая сеть libp2p; с PSK узел работает по TCP (QUIC закрытые сети не поддерживает)
+  relay:                        # Circuit relay v2 (ТЗ 6.3.3.4)
+    enabled: false              # пользоваться чужими реле
+    advertise_as_relay: false   # служить реле (с лимитами ниже)
+    static_relays: []
+    limit: { max_reservations: 128, max_circuits: 16, reservation_ttl: 1h,
+             conn_duration: 2m, conn_data_bytes: 131072 }
+
+identity:
+  key_file: ""                  # пусто → <data_dir>/keys/peer.key (Ed25519, 0600)
+
+discovery:
+  local_registry: true
+  local_socket_dir: ""          # пусто → <data_dir>/run
+  mdns: true
+  mdns_service_name: _zeptomesh._udp
+  bootstrap: []                 # /ip4/…/tcp/4001/p2p/12D3KooW…
+  dht: true
+  dht_mode: auto                # server | client | auto | auto-server
+  peer_exchange: true
+  bootstrap_interval: 30s
+  scan:                         # активный скан окружения агентом (по умолчанию выкл)
+    enabled: false              # включить медленный фоновый скан
+    interval: 15m
+    subnet_scan: false          # перебор локальной подсети (трафик по всей LAN)
+    dial_timeout: 6s
+    timeout: 45s
+    max_candidates: 64
+  gossip:
+    enabled: true
+    topic: /zeptomesh/membership/0.1.0
+    heartbeat: 3s
+    full_sync: 60s
+    failure_timeout: 15s        # должен превышать heartbeat
+
+neighbors: { min: 8, target: 16, max: 64 }
+
+tasks:
+  default_ttl: 5
+  max_ttl: 10
+  max_parallel_tasks: 4
+  max_parallel_tasks_per_peer: 2       # сколько задач одного пира держится параллельно
+  default_timeout_seconds: 600
+  max_timeout_seconds: 3600            # потолок для ttl-таймаута задачи
+  max_task_payload_bytes: 1048576
+  max_artifact_bytes: 104857600
+  max_workspace_bytes: 536870912       # квота на рабочие файлы задачи (ТЗ 6.8.4)
+  min_free_disk_bytes: 1073741824      # порог свободного места перед стартом
+  max_task_memory_bytes: 1073741824    # RLIMIT_AS дочернему процессу (unix)
+  dedup_window: 15m
+  retention: 168h
+  forwarding:
+    max_fanout: 5
+    max_parallel_candidates: 3  # <= max_fanout
+    max_retries: 2
+    attempt_timeout: 120s
+    retry_interval_seconds: 5s
+    search_relay:               # расширенный поиск навыков у соседей
+      enabled: true
+      max_depth: 2
+      fanout: 3
+      request_timeout: 8s
+      cache_ttl: 60s
+      topic:                    # эпидемический поиск (ТЗ 6.9.5 п.5): подписанный
+        enabled: false          # запрос НАВЫКОВ в общий pubsub-топик, без id/
+        name: "/zeptomesh/skillsearch/0.1.0"  # инструкции задачи. По умолчанию
+        request_ttl: 30s        # выключен; включается только перезапуском.
+        max_answers: 8          # Подробности — configs/node.yaml.
+        answer_cooldown: 10s
+
+capabilities:
+  skills: [general]
+  resource_class: medium
+  accept_external_tasks: true
+  allow_shell: false            # опасные операции по умолчанию запрещены
+  allow_network_tools: true
+  max_parallel_tasks: 4
+  disabled_skills: []           # вычитаются из skills
+
+picoclaw:
+  mode: stub                    # stub | binary | http
+  binary: picoclaw
+  workspace_root: ""            # корень рабочих каталогов; пусто → <data_dir>/picoclaw/workspaces
+  timeout_seconds: 600
+  max_concurrent_agents: 4
+  model: ""                     # модель узла → --model (только режим binary, ТЗ 10.3)
+  extra_args: []
+  prompt_template: ""           # %s = инструкция; пусто — передавать как есть
+  env: {}                       # например PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE=0.2
+  http:                         # Pico Protocol поверх WebSocket (у PicoClaw нет REST для промпта)
+    base_url: http://127.0.0.1:18790   # конвертируется в ws://… адаптером
+    path: /pico/ws
+    health_path: /health
+    token_env: PICOCLAW_MESH_PICO_TOKEN  # имя переменной с bearer-токеном
+    timeout_seconds: 600
+  stub:
+    latency: 50ms
+    echo: true
+
+security:
+  trust_mo... [truncated]
+```
+
+---
+
+## Протоколы
+
+Сетевые протоколы узлов: `/zeptomesh/{task,result,rpc}/0.1.0`.
+
+- `TaskEnvelope` — конверт задачи (ТЗ 6.6.1 п.1): подписанная инструкция, навыки,
+  ограничения, маршрут, подпись автора (origin_signature).
+- `TaskResult` — результат (ТЗ 6.6.1 п.2): подписанный ответ, артефакты,
+  подпись исполнителя (worker_signature), маршрут.
+- `Capabilities` — подписанное описание узла: навыки, модель, загрузка,
+  ресурсный класс, адреса.
+- `KeyRebind` — переход идентичности (ТЗ 11.2): подписанное заявление,
+  подписанное обоими ключами.
+- `SkillsSyncResponse` — ответ на запрос синхронизации навыков (ТЗ 6.3):
+  подписанный дельта-обновлённый список дескрипторов.
+
+Подробнее: [docs/PROTOCOLS.md](docs/PROTOCOLS.md).
+
+---
+
+## Безопасность
+
+- Trust-режимы: open (все), limited (только из allow-файла), private (только
+  из allow-файла + подпись задачи).
+- Списки разрешённых/запрещённых пиров (ConnectionGater).
+- Журнал безопасности (JSONL).
+- Rate limiting.
+- Подписи: `TaskEnvelope`, `TaskResult`, `TaskAck`, `CancelRequest`,
+  `Capabilities`, `origin_signature`, `KeyRebind`, `SkillsSyncResponse`.
+- Идентичность во времени: ротация ключа (заявление, подписанное обоими
+  ключами) и отзыв (терминальный).
+
+Подробнее: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#безопасность).
+
+---
+
+## Интеграция с PicoClaw
+
+- PicoClaw CLI: `picoclaw agent` принимает только `-d/-m/-s/--model` и
+  отказывается от неизвестных флагов.
+- Pico Protocol: WebSocket `/pico/ws` (у PicoClaw нет REST для промпта).
+- Offline-stub: детерминированный исполнитель для тестов.
+
+Подробнее: [docs/PICOCLAW-INTEGRATION.md](docs/PICOCLAW-INTEGRATION.md).
+
+---
+
+## Документация
+
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — компоненты, поток данных, маршрутизация,
+  политика доверия, хранилище, отказоустойчивость.
+- [PROTOCOLS.md](docs/PROTOCOLS.md) — идентификаторы протоколов, фрейминг,
+  поля, канонические энкодеры, схемы подписи, ключи gossip/DHT.
+- [PICOCLAW-INTEGRATION.md](docs/PICOCLAW-INTEGRATION.md) — проверенные интерфейсы
+  PicoClaw, режимы адаптера, изоляция, таймауты.
+- [DEPLOYMENT.md](docs/DEPLOYMENT.md) — развёртывание (LAN/WAN, PSK, bootstrap).
+- [RUNBOOK.md](docs/RUNBOOK.md) — эксплуатация (systemd/Docker, hot-reload, `leave`,
+  метрики, восстановление, бэкап ключей/БД).
+- [STATUS.md](docs/STATUS.md) — статус реализации ТЗ.
+- [LOADTEST.md](docs/LOADTEST.md) — нагрузочное тестирование (ТЗ 17.3).
+- [TESTREPORT.md](docs/TESTREPORT.md) — отчёт о тестировании.
+
+---
+
+## RBAC для админ-API
+
+Доступ к админ-API управляется ролями через именованные токены. Помимо
+legacy-токена (`api.auth_token_env`, полный admin), в конфиге задаются токены
+с ролями:
+
+```yaml
+api:
+  tokens:
+    - { name: dashboard, role: viewer,   token_env: ZEPTOMESH_UI_VIEWER_TOKEN }
+    - { name: bot,       role: operator, token_env: ZEPTOMESH_OPERATOR_TOKEN }
+    - { name: root,      role: admin,    token_env: ZEPTOMESH_ADMIN_TOKEN }
+```
+
+Значения токенов берутся из env; в файл конфига секреты не пишутся. Правила:
+
+- **viewer** — только чтение (`GET`).
+- **operator** — чтение + мутации задач, навыков, триггеров и сканирование
+  (`/api/v1/admin/scan`). Остальные `/api/v1/admin/*` (reload, rotate-key,
+  revoke, leave) недоступны.
+- **admin** — всё, включая `/api/v1/admin/*`.
+
+Если токены не сконфигурированы — поверхность остаётся loopback-first, как
+до RBAC: любой вызов считается admin. При неверном токене — `401`, при
+недостаточных правах — `403`.
+
+## Аудит-логирование изменений и отказов
+
+В журнал безопасности (JSONL в `<data_dir>/audit/security.jsonl`) пишутся
+исходы админ-API-запросов:
+
+- **`api_mutation`** — каждый не-`GET` запрос, прошедший аутентификацию и
+  проверку роли; фиксируется имя токена (`actor`) и его роль (`role`).
+- **`api_auth_denied`** — неверный/отсутствующий bearer-токен (`401`).
+- **`api_role_denied`** — токен верный, но роль недостаточна (`403`).
+
+События содержат `remote` (адрес клиента) и `detail` (`METHOD /path`). Сырые
+значения токенов в журнал не попадают. В `AuditEvent` добавлены поля `Actor`
+(имя токена) и `Role`.
+
+## Метрики HTTP-запросов и инвентарь задач по статусу
+
+В коллектор добавлены и зарегистрированы две метрики:
+
+- **`zeptomesh_http_requests_total{method,path,status}`** — счётчик запросов
+  админ-API. Лейбл `path` — это зарегистрированный паттерн маршрута
+  (`"GET /api/v1/tasks/{id}"`), а не сырой URL, поэтому кардинальность не
+  растёт от идентификаторов задач; неопознанные пути считаются как
+  `unmatched`.
+- **`zeptomesh_task_inventory{status}`** — гейдж: количество записей журнала
+  задач по статусу. Обновляется узлом каждые 15 секунд в фоновом цикле
+  `maintenance` (`publishTaskInventory`) по полному журналу; статусы,
+  переставшие встречаться, обнуляются.
+
+## Обновлен дашборд
+
+В веб-дашборде (BFF `zeptomesh-ui`) теперь отображаются:
+
+- **Версия и время работы** — в шапке (`#version-indicator`) показываются
+  `v{version}` и `up {аптайм}` первого reachable-узла из его `/api/v1/status`;
+  аптайм форматируется («2д 3ч», «3ч 4м», «5м», «30с»).
+- **Распределение статусов задач** — панель «Распределение по статусам (все
+  узлы)» в разделе «Задачи»: BFF агрегирует журналы управляемых нод в
+  `tasks_by_status` (сводку по статусам), фронтенд рисует pills с количеством
+  на каждый статус и общий итог.
+
+## Обновлена документация
+
+Разделы README и документы приведены в соответствие реализованным изменениям:
+завершённые пункты ToDo.md отмечены, статус внесён в `docs/STATUS.md`,
+дашборд — в `docs/UI.md`.

@@ -1,0 +1,68 @@
+---
+# ТЗ 15.4.2 — каталоги на хосте.
+#
+# Нужны: каталог конфигурации (он же read-only mount в контейнер), каталог
+# сгенерированных env-файлов экземпляров и, при bind-монтировании, каталоги
+# данных.
+#
+# Подкаталоги внутри data_dir (keys, db, run, artifacts, tasks, audit,
+# picoclaw/workspaces) узел создаёт сам при старте — internal/node.New делает
+# MkdirAll на каждом из них, а ключ идентичности создаётся LoadOrGenerate
+# (internal/security/identity.go). Дублировать их здесь значит плодить расхождение.
+
+- name: Каталог | Создать каталог конфигурации
+  ansible.builtin.file:
+    path: "{{ zeptomesh_conf_dir }}"
+    state: directory
+    owner: "{{ zeptomesh_config_owner }}"
+    group: "{{ zeptomesh_config_group }}"
+    mode: "0755"
+
+- name: Каталог | Создать каталог env-файлов экземпляров
+  ansible.builtin.file:
+    path: "{{ zeptomesh_env_dir }}"
+    state: directory
+    owner: "{{ zeptomesh_config_owner }}"
+    group: "{{ zeptomesh_config_group }}"
+    # 0750: внутри PSK и bearer-токены админ-API. Каталог принципиально вне
+    # zeptomesh_conf_dir — последний монтируется в контейнеры, а секреты
+    # экземпляров внутрь контейнеров не едут (их передают как Env).
+    mode: "0750"
+
+# Требуется, когда данные — каталоги хоста, а не docker-том: демон не сможет
+# примонтировать несуществующий путь как bind.
+#
+# Владелец — uid, под которым работает узел в образе (USER zeptomesh в
+# deploy/docker/Dockerfile). Число намеренно НЕ зашито в роль: `useradd
+# --system` берёт uid из диапазона system-аккаунтов, и он зависит от базового
+# образа. Узнать его можно так:
+#   docker run --rm --entrypoint id <image>      # uid=… gid=…
+# и задать zeptomesh_data_owner_uid / zeptomesh_data_owner_gid. При именованных
+# томах (по умолчанию) вопрос не возникает: docker инициализирует новый том
+# владельцем пути из образа.
+- name: Каталог | Требовать uid/gid владельца данных (bind-монтирование)
+  ansible.builtin.assert:
+    that:
+      - zeptomesh_data_owner_uid | string | length > 0
+      - zeptomesh_data_owner_gid | string | length > 0
+    fail_msg: >-
+      zeptomesh_data_bind_mount=true, но не задан владелец каталогов данных.
+      Узнайте uid/gid пользователя внутри образа (`docker run --rm --entrypoint
+      id {{ zeptomesh_image }}`) и задайте zeptomesh_data_owner_uid /
+      zeptomesh_data_owner_gid, либо оставьте именованные тома
+      (zeptomesh_data_bind_mount=false).
+    quiet: true
+  when: zeptomesh_data_bind_mount | bool
+
+- name: Каталог | Создать каталоги данных экземпляров (bind-монтирование)
+  ansible.builtin.file:
+    path: "{{ item.data_path }}"
+    state: directory
+    owner: "{{ zeptomesh_data_owner_uid }}"
+    group: "{{ zeptomesh_data_owner_gid }}"
+    mode: "0700"
+    setype: "{{ 'container_file_t' if ansible_selinux.status | default('disabled') == 'enabled' else omit }}"
+  loop: "{{ zeptomesh_instances }}"
+  loop_control:
+    label: "{{ item.data_path }}"
+  when: zeptomesh_data_bind_mount | bool

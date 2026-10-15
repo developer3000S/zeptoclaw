@@ -1,0 +1,70 @@
+---
+# Пример инвентаря для развёртывания mesh на 100+ серверах (ТЗ 15.4).
+#
+#   cp inventory.example.yml inventory.yml   # затем отредактировать
+#   ansible-playbook -i inventory.yml --check --diff deploy.yml
+#   ansible-playbook -i inventory.yml deploy.yml
+#
+# Структура групп: роль применяется к mesh_nodes, а anchors/workers — её
+# подгруппы (и те, и другие разворачиваются одним плейбуком; различаются только
+# сетевым профилем).
+#
+# Что задаётся на хосте (полный список — roles/zeptomesh/defaults/main.yml):
+#   zeptomesh_node_count      сколько контейнеров-узлов поднять на этом хосте
+#   zeptomesh_base_mesh_port  база mesh-порта: экземпляр i → база+i (tcp+udp)
+#   zeptomesh_base_api_port   база админ-API: 8081+i, наружу не публикуется
+#   zeptomesh_base_prom_port  база метрик: 9464+i, наружу не публикуется
+#   zeptomesh_image           образ с pinned-тегом (без latest)
+#   zeptomesh_data_bind_mount данные в каталогах хоста вместо docker-тома
+#   zeptomesh_data_host_root  корень этих каталогов
+#   zeptomesh_pub_ip          публичный IPv4 для announce (профиль wan.yaml)
+#   zeptomesh_bootstrap       точки входа через запятую; пусто → из артефакта
+#   zeptomesh_config_source   какой профиль доставлять (node/lan/wan)
+#   ansible_host              адрес для SSH (по умолчанию — имя хоста)
+#
+# Порты: каждый экземпляр занимает tcp+udp mesh-порт и два loopback-порта хоста.
+# Межхостовой файрвол обязан пропускать tcp И udp на mesh-порты (QUIC плюс
+# резервный TCP), иначе mesh не соберётся — см. docs/DEPLOYMENT.md §3.
+
+all:
+  children:
+    # Всё, чем управляет deploy.yml / collect_peerids.yml.
+    mesh_nodes:
+      children:
+        # Якоря — постоянные узлы с публичными адресами: они держат DHT и, при
+        # желании, работают relay-узлами для пиров за NAT. По ним входит
+        # остальная сеть (docs/DEPLOYMENT.md §4).
+        anchors:
+          vars:
+            zeptomesh_dht_mode: server
+            zeptomesh_relay_advertise: true
+            # WAN-профиль: анонс публичного адреса обязателен, mDNS в Интернете
+            # не работает.
+            zeptomesh_config_source: "{{ playbook_dir }}/../../configs/examples/wan.yaml"
+          hosts:
+            anchor-1:
+              ansible_host: 203.0.113.10
+              zeptomesh_pub_ip: 203.0.113.10
+              zeptomesh_node_count: 1
+            anchor-2:
+              ansible_host: 203.0.113.11
+              zeptomesh_pub_ip: 203.0.113.11
+              zeptomesh_node_count: 1
+
+        # Исполнители — основная масса серверов.
+        workers:
+          hosts:
+            # Два узла на одном хосте: порты 4001/4002 (mesh), 8081/8082 (API),
+            # 9464/9465 (метрики) — формула та же, что в install.sh.
+            worker-01:
+              ansible_host: 10.0.8.11
+              zeptomesh_pub_ip: 203.0.113.21
+              zeptomesh_node_count: 2
+            worker-02:
+              ansible_host: 10.0.8.12
+              zeptomesh_pub_ip: 203.0.113.22
+            # Узел за строгого NAT: себя реле не выставляет.
+            worker-03:
+              ansible_host: 10.0.8.13
+              zeptomesh_pub_ip: 203.0.113.23
+              zeptomesh_relay_advertise: false

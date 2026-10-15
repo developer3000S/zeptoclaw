@@ -1,0 +1,28 @@
+---
+galaxy_info:
+  author: ZeptoClaw Agent Mesh
+  description: >-
+    Развёртывание узлов ZeptoClaw Agent Mesh в Docker на множестве хостов
+    (ТЗ 15.4): Docker, каталоги, конфигурация, контейнер, здоровье, Peer ID.
+  license: MIT
+  min_ansible_version: "2.14"
+  standalone: false
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+    - name: Ubuntu
+      versions:
+        - focal
+        - jammy
+    - name: EL
+      versions:
+        - "8"
+        - "9"
+  galaxy_tags:
+    - docker
+    - networking
+    - mesh
+    - zeptomesh
+
+dependencies: []

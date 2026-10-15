@@ -1,0 +1,356 @@
+# ZeptoClaw Agent Mesh — шаблон узла.
+#
+# Значения ${VAR:-default} подставляет загрузчик конфигурации, поэтому один
+# файл обслуживает сколько угодно экземпляров на одном хосте: достаточно
+# передать разные ZEPTOMESH_INDEX / порты.
+#
+#   ZEPTOMESH_INDEX   порядковый номер экземпляра (0,1,2,…)
+#   ZEPTOMESH_MESH_PORT TCP/QUIC-порт mesh этого экземпляра (install.sh: 4001+i)
+#   ZEPTOMESH_API_PORT порт админ-API этого экземпляра (install.sh: 8081+i)
+#   ZEPTOMESH_DATA    корень данных (в Docker это /var/lib/zeptomesh)
+#   ZEPTOMESH_BOOTSTRAP необязательный "/ip4/…/p2p/…" адрес входа в сеть
+
+node:
+  name: ${ZEPTOMESH_NAME:-zepto-${ZEPTOMESH_INDEX:-0}}
+  data_dir: ${ZEPTOMESH_DATA:-./zeptomesh-data}/${ZEPTOMESH_INDEX:-0}
+  listen:
+    - /ip4/0.0.0.0/tcp/${ZEPTOMESH_MESH_PORT:-4001}
+    - /ip4/0.0.0.0/udp/${ZEPTOMESH_MESH_PORT:-4001}/quic-v1
+  announce: []
+  # Закрытая сеть libp2p: один и тот же ключ у всех узлов сети, чужие
+  # соединения отбрасываются на уровне транспорта. Формат — вывод
+  # `zeptomesh-node psk`: "/1/<base32 от 32 байт>"; hex-строка не принимается.
+  # ВНИМАНИЕ: QUIC не поддерживает закрытые сети (go-libp2p), поэтому с
+  # непустым PSK узел поднимает только TCP — quic-v1-адреса ниже игнорируются.
+  private_network_psk: ${ZEPTOMESH_PSK:-}
+  # Circuit relay (libp2p relay v2): помощь узлам за NAT.
+  #  enabled            — пользоваться чужими ретрансляторами, когда прямое
+  #                       соединение недоступно;
+  #  advertise_as_relay — разрешить транзит трафика другим узлам;
+  #  static_relays      — явные адреса ретрансляторов (иначе — поиск через DHT);
+  #  limit              — потолок резервирований/схем и одна ретранслируемая
+  #                       сессия по длительности и объёму.
+  relay:
+    enabled: true
+    advertise_as_relay: ${ZEPTOMESH_RELAY_ADVERTISE:-false}
+    static_relays: []
+    limit:
+      max_reservations: 128
+      max_circuits: 16
+      reservation_ttl: 1h
+      conn_duration: 2m
+      conn_data_bytes: 131072
+
+identity:
+  key_file: ${ZEPTOMESH_DATA:-./zeptomesh-data}/${ZEPTOMESH_INDEX:-0}/keys/peer.key
+
+discovery:
+  local_registry: true
+  local_socket_dir: ${ZEPTOMESH_DATA:-./zeptomesh-data}/${ZEPTOMESH_INDEX:-0}/run
+  mdns: ${ZEPTOMESH_MDNS:-true}
+  mdns_service_name: _zeptomesh._udp
+  bootstrap: []
+  dht: true
+  dht_mode: ${ZEPTOMESH_DHT_MODE:-auto}
+  peer_exchange: true
+  bootstrap_interval: 30s
+  # scan — активное прощупывание окружения агентом: локальные источники +
+  # внешние (DHT, bootstrap, peer-exchange, search topic) и, при включении,
+  # перебор локальной подсети. По умолчанию выключено — скан запускается
+  # вручную через `zeptomesh-node scan` / POST /api/v1/admin/scan.
+  scan:
+    enabled: ${ZEPTOMESH_SCAN_ENABLED:-false}
+    interval: 15m
+    subnet_scan: ${ZEPTOMESH_SCAN_SUBNET:-false}
+    dial_timeout: 6s
+    timeout: 45s
+    max_candidates: 64
+  gossip:
+    enabled: true
+    topic: /zeptomesh/membership/0.1.0
+    heartbeat: 3s
+    full_sync: 60s
+    failure_timeout: 15s
+
+neighbors:
+  min: 6
+  target: 12
+  max: 48
+
+tasks:
+  default_ttl: 5
+  max_ttl: 10
+  max_parallel_tasks: 4
+  # Сколько задач одновременно может занять один инициатор (защита от
+  # "один сосед съел все слоты"); 0 = без ограничения.
+  max_parallel_tasks_per_peer: 2
+  default_timeout_seconds: 600
+  # Потолок времени выполнения: больше запросить можно, но узел всё равно
+  # обрежет до этого значения.
+  max_timeout_seconds: 3600
+  max_task_payload_bytes: 1048576
+  max_artifact_bytes: 104857600
+  # Квоты ресурсов исполняемой задачи (ТЗ 6.8.4): 0 = не ограничивать.
+  max_workspace_bytes: 536870912        # размер артефактов из workspace
+  min_free_disk_bytes: 1073741824       # не брать задачу, если диск забит
+  max_task_memory_bytes: 1073741824     # RLIMIT_AS процесса PicoClaw
+  dedup_window: 15m
+  retention: 168h
+  forwarding:
+    max_fanout: 5
+    max_parallel_candidates: 3
+    max_retries: 2
+    attempt_timeout: 120s
+    retry_interval_seconds: 5s
+    # search_relay — лестница расширения поиска исполнителя, когда локальная
+    # таблица соседей ничего не дала. Адресная часть (enabled) делает full
+    # refresh и ограниченный RPC-relay по соседям. Epidemic-часть (topic)
+    # публикует подписанный запрос НАВЫКОВ (без task_id и инструкции) в общий
+    # pubsub-топик: подписавшиеся узлы, которые могут закрыть навык, отвечают
+    # подписанным списком кандидатов. По умолчанию выключена — это шаг с самой
+    # широкой зоной раскрытия. Меняется только перезапуском (топик join'ится на
+    # старте). Ответы — заявления третьих лиц: прежде чем маршрутизировать,
+    # каждый кандидат обзванивается и проверяется по его собственной подписи.
+    # search_relay:
+    #   enabled: true
+    #   max_depth: 2
+    #   fanout: 3
+    #   request_timeout: 8s
+    #   cache_ttl: 60s
+    #   topic:
+    #     enabled: false
+    #     name: "/zeptomesh/skillsearch/0.1.0"
+    #     request_ttl: 30s     # устаревшие запросы не отвечаются
+    #     max_answers: 8       # сколько ответов собрать / сколько записей в одном
+    #     answer_cooldown: 10s # анти-шторм: не чаще одного ответа на набор навыков
+
+capabilities:
+  skills: [general]
+  models: []
+  resource_class: medium
+  accept_external_tasks: true
+  allow_shell: false
+  allow_network_tools: true
+  max_parallel_tasks: 4
+  disabled_skills: []
+  # Документация объявленных навыков (capabilities.skill_docs): что узел
+  # рассказывает о них соседям. Права на исполнение она не даёт — право даёт
+  # только список skills выше, поэтому ни API, ни импорт от соседа не могут
+  # расширить полномочия узла.
+  skill_docs: []
+  #   - name: ocr
+  #     version: 2
+  #     description: "Распознавание сканов, русский/английский."
+  #     models: [pico-vision]
+  #     attributes: {gpu: "true", owner: team-a}
+  # Дельта-обмен этими описаниями (RPC skills_sync): узел сравнивает свой
+  # epoch (capabilities.skills_version) с соседом и подтягивает только более
+  # новые дескрипторы. disclose_to: trusted | known (по умолчанию) | any.
+  skill_exchange:
+    enabled: true
+    disclose_to: known
+    interval: 30s
+    max_descriptors: 64   # потолок одного ответа
+    import_limit: 512     # потолок выученных описаний одного соседа
+    persist: true         # <data_dir>/skills.json — часы версий переживают рестарт
+
+picoclaw:
+  # stub | binary | http | ollama — подробнее в docs/PICOCLAW-INTEGRATION.md.
+  # ollama — реальный инференс: инструкция уходит в /api/chat (или
+  # /v1/chat/completions) того бэкенда, которого выбрал пул мозгов; требует
+  # brain.enabled и хотя бы одного проверенного бэкенда.
+  mode: ${ZEPTOMESH_PICO_MODE:-stub}
+  binary: ${ZEPTOMESH_PICO_BIN:-picoclaw}
+  config: ${ZEPTOMESH_PICO_CONFIG:-}
+  # Корень рабочих каталогов задач (ТЗ 10.3 «рабочая директория»): под ним
+  # создаётся отдельный каталог на задачу, и именно он передаётся агенту через
+  # PICOCLAW_AGENTS_DEFAULTS_WORKSPACE. Пусто → <data_dir>/picoclaw/workspaces.
+  # Квота на объём задаётся не здесь, а tasks.max_workspace_bytes.
+  workspace_root: ${ZEPTOMESH_PICO_WORKSPACE:-}
+  timeout_seconds: 600
+  max_concurrent_agents: 4
+  # ТЗ 10.3 «модельные параметры»: модель по умолчанию для локального агента.
+  # Это свойство узла, а не задачи — в протоколе mesh выбора модели нет, поэтому
+  # сосед не может попросить другую модель. Пусто → решает конфигурация PicoClaw.
+  # В режиме binary оно становится --model; в режиме ollama закрепляет модель,
+  # с которой узел думает (пул выберет бэкенд, её обслуживающий) — без закрепа
+  # пул берёт самую крупную модель быстрейшего бэкенда, что на слабом хосте
+  # может оказаться непосильной. У Pico Protocol (http) поля выбора модели в
+  # запросе нет, в ответе читается только model_name. Прочие модельные
+  # параметры (temperature, max_tokens) задаются не здесь: `picoclaw agent`
+  # принимает только -d/-m/-s/--model, они живут в env ниже
+  # (PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE, …) или в файле picoclaw.config.
+  model: ${ZEPTOMESH_PICO_MODEL:-}
+  extra_args: []
+  prompt_template: ""
+  env: {}
+  http:
+    base_url: ${ZEPTOMESH_PICO_WS_URL:-http://127.0.0.1:18790}
+    path: /pico/ws
+    health_path: /health
+    token_env: PICOCLAW_MESH_PICO_TOKEN
+    timeout_seconds: 600
+  stub:
+    latency: 50ms
+    echo: true
+
+# brain — «интеллект бэкендов» узла: каталог обнаруженных Ollama-эндпоинтов,
+# пул проверенных бэкендов, которыми узел реально думает, и обмен находками с
+# другими агентами.
+#
+# Контракт автономии: в mesh нет центрального подтверждения, поэтому узел
+# верифицирует каждый эндпоинт сам — зондом GET /api/tags. Ответил списком
+# моделей → verified=true, эндпоинт получает трафик. Подтверждение оператором
+# (FOA §4.4.4) намеренно НЕ применяется: агент всё решает сам.
+brain:
+  enabled: ${ZEPTOMESH_BRAIN_ENABLED:-true}
+  # Локальный Ollama (http://host:port) — добавляется в пул как бэкенд "local".
+  # Пусто → локального инстанса нет.
+  local_url: ${ZEPTOMESH_OLLAMA_URL:-}
+  # Явные операторские эндпоинты (помимо local_url). api_key_env называет
+  # переменную окружения с ключом — сам ключ в конфиге не живёт.
+  # ZEPTOMESH_LLM_ENDPOINTS (список через запятую) доливается в этот список
+  # поверх YAML — как ZEPTOMESH_BOOTSTRAP, поэтому один смонтированный шаблон
+  # обслуживает все экземпляры mesh. Если шлюз аутентифицирует запросы, ключ
+  # задаётся переменной ZEPTOMESH_LLM_API_KEY — она подставляется как
+  # api_key_env каждому эндпоинту из ZEPTOMESH_LLM_ENDPOINTS, иначе пул
+  # забракует живой шлюз как недоступный.
+  endpoints: []
+  #   - id: gateway
+  #     base_url: https://llm.internal.example
+  #     api_key_env: LLM_GATEWAY_KEY
+  catalog:
+    enabled: true
+    # Поисковые движки, у которых есть ключ (censys | shodan | greynoise |
+    # zoomeye | criminal_ip | netlas). Источник без ключа тихо пропускается.
+    sources: [shodan, censys]
+    query: port:11434
+    # Как часто узел сам опрашивает поисковики (scan_interval) и через сколько
+    # после старта (initial_delay). 0 → расписания нет, только ручной
+    # `zeptomesh-node brain-scan` / POST /api/v1/brain/scan.
+    scan_interval: 30m
+    initial_delay: 2m
+    timeout: 30s
+    max_per_source: 25
+    retain: 1000
+  # Автопромоушен найденных эндпоинтов: каждый проход каталога зондирует
+  # непроверенных кандидатов и верифицирует их сам. promote_max_per_pass
+  # ограничивает число проб за проход; неудачный эндпоинт повторно зондируется
+  # не раньше чем через час.
+  auto_promote: true
+  promote_max_per_pass: 5
+  probe_interval: 1m
+  gossip:
+    # Обмен каталогом с другими агентами на общем pubsub-роутере membership.
+    enabled: true
+    interval: 5m
+  keys:
+    # exchange включает /api/v1/keys/* в обе стороны; accept разрешает ПРИЁМ
+    # ключей от друзей. Ключи живут только в памяти, в логи и на диск не идут.
+    exchange: true
+    accept: true
+    # Какие переменные окружения можно ОТПРАВЛЯТЬ другу (список имён):
+    share_envs: []
+    #   - SHODAN_API_KEY
+    #   - CENSYS_API_KEY
+  # Друзья — другие агенты, чьё админ-API узел может дёрнуть сам (промоушен
+  # их кандидатов и обмен ключами). token_env — переменная с bearer-токеном
+  # друга; имя друга или сам URL принимает `zeptomesh-node friend-promote
+  # -friend …` и `share-keys -friend …`.
+  friends: []
+  #   - name: gpu-friend
+  #     admin_url: http://127.0.0.1:8082
+  #     token_env: ZEPTOMESH_FRIEND_TOKEN
+
+security:
+  require_task_signature: true
+  # Транспортная подпись доказывает, кто отправил конверт; авторская
+  # (origin_signature) доказывает, что содержимое не переписал промежуточный узел.
+  # Отсутствующая авторская подпись отсекается только этим флагом — узлы,
+  # поднятые до появления поля, остаются приемлемыми, если его выключить;
+  # присутствующая, но неверная отбрасывается всегда (ТЗ 6.6.4, 11.5).
+  require_origin_signature: true
+  drop_invalid_signatures: true
+  allowed_peers_file: ${ZEPTOMESH_ALLOWED_PEERS:-}
+  blocked_peers_file: ${ZEPTOMESH_BLOCKED_PEERS:-}
+  min_trust_for_tasks: limited
+  max_message_bytes: 4194304
+  rate_limit:
+    requests_per_second: 20
+    burst: 60
+
+api:
+  enabled: true
+  listen: ${ZEPTOMESH_API_HOST:-127.0.0.1}:${ZEPTOMESH_API_PORT:-8081}
+  # Один legacy-токен на весь API (полный admin). Значение — из env, не из файла.
+  auth_token_env: ZEPTOMESH_API_TOKEN
+  # RBAC: именованные токены с ролями (viewer | operator | admin).
+  # Значения — из env, в конфиг секреты не пишутся. Токены из этого списка
+  # проверяются наравне с legacy-токеном; роли задают права: viewer — только
+  # чтение, operator — ещё и мутации задач/навыков/триггеров + сканирование,
+  # admin — всё, включая /api/v1/admin/*. Раскомментируйте пример:
+  #tokens:
+  #  - name: dashboard
+  #    role: viewer
+  #    token_env: ZEPTOMESH_UI_VIEWER_TOKEN
+  #  - name: bot
+  #    role: operator
+  #    token_env: ZEPTOMESH_OPERATOR_TOKEN
+  #  - name: admin
+  #    role: admin
+  #    token_env: ZEPTOMESH_ADMIN_TOKEN
+  read_timeout: 15s
+  write_timeout: 600s
+
+telemetry:
+  log_level: ${ZEPTOMESH_LOG_LEVEL:-info}
+  structured_logs: true
+  # Метрики отдаёт и админ-API (/metrics, с bearer-токеном). Отдельный
+  # слушатель нужен, когда Prometheus скрейпит порт без токена: держите его на
+  # внутреннем интерфейсе. В Docker — 0.0.0.0, иначе порт не будет опубликован.
+  prometheus_listen: ${ZEPTOMESH_PROM_LISTEN:-}
+  # Трассировка OpenTelemetry (ТЗ 14.3) — выключена по умолчанию: узел, который
+  # её не упоминает, не подключает ни SDK, ни экспортёр. Контекст трейса едет
+  # внутри задачи в подписанных labels, поэтому промежуточный узел не может его
+  # переписать, а старый сосед просто пронесёт два лишних ключа. Секция меняется
+  # только рестартом: SDK ставит глобальные провайдеры один раз при старте
+  # процесса (reload отнесёт её к requires_restart).
+  # tracing:
+  #   enabled: true
+  #   endpoint: "localhost:4318"   # host:port OTLP/HTTP, без схемы и пути
+  #   insecure: true               # plaintext — обычно то, что ждёт локальный
+  #                                # collector (Jaeger, Tempo, otel-collector)
+  #   sample_ratio: 0.1            # вероятность для трейсов, НАЧАТЫХ этим узлом;
+  #                                # пришедший трассированный трейс не усекается
+  #   service_name: zeptomesh-node # имя сервиса в collector
+  #   environment: prod
+
+storage:
+  engine: badger
+  dir: ${ZEPTOMESH_DATA:-./zeptomesh-data}/${ZEPTOMESH_INDEX:-0}/db
+  max_task_records: 100000
+
+# Плановые триггеры (ТЗ 6.6.1 п.4) — четвёртый источник задач: узел сам
+# подставляет себе задачу по cron-выражению, как если бы оператор вызвал
+# `zeptomesh-node submit`. Разрешение cron — минутное; запуски, пропущенные
+# во время простоя, НЕ доигрываются (задача на 09:00 не придёт в 14:00).
+# Список перечитывается на горячую (reload). Эти записи закреплённые: API и CLI
+# не могут удалить или перезаписать id из этого списка (POST с тем же id
+# отклоняется), чтобы YAML оставался старшим источником истины. Триггеры,
+# созданные через API, лежат в хранилище узла и видны в `zeptomesh-node
+# triggers` наравне с этими.
+# triggers:
+#   - id: nightly-vacuum          # уникальный id — обязателен
+#     name: Ночная уборка workspace
+#     schedule: "0 3 * * *"       # minute hour dom month dow, по UTC
+#     enabled: true               # по умолчанию true
+#     max_runs: 0                 # >0 — остановиться после N запусков
+#     job:
+#       instruction: "Удалить файлы старше 7 дней из рабочей области"
+#       required_skills: [general] # маршрутизация как у обычной задачи
+#       ttl: 5                     # прыжков; 0 = tasks.default_ttl
+#       priority: 0                # 1..9; 0 = по умолчанию
+#       timeout_seconds: 600       # 0 = tasks.default_timeout_seconds
+#       allow_shell: false         # разрешить агенту shell (ТЗ 11.4)
+#       allow_network_tools: true  # разрешить сетевые инструменты
+

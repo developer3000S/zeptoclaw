@@ -1,0 +1,141 @@
+---
+# ТЗ 15.4.1 — на хосте должен работать Docker Engine, отвечающий на API-запросы.
+# community.docker.* работают через сокет (HTTP по unix-сокету), а не через CLI,
+# поэтому достаточно docker-ce без плагина compose; compose ставим «на всякий
+# случай» — им пользуются install.sh и RUNBOOK.
+
+- name: Docker | Требовать поддерживаемую ОС для установки
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in ['Debian', 'RedHat']
+    fail_msg: >-
+      Автоматическая установка Docker для семьи '{{ ansible_facts['os_family'] }}'
+      не описана (источник репозитория настроен только для Debian/RedHat):
+      включите zeptomesh_docker_install: false и подготовьте демон заранее —
+      проверка доступности демона и python-библиотеки выполнится в любом случае.
+    success_msg: "Семья ОС '{{ ansible_facts['os_family'] }}' поддерживается установщиком."
+  when: zeptomesh_docker_install | bool
+
+- name: Docker | EL — подключить EPEL (часть зависимостей docker-ce живёт там)
+  ansible.builtin.package:
+    name: epel-release
+    state: present
+  when:
+    - zeptomesh_docker_install | bool
+    - ansible_facts['os_family'] == 'RedHat'
+    - zeptomesh_docker_repo_enabled | bool
+
+- name: Docker | Debian/Ubuntu — подготовить каталог keyrings
+  ansible.builtin.file:
+    path: "{{ zeptomesh_docker_repo_keyring | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - zeptomesh_docker_install | bool
+    - ansible_facts['os_family'] == 'Debian'
+    - zeptomesh_docker_repo_enabled | bool
+
+- name: Docker | Debian/Ubuntu — получить GPG-ключ репозитория
+  ansible.builtin.get_url:
+    url: "{{ zeptomesh_docker_repo_gpg_url }}"
+    dest: "{{ zeptomesh_docker_repo_keyring }}"
+    owner: root
+    group: _apt
+    mode: "0644"
+  when:
+    - zeptomesh_docker_install | bool
+    - ansible_facts['os_family'] == 'Debian'
+    - zeptomesh_docker_repo_enabled | bool
+
+# apt_repository не поддерживает signed-by (в ansible-core 2.14 опции keyring
+# нет), а apt_key объявлен устаревшим. Файл sources.list.d с signed-by даёт
+# тот же результат без зависимости от свежих коллекций (community.general
+# deb822_repository появился позже 6.6.2, доступной здесь).
+- name: Docker | Debian/Ubuntu — записать apt-источник с signed-by
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/docker-ce.list
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # managed by ansible/zeptomesh — официальный репозиторий Docker (ТЗ 15.4.1)
+      {{ zeptomesh_docker_apt_entry }}
+  register: zeptomesh_docker_apt_source
+  when:
+    - zeptomesh_docker_install | bool
+    - ansible_facts['os_family'] == 'Debian'
+    - zeptomesh_docker_repo_enabled | bool
+
+- name: Docker | Debian/Ubuntu — обновить кэш apt после добавления источника
+  ansible.builtin.apt:
+    update_cache: true
+  when:
+    - zeptomesh_docker_install | bool
+    - ansible_facts['os_family'] == 'Debian'
+    - zeptomesh_docker_apt_source is changed
+
+- name: Docker | RedHat-семейство — включить репозиторий docker-ce-stable
+  ansible.builtin.yum_repository:
+    name: docker-ce-stable
+    description: Docker CE Stable - $basearch
+    baseurl: "{{ zeptomesh_docker_yum_url }}/$basearch/stable"
+    enabled: true
+    gpgcheck: true
+    gpgkey: "{{ zeptomesh_docker_yum_url }}/gpg"
+  when:
+    - zeptomesh_docker_install | bool
+    - ansible_facts['os_family'] == 'RedHat'
+    - zeptomesh_docker_repo_enabled | bool
+
+- name: Docker | Установить пакеты движка
+  ansible.builtin.package:
+    name: "{{ zeptomesh_docker_effective_packages }}"
+    state: present
+  when: zeptomesh_docker_install | bool
+  notify: Перезапустить docker
+
+- name: Docker | Включить и запустить демон
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+  when: zeptomesh_docker_install | bool
+
+# community.docker.* общаются с демоном через HTTP по unix-сокету и на стороне
+# хоста требуют python-библиотеку requests (README коллекции). Без неё модуль
+# падает с невнятным «Failed to import», поэтому ставим её явно и проверяем.
+- name: Docker | Установить python-libs, нужные модулям community.docker
+  ansible.builtin.package:
+    name: "{{ zeptomesh_docker_python_packages }}"
+    state: present
+  vars:
+    zeptomesh_docker_python_packages: >-
+      {{- ['python3-requests']
+          if ansible_facts['os_family'] in ['Debian', 'RedHat', 'Suse']
+          else [] -}}
+  when:
+    - zeptomesh_docker_install | bool
+    - zeptomesh_docker_python_packages | length > 0
+
+- name: Docker | Проверить, что requests импортируется интерпретатором хоста
+  ansible.builtin.command:
+    cmd: "{{ ansible_python_interpreter | default('python3') }} -c 'import requests'"
+  changed_when: false
+  check_mode: false
+
+- name: Docker | Проверить, что демон отвечает
+  community.docker.docker_host_info:
+    disk_usage: false
+  register: zeptomesh_docker_host
+  retries: 6
+  delay: 5
+  until: zeptomesh_docker_host is succeeded
+
+- name: Docker | Показать версию демона
+  ansible.builtin.debug:
+    msg: >-
+      Docker {{ zeptomesh_docker_host.host_info.ServerVersion | default('?') }}
+      (API {{ zeptomesh_docker_host.host_info.ApiVersion | default('?') }}),
+      driver {{ zeptomesh_docker_host.host_info.Driver | default('?') }}
