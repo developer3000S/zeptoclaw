@@ -323,6 +323,12 @@ impl Node {
             });
         }
         *self.listen_addrs.lock().unwrap() = bound.clone();
+        // Строка готовности для супервизоров/smoke-теста (Go: fmt.Println в cmd).
+        println!(
+            "zeptomesh-node started: peer_id={} listening on {}",
+            self.self_id(),
+            bound.join(", ")
+        );
         tracing::info!(peer_id = %self.self_id(), listen = ?bound, "node_started");
 
         // Bootstrap-диалы.
@@ -515,7 +521,7 @@ impl Node {
             if !res.task_id.is_empty() {
                 let this = self.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = this.manager.handle_result(res).await {
+                    if let Err(e) = this.manager.clone().handle_result(res).await {
                         tracing::debug!("handle_result: {e}");
                     }
                 });

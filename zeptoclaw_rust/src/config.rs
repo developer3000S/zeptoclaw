@@ -441,6 +441,8 @@ impl Config {
                 private_network_psk: String::new(),
             },
             identity: IdentityConfig { key_file: String::new() },
+            // NB: discovery.gossip — в Go-структуре DiscoveryConfig нет своего
+            // gossip; mesh-конфигурация узла живёт в node.listen.
             discovery: DiscoveryConfig {
                 local_registry: true,
                 local_socket_dir: String::new(),

@@ -930,41 +930,58 @@ impl Manager {
     /// Агрегация результата ребёнка в ожидающий корень (Go: tasks.Manager
     /// subtask aggregation). Возвращает true, если результат принадлежит
     /// ребёнку и был поглощён (или корень уже завершён агрегатом).
-    async fn absorb_child_result(self: &Arc<Self>, res: &TaskResult) -> Result<bool> {
-        let parent_id = match self.child_links.lock().unwrap().get(&res.task_id).cloned() {
-            Some(p) => p,
-            None => return Ok(false),
+    async fn absorb_child_result(&self, res: &TaskResult) -> Result<bool> {
+        // Scoped-guard паттерн: все блокировки std::sync::Mutex закрываются до
+        // `.await` (в Rust 2021 MutexGuard через await делает future не-Send).
+        let parent_id = {
+            match self.child_links.lock().unwrap().get(&res.task_id).cloned() {
+                Some(p) => p,
+                None => return Ok(false),
+            }
         };
-        let plan = match self.parent_plan.lock().unwrap().get(&parent_id).cloned() {
-            Some(p) => p,
-            None => return Ok(false),
+        let plan = {
+            match self.parent_plan.lock().unwrap().get(&parent_id).cloned() {
+                Some(p) => p,
+                None => return Ok(false),
+            }
         };
         // Копим результаты детей; когда собрано по плану — собираем агрегат.
-        self.results.lock().unwrap().insert(res.task_id.clone(), res.clone());
-        let mut texts: Vec<String> = Vec::new();
-        let mut any_failed = false;
-        let mut got = 0usize;
-        for st in plan.iter() {
-            let children: Vec<String> = self
-                .child_links
-                .lock()
-                .unwrap()
+        {
+            self.results.lock().unwrap().insert(res.task_id.clone(), res.clone());
+        }
+        // Ребёнок -> его инструкция (из конверта задачи), только для данного
+        // родителя (Go: tasks.Manager агрегация по childLinks + инструкции).
+        let kids: Vec<String> = {
+            let links = self.child_links.lock().unwrap();
+            links
                 .iter()
                 .filter(|(_, p)| **p == parent_id)
                 .map(|(c, _)| c.clone())
-                .collect();
-            for c in &children {
-                if let Some(r) = self.results.lock().unwrap().get(c) {
-                    got += 1;
-                    let s = Status::from_proto(r.status);
-                    if !s.terminal() {
-                        continue;
-                    }
-                    if s != Status::Completed {
-                        any_failed = true;
-                    }
-                    texts.push(format!("{}: {}", st.instruction, r.text));
+                .collect()
+        };
+        let mut texts: Vec<String> = Vec::new();
+        let mut any_failed = false;
+        let mut got = 0usize;
+        for c in kids.iter() {
+            let r = { self.results.lock().unwrap().get(c).cloned() };
+            if let Some(r) = r {
+                got += 1;
+                let s = Status::from_proto(r.status);
+                if !s.terminal() {
+                    continue;
                 }
+                if s != Status::Completed {
+                    any_failed = true;
+                }
+                let inst = {
+                    self.envelopes
+                        .lock()
+                        .unwrap()
+                        .get(c)
+                        .map(|e| e.payload().instruction.clone())
+                        .unwrap_or_default()
+                };
+                texts.push(format!("{inst}: {}", r.text));
             }
         }
         if got < plan.len() {
@@ -984,13 +1001,26 @@ impl Manager {
         self.complete_aggregate(parent_id, agg).await
     }
 
-    async fn complete_aggregate(self: &Arc<Self>, parent_id: String, mut agg: TaskResult) -> Result<bool> {
-        // Подпись результата поверх схемы ed25519-sha256-v1 (Go: signResult).
+    fn complete_aggregate(
+        &self,
+        parent_id: String,
+        agg: TaskResult,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> {
+        // Рекурсия handle_result → absorb → complete_aggregate → handle_result:
+        // future должен быть забоксирован (E0733).
+        Box::pin(async move { self.complete_aggregate_inner(parent_id, agg).await })
+    }
+
+    async fn complete_aggregate_inner(&self, parent_id: String, mut agg: TaskResult) -> Result<bool> {
+        // Scoped-guard: все `.lock()` закрываются до ближайшего `.await` — иначе
+        // MutexGuard живёт через await и future становится не-Send (Rust 2021).
         agg.result_digest = wire::result_digest(&agg);
         agg.signature_scheme = "ed25519-sha256-v1".into();
         agg.signature = self.identity.sign(&wire::result_body(&agg));
         agg.worker_signature = agg.signature.clone();
-        self.results.lock().unwrap().insert(parent_id.clone(), agg.clone());
+        {
+            self.results.lock().unwrap().insert(parent_id.clone(), agg.clone());
+        }
         if let Ok(mut t) = self.store.get_task(&parent_id) {
             t.status = Status::from_proto(agg.status).as_str().into();
             t.finished_at = agg.finished_at as f64;
@@ -1001,23 +1031,37 @@ impl Manager {
             status: Status::from_proto(agg.status).as_str().into(),
             text: agg.text.clone(),
             worker_peer_id: agg.worker_peer_id.clone(),
-            result_digest: format!("sha256:{}", hex::encode(wire::result_digest(&agg))),
+            signature: agg.signature.clone(),
+            worker_signature: agg.worker_signature.clone(),
+            result_digest: format!("sha256:{}", hex::encode(agg.result_digest.clone())),
             aggregated: true,
             ..Default::default()
         });
         // Доставка aggregate автору, если корень пришёл извне.
-        if let Ok(env) = self.envelope_of(&parent_id) {
-            if env.origin_peer_id != self.self_id() {
-                let _ = self.call_deliver_result(env.origin_peer_id.clone(), agg).await;
+        let origin = {
+            self.envelopes
+                .lock()
+                .unwrap()
+                .get(&parent_id)
+                .map(|e| e.origin_peer_id.clone())
+        };
+        match origin {
+            Some(o) if o != self.self_id() => {
+                let _ = self.call_deliver_result(o, agg).await;
             }
-        } else if self.instructions.lock().unwrap().contains_key(&parent_id) {
-            // Корень создан локально: доставляем результат самому себе через
-            // тот же конвейер, что и удалённые результаты (Go: local delivery).
-            let this = self.clone();
-            let res = agg.clone();
-            tokio::spawn(async move {
-                let _ = this.handle_result(res).await;
-            });
+            Some(_) => {}
+            None => {
+                let is_local_root = {
+                    self.instructions.lock().unwrap().contains_key(&parent_id)
+                };
+                if is_local_root {
+                    // Корень создан локально: доставляем результат самому себе
+                    // через тот же конвейер, что и удалённые результаты
+                    // (Go: local delivery). Для sender==self handle_result
+                    // просто сохраняет результат в map.
+                    self.results.lock().unwrap().insert(parent_id.clone(), agg);
+                }
+            }
         }
         Ok(true)
     }
@@ -1026,7 +1070,7 @@ impl Manager {
     /// исполнить локально либо делегировать.
     pub async fn route_inbound(&self, env: TaskEnvelope) -> Result<()> {
         self.remember_envelope(&env);
-        let is_local = self.local_tasks.lock().unwrap().contains(&env.task_id);
+        let is_local = { self.local_tasks.lock().unwrap().contains(&env.task_id) };
         // Дедупликация повторных доставок одного task id в окне.
         if !is_local {
             let (claimed, prev) = self
@@ -1281,7 +1325,7 @@ impl Manager {
         result.worker_signature = result.signature.clone();
         result.error_class = error_class(result.status, &err_msg);
 
-        // Журнал результата + задачи.
+        // Журнал результата + задачи (Go: digest/sign до классификации).
         let rr = ResultRecord {
             task_id: result.task_id.clone(),
             status: status.as_str().into(),
@@ -1291,6 +1335,8 @@ impl Manager {
             started_at: started as f64,
             finished_at: finished as f64,
             model: self.adapter.model(),
+            signature: result.signature.clone(),
+            worker_signature: result.worker_signature.clone(),
             artifacts: result
                 .artifacts
                 .iter()
@@ -1300,7 +1346,7 @@ impl Manager {
                     size: a.size,
                 })
                 .collect(),
-            result_digest: format!("sha256:{}", hex::encode(wire::result_digest(&result))),
+            result_digest: format!("sha256:{}", hex::encode(result.result_digest.clone())),
             error_class: error_class_name(result.error_class),
             ..Default::default()
         };
@@ -1324,11 +1370,14 @@ impl Manager {
         let _ = std::fs::remove_dir_all(&ws);
 
         // Куда отдавать результат: автору (если мы не автор) или родител.
+        // Scoped-guard: блокировки закрываются до `.await` ниже.
         let is_root_for_us = env.origin_peer_id == self.self_id()
             && env.parent_task_id.is_empty()
-            && self.local_tasks.lock().unwrap().contains(&env.task_id);
+            && { self.local_tasks.lock().unwrap().contains(&env.task_id) };
         if is_root_for_us {
-            self.results.lock().unwrap().insert(env.task_id.clone(), result);
+            {
+                self.results.lock().unwrap().insert(env.task_id.clone(), result);
+            }
             return Ok(());
         }
         let target = if env.origin_peer_id != self.self_id() {
@@ -1336,7 +1385,9 @@ impl Manager {
         } else if let Some(prev) = previous_hop(&env) {
             prev.to_string()
         } else {
-            self.results.lock().unwrap().insert(env.task_id.clone(), result);
+            {
+                self.results.lock().unwrap().insert(env.task_id.clone(), result);
+            }
             return Ok(());
         };
         let fut = {
@@ -1376,7 +1427,16 @@ impl Manager {
 
     /// Принятый из сети результат: верификация подписи работника, сохранение,
     /// доставка автору (если мы relay) или завершение локальной задачи.
-    pub async fn handle_result(self: &Arc<Self>, res: TaskResult) -> Result<()> {
+    // Рекурсия handle_result → absorb_child_result → complete_aggregate →
+    // handle_result требует боксинга future (E0733).
+    pub fn handle_result(
+        self: Arc<Self>,
+        res: TaskResult,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
+        Box::pin(async move { self.handle_result_inner(res).await })
+    }
+
+    async fn handle_result_inner(&self, res: TaskResult) -> Result<()> {
         if !res.worker_peer_id.is_empty() && !res.signature.is_empty() {
             let vk = crate::security::extract_key_from_peer_id(&res.worker_peer_id)?;
             verify(&vk.to_bytes().to_vec(), &wire::result_body(&res), &res.signature)
@@ -1419,14 +1479,18 @@ impl Manager {
             Status::Failed | Status::TimedOut => self.table.record_failure(&res.worker_peer_id),
             _ => {}
         }
-        let is_local_origin = self.local_tasks.lock().unwrap().contains(&res.task_id);
+        let is_local_origin = { self.local_tasks.lock().unwrap().contains(&res.task_id) };
         if is_local_origin && res.sender_peer_id != self.self_id() {
             // Мы автор: задача завершена удалённым воркером.
-            self.results.lock().unwrap().insert(res.task_id.clone(), res);
+            {
+                self.results.lock().unwrap().insert(res.task_id.clone(), res);
+            }
             return Ok(());
         }
         if res.sender_peer_id == self.self_id() {
-            self.results.lock().unwrap().insert(res.task_id.clone(), res);
+            {
+                self.results.lock().unwrap().insert(res.task_id.clone(), res);
+            }
             return Ok(());
         }
         // Relay: послать дальше к origin. В Go маршрут результата совпадает с
@@ -1442,7 +1506,9 @@ impl Manager {
                 return self.call_deliver_result(next, res).await;
             }
         }
-        self.results.lock().unwrap().insert(res.task_id.clone(), res);
+        {
+            self.results.lock().unwrap().insert(res.task_id.clone(), res);
+        }
         Ok(())
     }
 
@@ -1458,7 +1524,9 @@ impl Manager {
         if !target.is_empty() && target != self.self_id() && self.has_deliver_result() {
             return self.call_deliver_result(target, result).await;
         }
-        self.results.lock().unwrap().insert(result.task_id.clone(), result);
+        {
+            self.results.lock().unwrap().insert(result.task_id.clone(), result);
+        }
         Ok(())
     }
 
