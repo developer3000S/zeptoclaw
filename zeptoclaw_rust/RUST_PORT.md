@@ -85,6 +85,21 @@ protobuf-кодек написан вручную (см. `proto`). Требуе�
   со списком недостающих модулей.
 - Нет cross-сборки и CI-ворота для Rust-порта (Go-CI не затрагивает каталог).
 
+## Очистка проекта (обслуживание)
+
+Сборочные артефакты и runtime-данные не должны попадать в VCS — это
+закреплено в корневом [`.gitignore`](../.gitignore) (`zeptoclaw_rust/target/`,
+`zeptomesh-data/`, `*.log`, архивы). Для освобождения места на диске:
+
+```bash
+cargo clean                      # удалить zeptoclaw_rust/target (~2.3 ГБ)
+rm -rf zeptoclaw_rust/zeptomesh-data   # данные dev-запусков узла (если есть)
+git gc --aggressive --prune=now  # сжать объектную базу (.git ≈ 1.2 МБ)
+```
+
+История репозитория уже очищена от больших артефактов (см. UPDATE.md);
+`git ls-files | grep target` возвращает пусто.
+
 ## Как читать порт вместе с Go
 
 Контракт протокола — `api/proto/zeptomesh/v1/mesh.proto` (единый источник
