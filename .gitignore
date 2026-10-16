@@ -1,1 +1,85 @@
-(empty output)
+# === Build artifacts ===
+
+# Rust
+zeptoclaw_rust/target/
+zeptoclaw_rust/Cargo.lock  # binary crate: lockfile — личное для каждого разработчика
+*.rs.bk
+
+# Go (archive; удалён из дерева, но может остаться от старых клонов)
+bin/
+dist/
+*.test
+
+# Cross-compile outputs
+*.exe
+*.dll
+*.so
+
+# === Runtime / data ===
+
+# Узел (оба стека)
+zeptomesh-data/
+zeptomesh_rust_data/
+
+# Dev acceptance runtimes
+.dev/acceptance/
+
+# Dashboard runtime
+zeptomesh-ui-data/
+
+# Логи и артефакты
+*.log
+*.dump
+
+# === Environment / secrets ===
+
+# ! НИКОГДА не коммитить .env — содержит API-ключи (CriminalIP и др.)
+.env
+
+# Переменные окружения для dev
+.env.local
+.env.*.local
+
+# === Languages / runtimes ===
+
+# Node / UI
+node_modules/
+ui/dist/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv
+venv/
+venv
+
+# === OS ===
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.\#*
+\#*\#
+Session.vim
+.netrwhist
+*.orig
+*.rej
+
+# === Archives ===
+
+*.zip
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.rar
