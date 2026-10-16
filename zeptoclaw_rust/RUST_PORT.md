@@ -102,6 +102,7 @@ git gc --aggressive --prune=now  # сжать объектную базу (.git 
 
 ## Как читать порт вместе с Go
 
-Контракт протокола — `api/proto/zeptomesh/v1/mesh.proto` (единый источник
-для обоих портов); канонические энкодеры описаны в `docs/PROTOCOLS.md`;
-статус реализации ТЗ Go-версией — `docs/STATUS.md`.
+Контракт протокола (`api/proto/zeptomesh/v1/mesh.proto`, удалён из дерева
+после переноса) полностью описан в [../docs/PROTOCOLS.md](../docs/PROTOCOLS.md) —
+он же единая спецификация для Rust-реализации (`proto.rs`); статус реализации
+ТЗ Go-версией (архив) — [../docs/STATUS.md](../docs/STATUS.md).
