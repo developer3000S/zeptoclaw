@@ -1452,7 +1452,7 @@ impl Node {
         // применяем conservative subset: interval'ы gossip/discovery/scan.
         let mut cur = self.cfg.as_ref().clone();
         cur.discovery = fresh.discovery;
-        cur.gossip = fresh.gossip;
+        cur.discovery.gossip = fresh.discovery.gossip;
         tracing::info!(path = %path, "config_reload_subset_applied");
         // NOTE: Arc<Config> неизменяем в рантайме; реальное применение требует
         // рестарта (в Go аналогично перезапускают процесс). Возвращаем Ok с
