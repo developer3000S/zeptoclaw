@@ -39,3 +39,6 @@ zeptoclaw_rust/zeptomesh-data/
 *.zip
 *.tar.gz
 *.tmp
+
+# Cargo.lock is intentionally not tracked (library-style crate)
+zeptoclaw_rust/Cargo.lock
