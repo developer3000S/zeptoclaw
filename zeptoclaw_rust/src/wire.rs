@@ -254,33 +254,6 @@ pub fn skills_sync_body(r: &SkillsSyncResponse) -> Vec<u8> {
     e.into_vec()
 }
 
-/// Тело запроса поиска исполнителей по навыкам (search-request-v1).
-pub fn search_request_body(r: &crate::proto::SearchRequest) -> Vec<u8> {
-    let mut e = Encoder::new();
-    e.str(&r.request_id);
-    e.str(&r.requester_peer_id);
-    e.str_list(&r.skills);
-    e.varint(r.issued_at);
-    e.into_vec()
-}
-
-/// Тело ответа на поиск (search-reply-v1): request_id + отсортированные
-/// записи пиров (peer_id, addrs, skills, seen_at).
-pub fn search_reply_body(r: &crate::proto::SearchReply) -> Vec<u8> {
-    let mut e = Encoder::new();
-    e.str(&r.request_id);
-    e.str(&r.responder_peer_id);
-    e.uvarint(r.peers.len() as u64);
-    for p in &r.peers {
-        e.str(&p.peer_id);
-        e.str_list(&p.addrs);
-        e.str_list(&p.skills);
-        e.varint(p.seen_at);
-    }
-    e.varint(r.issued_at);
-    e.into_vec()
-}
-
 /// Тело подтверждения задачи.
 pub fn ack_body(a: &TaskAck) -> Vec<u8> {
     let mut e = Encoder::new();

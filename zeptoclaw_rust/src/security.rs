@@ -257,6 +257,47 @@ pub fn extract_key_from_peer_id(peer_id: &str) -> Result<VerifyingKey, SecError>
     unmarshal_public_key(blob)
 }
 
+/// Проверка подписи по уже извлечённому VerifyingKey (для self-certifying
+/// идентификаторов вроде PeerID, где прото-оболочка не нужна).
+pub fn verify_key(vk: &VerifyingKey, msg: &[u8], sig: &[u8]) -> Result<(), SecError> {
+    let raw: [u8; 64] = sig.try_into().map_err(|_| SecError::BadSignature)?;
+    vk.verify(msg, &Signature::from_bytes(&raw))
+        .map_err(|_| SecError::BadSignature)
+}
+
+/// Префикс локальной /24 сети ("a.b.c") по первому не-петичному IPv4-адресу
+/// интерфейсов (Go: internal/discovery/scan.go localSubnetPrefix).
+/// Реализация через `ip -4 -o addr` — без дополнительных зависимостей.
+pub fn local_subnet_prefix() -> Option<String> {
+    let out = std::process::Command::new("ip")
+        .args(["-4", "-o", "addr", "show"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        // Формат: "2: eth4    inet 10.0.6.79/24 brd ... scope global ..."
+        let mut it = line.split_whitespace();
+        let _idx = it.next()?;
+        let _name = it.next()?;
+        if it.next()? != "inet" {
+            continue;
+        }
+        let cidr = it.next()?;
+        let ip = cidr.split('/').next()?;
+        let o: Vec<u8> = ip
+            .split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if o.len() != 4 || o[0] == 127 {
+            continue;
+        }
+        return Some(format!("{}.{}.{}", o[0], o[1], o[2]));
+    }
+    None
+}
+
 fn write_key_file(path: &Path, data: &[u8]) -> Result<(), SecError> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
