@@ -216,6 +216,17 @@ pub fn skill_descriptor_body(d: &SkillDescriptor) -> Vec<u8> {
 }
 
 /// "sha256:<hex>" контент-id дескриптора.
+/// sha256 от произвольных байт (hex-совместимо с Go hex(sha256.Sum256)).
+pub fn sha256_bytes(b: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(b).to_vec()
+}
+
+/// Hex-дайджест дескриптора умения (та же схема, что и в `skill_descriptor_digest`).
+pub fn skill_digest_body(d: &SkillDescriptor) -> Vec<u8> {
+    digest("skill-descriptor-v1", &skill_descriptor_body(d))
+}
+
 pub fn skill_descriptor_digest(d: &SkillDescriptor) -> String {
     format!(
         "sha256:{}",
@@ -290,36 +301,6 @@ pub fn ack_body(a: &TaskAck) -> Vec<u8> {
     e.str(&a.accepted_by);
     e.varint(a.timestamp);
     e.into_vec()
-}
-
-/// Тело search-request (схема намеренно исключена).
-pub fn search_request_body(s: &SearchRequest) -> Vec<u8> {
-    let mut e = Encoder::new();
-    e.str(&s.request_id);
-    e.str(&s.requester_peer_id);
-    e.str_list(&s.skills);
-    e.varint(s.issued_at);
-    e.into_vec()
-}
-
-/// Тело search-reply (записи идут в wire-порядке, без сортировки).
-pub fn search_reply_body(s: &SearchReply) -> Vec<u8> {
-    let mut e = Encoder::new();
-    e.str(&s.request_id);
-    e.str(&s.responder_peer_id);
-    e.varint(s.issued_at);
-    e.uvarint(s.peers.len() as u64);
-    for r in &s.peers {
-        peer_record(&mut e, r);
-    }
-    e.into_vec()
-}
-
-fn peer_record(e: &mut Encoder, r: &PeerRecord) {
-    e.str(&r.peer_id);
-    e.str_list(&r.addrs);
-    e.str_list(&r.skills);
-    e.varint(r.seen_at);
 }
 
 /// Детерминированное float→string: значение округляется до 4 знаков

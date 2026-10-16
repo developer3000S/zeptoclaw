@@ -148,6 +148,30 @@ impl Registry {
         out
     }
 
+    /// Добавить/обновить своё умение (Go: Registry.UpsertOwn из POST /api/v1/skills):
+    /// версия монотонно растёт, дайджест пересчитывается, при persist — сохранение.
+    pub fn upsert_own(&self, mut d: SkillDescriptor) -> SkillDescriptor {
+        let now = now_unix();
+        {
+            let mut g = self.inner.lock().unwrap();
+            let next_ver = g
+                .own
+                .get(&d.name)
+                .map(|e| e.descriptor.version.max(now) + 1)
+                .unwrap_or(now);
+            d.version = next_ver;
+            d.updated_at = now;
+            d.digest = hex::encode(wire::skill_digest_body(&d));
+            g.own.insert(
+                d.name.clone(),
+                Entry { descriptor: d.clone(), version: next_ver },
+            );
+            g.epoch += 1;
+        }
+        self.save();
+        d
+    }
+
     /// Путь персистентного кэша импортов (`<data_dir>/skills.json`).
     pub fn persist_path(&self) -> &std::path::Path {
         &self.path

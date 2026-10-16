@@ -308,12 +308,12 @@ fn run_node(cfg_path: Option<PathBuf>) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(run_node_async(cfg))
+    rt.block_on(run_node_async(cfg, p))
 }
 
-async fn run_node_async(cfg: Config) -> Result<()> {
+async fn run_node_async(cfg: Config, config_path: String) -> Result<()> {
     let cfg = Arc::new(cfg);
-    let node = Node::new((*cfg).clone()).await?;
+    let node = Node::new_at((*cfg).clone(), config_path).await?;
     node.start().await?;
 
     if cfg.api.enabled {

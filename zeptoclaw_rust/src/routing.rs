@@ -82,6 +82,7 @@ fn trust_score(t: Trust) -> f64 {
         Trust::Limited => 0.5,
         Trust::Untrusted => 0.2,
         Trust::Blocked => 0.0,
+        Trust::Unknown => 0.1,
     }
 }
 
