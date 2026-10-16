@@ -16,15 +16,18 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::config::Config;
 use crate::p2p;
-use crate::picoclaw::{self, Adapter, BackendPool};
+use crate::picoclaw::{self, Adapter, Backend, BackendPool};
 use crate::proto::{
     Capabilities, CapabilitiesRequest, CancelRequest, CancelResponse,
-    Message, PeerState, TaskEnvelope, TaskResult,
+    Message, PeerRecord, PeerState, SearchMessage, SearchMessageKind, SearchReply, SearchRequest,
+    TaskEnvelope, TaskResult,
 };
 use crate::routing::{Neighbor, Table, CAT_LAN, CAT_LOCAL, CAT_WAN};
 use crate::security::{extract_key_from_peer_id, Identity, Mode, Policy, Trust};
+use crate::skills::Registry;
 use crate::storage::{self, Store};
-use crate::tasks::{Manager, SubmitRequest};
+use crate::tasks::{self as tasksmod, Manager, SubmitRequest};
+use crate::triggers::Scheduler;
 use crate::wire;
 
 fn now_unix() -> i64 {
@@ -83,6 +86,10 @@ pub struct Node {
     pub manager: Arc<Manager>,
     pub adapter: Arc<dyn Adapter + Send + Sync>,
     pub pool: Option<Arc<BackendPool>>,
+    /// Реестр скиллов (Go: internal/skills Registry); активен при skill_exchange.enabled.
+    pub skills: Option<Arc<Registry>>,
+    /// Планировщик триггеров (Go: internal/triggers Scheduler).
+    pub scheduler: Option<Arc<Scheduler>>,
     conns: Conns,
     next_conn: std::sync::atomic::AtomicU64,
     /// Известные адреса пиров для исходящих диалов (peer_id → multiaddr/host:port).
@@ -90,6 +97,21 @@ pub struct Node {
     listen_addrs: Mutex<Vec<String>>,
     /// Сигнал graceful shutdown (go: context.CancelFunc, дёргается из POST /api/v1/shutdown).
     shutdown_tx: Arc<tokio::sync::watch::Sender<bool>>,
+    // ---- search-relay (Go: internal/discovery/search.go) ----
+    /// Активные исходящие поиски: request_id → (навыки, автор запроса, deadline).
+    pending_searches: Mutex<HashMap<String, PendingSearch>>,
+    /// Накопленные ответы на ожидающие поиски: request_id → кандидаты.
+    search_answers: Mutex<HashMap<String, Vec<(String, PeerRecord)>>>,
+    /// Кэш ответов поиска (request_id от чужих запросов → время ответа), cooldown.
+    answered: Mutex<HashMap<String, i64>>,
+    /// Локальный кэш результатов поиска по навыкам (skills_key → (expire, peers)).
+    search_cache: Mutex<HashMap<String, (i64, Vec<PeerRecord>)>>,
+}
+
+struct PendingSearch {
+    requester: String, // наш peer_id, от чьего имени просим
+    skills: Vec<String>,
+    deadline: std::time::Instant,
 }
 
 /// Разбирает `/ip4/1.2.3.4/tcp/4001` или `host:port` в "host:port".
@@ -171,9 +193,29 @@ impl Node {
         let restored = table.restore().unwrap_or(0);
         tracing::info!(restored, "neighbors_restored");
 
-        // Исполнитель.
-        let pool = None; // brain-каталог в Rust-порте пока не включается
+        // Brain-пул LLM-бэкендов (Go: internal/brain NewBackendPool) и исполнитель.
+        let pool = if cfg.picoclaw.local_url.is_empty() && cfg.picoclaw.backends.is_empty() {
+            None
+        } else {
+            Some(Arc::new(BackendPool::new(
+                &cfg.picoclaw.local_url,
+                &cfg.picoclaw.backends,
+            )))
+        };
         let adapter = picoclaw::new_adapter(&cfg, pool.clone()).await?;
+
+        // Реестр скиллов (активен при skill_exchange.enabled).
+        let skills = if cfg.capabilities.skill_exchange.enabled {
+            match Registry::new(&cfg, identity.clone()) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    tracing::warn!("skills registry disabled: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let manager = Arc::new(Manager::new(
             cfg.clone(),
@@ -184,6 +226,19 @@ impl Node {
             adapter.clone(),
         ));
 
+        // Планировщик триггеров (Go: triggers.New + run в goroutine).
+        let scheduler = if !cfg.triggers.is_empty() {
+            match Scheduler::new(&cfg, manager.clone()) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!("triggers scheduler disabled: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let n = Arc::new(Node {
             cfg,
             identity,
@@ -193,11 +248,17 @@ impl Node {
             manager,
             adapter,
             pool,
+            skills,
+            scheduler,
             conns: Arc::new(Mutex::new(HashMap::new())),
             next_conn: std::sync::atomic::AtomicU64::new(1),
             addrs: Mutex::new(HashMap::new()),
             listen_addrs: Mutex::new(vec![]),
             shutdown_tx: Arc::new(tokio::sync::watch::channel(false).0),
+            pending_searches: Mutex::new(HashMap::new()),
+            search_answers: Mutex::new(HashMap::new()),
+            answered: Mutex::new(HashMap::new()),
+            search_cache: Mutex::new(HashMap::new()),
         });
 
         n.wire_delivery();
@@ -355,8 +416,45 @@ impl Node {
                 tick.tick().await;
                 this.gossip_round().await;
                 this.prune_round();
+                this.expire_searches();
             }
         });
+
+        // Brain: периодический зонд LLM-бэкендов (Go: brain pool probe ticker).
+        if let Some(pool) = self.pool.clone() {
+            let scan = *self.cfg.discovery.scan.interval.max(&Duration::from_secs(5));
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(scan);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tick.tick().await;
+                    pool.probe().await;
+                }
+            });
+            // Первый зонд — сразу, чтобы usable() не был пустым до первого тика.
+            let p = pool.clone();
+            tokio::spawn(async move { p.probe().await });
+        }
+
+        // Skills exchange: периодическая синхронизация дескрипторов с соседями.
+        if self.skills.is_some() && !self.cfg.capabilities.skill_exchange.interval.is_zero() {
+            let this = self.clone();
+            let period = *self.cfg.capabilities.skill_exchange.interval;
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(period);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tick.tick().await;
+                    this.skills_sync_round().await;
+                }
+            });
+        }
+
+        // Планировщик триггеров (Go: go scheduler.Run(ctx)).
+        if let Some(s) = self.scheduler.clone() {
+            s.set_shutdown(self.shutdown_token());
+            tokio::spawn(s.run());
+        }
         Ok(())
     }
 
@@ -366,6 +464,391 @@ impl Node {
         for pid in stale {
             tracing::debug!("gossip: pruned stale neighbor {pid}");
         }
+    }
+
+    // ---- search-relay (Go: internal/discovery/search.go) --------------------
+
+    /// Сбрасывает истёкшие исходящие поиски и устаревшие записи кэшей.
+    fn expire_searches(&self) {
+        let now = std::time::Instant::now();
+        self.pending_searches.lock().unwrap().retain(|_, p| p.deadline > now);
+        let nowu = now_unix();
+        self.answered.lock().unwrap().retain(|_, t| *t + 3600 > nowu);
+        self.search_cache.lock().unwrap().retain(|_, (exp, _)| *exp > nowu);
+    }
+
+    /// Ключ кэша поиска — нормализованный список навыков.
+    fn skills_key(skills: &[String]) -> String {
+        let mut s: Vec<String> = skills.to_vec();
+        s.sort();
+        s.dedup();
+        s.join(",")
+    }
+
+    /// Локальные кандидаты: известные соседи, чьи навыки покрывают запрос.
+    fn local_candidates(&self, skills: &[String], max: usize) -> Vec<PeerRecord> {
+        let now = now_unix();
+        self
+            .table
+            .list()
+            .into_iter()
+            .filter(|n| {
+                n.peer_id != self.self_id()
+                    && !skills.is_empty()
+                    && skills.iter().all(|s| {
+                        n.skills
+                            .iter()
+                            .any(|ns| ns == s || ns == "general" || s == "any")
+                    })
+            })
+            .take(max)
+            .map(|n| PeerRecord {
+                peer_id: n.peer_id,
+                addrs: n.addrs,
+                skills: n.skills,
+                seen_at: now,
+            })
+            .collect()
+    }
+
+    /// Отправить SearchRequest всем подключённым соседям (Go: publish на тему
+    /// skillsearch; TCP-фрейм заменяет pubsub-топик).
+    async fn broadcast_search_request(&self, req: &SearchRequest) {
+        let msg = SearchMessage(SearchMessageKind::Request(req.clone()));
+        let conns: Vec<Arc<Conn>> = self.conns.lock().unwrap().values().cloned().collect();
+        for c in conns {
+            let _ = c.send(&msg).await;
+        }
+    }
+
+    /// Инициировать mesh-поиск исполнителей по навыкам (Go: discovery.Search).
+    /// Возвращает кандидатов (локальная таблица + ответы соседей до дедлайна).
+    pub async fn search_peers(self: &Arc<Self>, skills: &[String]) -> Result<Vec<PeerRecord>> {
+        let sr = &self.cfg.tasks.forwarding.search_relay;
+        if !sr.enabled {
+            bail!("node: search relay disabled");
+        }
+        let key = Self::skills_key(skills);
+        // Кэш результатов (cache_ttl).
+        if let Some((exp, peers)) = self.search_cache.lock().unwrap().get(&key) {
+            if *exp > now_unix() {
+                return Ok(peers.clone());
+            }
+        }
+        let request_id = format!("{}-{}", self.self_id(), crate::tasks::new_id());
+        let issued = now_unix();
+        let req = SearchRequest {
+            request_id: request_id.clone(),
+            requester_peer_id: self.self_id().to_string(),
+            skills: skills.to_vec(),
+            issued_at: issued,
+            signature_scheme: "ed25519-v1".into(),
+            signature: self.identity.sign(&wire::search_request_body(&SearchRequest {
+                request_id: request_id.clone(),
+                requester_peer_id: self.self_id().to_string(),
+                skills: skills.to_vec(),
+                issued_at: issued,
+                signature_scheme: String::new(),
+                signature: vec![],
+            })),
+        };
+        let timeout = *sr.request_timeout;
+        self.pending_searches.lock().unwrap().insert(
+            request_id.clone(),
+            PendingSearch {
+                requester: self.self_id().to_string(),
+                skills: skills.to_vec(),
+                deadline: std::time::Instant::now() + timeout,
+            },
+        );
+        self.broadcast_search_request(&req).await;
+
+        let mut collected: HashMap<String, PeerRecord> = HashMap::new();
+        for p in self.local_candidates(skills, usize::MAX) {
+            collected.insert(p.peer_id.clone(), p);
+        }
+        let poll = Duration::from_millis(100);
+        let mut waited = Duration::ZERO;
+        while waited < timeout {
+            tokio::time::sleep(poll).await;
+            waited += poll;
+            // Новые ответы подтягиваются через handle_search_reply в pending-карту?
+            // Нет: replies накапливаются в collected ниже (см. take_search_answers).
+            for (id, rec) in self.take_search_answers(&request_id) {
+                collected.entry(id).or_insert(rec);
+            }
+            if collected.len() as i32 >= sr.fanout.max(1) * 2 {
+                break; // достаточно кандидатов раньше дедлайна
+            }
+        }
+        self.pending_searches.lock().unwrap().remove(&request_id);
+        let mut peers: Vec<PeerRecord> = collected.into_values().collect();
+        peers.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+        let ttl = (*sr.cache_ttl).max(Duration::from_secs(1)).as_secs() as i64;
+        self.search_cache
+            .lock()
+            .unwrap()
+            .insert(key, (now_unix() + ttl, peers.clone()));
+        Ok(peers)
+    }
+
+    /// Выбрать накопленные ответы на конкретный request_id (внутренний канал
+    /// handle_search_reply → search_peers).
+    fn take_search_answers(&self, request_id: &str) -> Vec<(String, PeerRecord)> {
+        let mut g = self.search_answers.lock().unwrap();
+        match g.remove(request_id) {
+            Some(v) => v,
+            None => Vec::new(),
+        }
+    }
+
+    /// Принятый SearchRequest: проверить подпись/TTL, ответить локальными
+    /// кандидатами (с учётом cooldown на повторный ответ).
+    async fn handle_search_request(self: &Arc<Self>, req: SearchRequest) {
+        let topic = &self.cfg.tasks.forwarding.search_relay.topic;
+        if !topic.enabled {
+            return;
+        }
+        // Подпись автора запроса.
+        if !req.signature.is_empty() {
+            if let Some(vk) = extract_key_from_peer_id(&req.requester_peer_id) {
+                let body = wire::search_request_body(&req);
+                if crate::security::verify(&vk.to_bytes().to_vec(), &body, &req.signature).is_err()
+                {
+                    tracing::debug!("search: bad request signature from {}", req.requester_peer_id);
+                    return;
+                }
+            }
+        }
+        let ttl = *topic.request_ttl;
+        if req.issued_at > 0 && now_unix() - req.issued_at > ttl.as_secs() as i64 {
+            return; // протух
+        }
+        // Cooldown: не отвечать на тот же request_id чаще раза в период.
+        let cooldown = (*topic.answer_cooldown).max(Duration::from_secs(1));
+        {
+            let now = now_unix();
+            let mut g = self.answered.lock().unwrap();
+            if let Some(t) = g.get(&req.request_id) {
+                if now - *t < cooldown.as_secs() as i64 {
+                    return;
+                }
+            }
+            g.insert(req.request_id.clone(), now);
+            g.retain(|_, t| now - *t < 3600);
+        }
+        let max = if topic.max_answers <= 0 { 8 } else { topic.max_answers as usize };
+        let peers = self.local_candidates(&req.skills, max);
+        if peers.is_empty() {
+            return;
+        }
+        let issued = now_unix();
+        let rep = SearchReply {
+            request_id: req.request_id.clone(),
+            responder_peer_id: self.self_id().to_string(),
+            peers,
+            issued_at: issued,
+            signature_scheme: "ed25519-v1".into(),
+            signature: vec![],
+        };
+        let signed = SearchReply {
+            signature: self.identity.sign(&wire::search_reply_body(&rep)),
+            ..rep
+        };
+        if let Some(conn) = self.conn_for(&req.requester_peer_id) {
+            let msg = SearchMessage(SearchMessageKind::Reply(signed));
+            let _ = conn.send(&msg).await;
+        }
+    }
+
+    /// Принятый SearchReply: верификация подписи, передача ответов ожидающему
+    /// search_peers и пополнение таблицы соседей записями кандидатов.
+    fn handle_search_reply(&self, rep: SearchReply) {
+        // Ждём ли мы этот запрос?
+        let pending = self.pending_searches.lock().unwrap();
+        if !pending.contains_key(&rep.request_id) {
+            return; // дубликат/чужой
+        }
+        drop(pending);
+        if !rep.signature.is_empty() {
+            if let Some(vk) = extract_key_from_peer_id(&rep.responder_peer_id) {
+                let body = wire::search_reply_body(&rep);
+                if crate::security::verify(&vk.to_bytes().to_vec(), &body, &rep.signature).is_err()
+                {
+                    tracing::debug!("search: bad reply signature from {}", rep.responder_peer_id);
+                    return;
+                }
+            }
+        }
+        for p in &rep.peers {
+            if p.peer_id == self.self_id() {
+                continue;
+            }
+            // Кандидат из ответа — в таблицу соседей (неподключённая запись).
+            if self.table.get(&p.peer_id).is_none() {
+                let n = Neighbor {
+                    peer_id: p.peer_id.clone(),
+                    addrs: p.addrs.clone(),
+                    skills: p.skills.clone(),
+                    category: p
+                        .addrs
+                        .first()
+                        .and_then(|a| parse_addr(a))
+                        .map(|h| category_of(h.split(':').next().unwrap_or("")).to_string())
+                        .unwrap_or_default(),
+                    last_seen: p.seen_at,
+                    left: false,
+                    ..Default::default()
+                };
+                self.table.upsert(&n);
+            }
+            let mut g = self.search_answers.lock().unwrap();
+            g.entry(rep.request_id.clone()).or_default().push((p.peer_id.clone(), p.clone()));
+        }
+    }
+
+    // ---- skills sync (Go: internal/skills gossip round) ----------------------
+
+    /// Периодический рамен синхронизации дескрипторов со всеми соседями.
+    async fn skills_sync_round(self: &Arc<Self>) {
+        let reg = match &self.skills {
+            Some(r) => r.clone(),
+            None => return,
+        };
+        let disclose = self.cfg.capabilities.skill_exchange.disclose_to.as_str();
+        let peers: Vec<(String, Arc<Conn>)> = {
+            let g = self.conns.lock().unwrap();
+            g.values()
+                .filter_map(|c| c.peer_id.clone().map(|p| (p, c.clone())))
+                .collect()
+        };
+        for (pid, conn) in peers {
+            // disclose_to: trusted — только трастованные, known — известные, any — все.
+            let trust = self.table.trust_of(&pid);
+            let allowed = match disclose {
+                "trusted" => trust >= Trust::Trusted,
+                "any" => true,
+                _ => trust >= Trust::Known,
+            };
+            if !allowed {
+                continue;
+            }
+            let req = reg.build_request(&pid, false);
+            let env = crate::proto::RpcRequest(crate::proto::RpcRequestKind::SkillsSync(req));
+            if let Err(e) = conn.send(&env).await {
+                tracing::debug!("skills sync send to {pid}: {e}");
+                continue;
+            }
+        }
+    }
+
+    /// Обработка RPC-фрейма skills-sync: ответ на запрос / применение ответа.
+    async fn handle_skills_rpc(self: &Arc<Self>, cid: u64, req: crate::proto::SkillsSyncRequest) {
+        let reg = match &self.skills {
+            Some(r) => r.clone(),
+            None => return,
+        };
+        // Политика раскрытия та же, что в sync-round.
+        let trust = self
+            .conn_of(cid)
+            .and_then(|c| c.peer_id)
+            .map(|p| self.table.trust_of(&p))
+            .unwrap_or(Trust::Unknown);
+        let disclose = self.cfg.capabilities.skill_exchange.disclose_to.as_str();
+        let allowed = match disclose {
+            "trusted" => trust >= Trust::Trusted,
+            "any" => true,
+            _ => trust >= Trust::Known,
+        };
+        let resp = if allowed {
+            reg.build_response(&req)
+        } else {
+            crate::proto::SkillsSyncResponse {
+                reason: "disclosure policy".into(),
+                peer_id: self.self_id().to_string(),
+                ..Default::default()
+            }
+        };
+        if let Some(conn) = self.conn_of(cid) {
+            let env = crate::proto::RpcResponse(crate::proto::RpcResponseKind::SkillsSync(resp));
+            let _ = conn.send(&env).await;
+        }
+    }
+
+    /// Принятый ответ skills-sync: верификация и импорт дельты.
+    fn apply_skills_response(&self, resp: crate::proto::SkillsSyncResponse) {
+        let reg = match &self.skills {
+            Some(r) => r.clone(),
+            None => return,
+        };
+        match reg.apply_response(&resp) {
+            Ok(n) => {
+                if n > 0 {
+                    tracing::info!(imported = n, peer = %resp.peer_id, "skills_imported");
+                }
+            }
+            Err(e) => {
+                tracing::debug!("skills sync apply: {e}");
+                self.policy.add_suspicion(&resp.peer_id, 10);
+            }
+        }
+    }
+
+    // ---- scan (Go: admin/scan LAN+subnet sweep) ------------------------------
+
+    /// Разовое сканирование: прощупать bootstrap-адреса и известный LAN-диапазон
+    /// конфига; возвращает число новых подключений.
+    pub async fn run_scan(self: &Arc<Self>) -> Result<usize> {
+        let sc = &self.cfg.discovery.scan;
+        let mut dialed = 0usize;
+        let mut targets: Vec<String> = self.cfg.discovery.bootstrap.clone();
+        if sc.subnet_scan {
+            // Простейший sweep локальной /24 по порту слушания соседей.
+            let port = self
+                .cfg
+                .discovery
+                .bootstrap
+                .first()
+                .and_then(|b| parse_addr(b))
+                .and_then(|hp| hp.rsplit(':').next().map(|p| p.to_string()))
+                .unwrap_or_else(|| "4001".into());
+            if let Some(base) = local_subnet_prefix() {
+                for i in 1..=254u8 {
+                    targets.push(format!("{base}.{i}:{port}"));
+                    if targets.len() >= sc.max_candidates.max(1) as usize {
+                        break;
+                    }
+                }
+            }
+        }
+        let timeout = *sc.dial_timeout;
+        for t in targets {
+            let hp = match parse_addr(&t) {
+                Some(h) => h,
+                None => continue,
+            };
+            if self.has_conn_to_addr(&hp) {
+                continue;
+            }
+            let this = self.clone();
+            let fut = async move { this.dial_hp(&hp, &t).await };
+            match tokio::time::timeout(timeout, fut).await {
+                Ok(Ok(())) => dialed += 1,
+                Ok(Err(_)) => {}
+                Err(_) => {}
+            }
+            if !sc.enabled && dialed == 0 {
+                break; // явный вызов API всё равно делает свою работу
+            }
+        }
+        Ok(dialed)
+    }
+
+    fn has_conn_to_addr(&self, host_port: &str) -> bool {
+        let g = self.addrs.lock().unwrap();
+        g.values().flatten().any(|a| {
+            parse_addr(a).as_deref() == Some(host_port) || a == host_port
+        })
     }
 
     async fn dial_hp(self: &Arc<Self>, host_port: &str, orig: &str) -> Result<()> {
@@ -563,6 +1046,40 @@ impl Node {
             if !g.states.is_empty() {
                 self.absorb_gossip(g);
                 return true;
+            }
+        }
+        // Skills-sync RPC (Go: /zeptomesh/skillssync): дельта дескрипторов.
+        if let Ok(rpc) = crate::proto::RpcRequest::decode(payload) {
+            if let crate::proto::RpcRequestKind::SkillsSync(req) = rpc.0 {
+                let this = self.clone();
+                tokio::spawn(async move { this.handle_skills_rpc(cid, req).await });
+                return true;
+            }
+        }
+        if let Ok(rpc) = crate::proto::RpcResponse::decode(payload) {
+            if let crate::proto::RpcResponseKind::SkillsSync(resp) = rpc.0 {
+                if !resp.peer_id.is_empty() {
+                    self.apply_skills_response(resp);
+                    return true;
+                }
+            }
+        }
+        // Search-relay: SearchMessage{Request|Reply} (Go: /zeptomesh/skillsearch/0.1.0).
+        if let Ok(sm) = SearchMessage::decode(payload) {
+            match sm.0 {
+                SearchMessageKind::Request(req) => {
+                    if !req.request_id.is_empty() {
+                        let this = self.clone();
+                        tokio::spawn(async move { this.handle_search_request(req).await });
+                        return true;
+                    }
+                }
+                SearchMessageKind::Reply(rep) => {
+                    if !rep.request_id.is_empty() {
+                        self.handle_search_reply(rep);
+                        return true;
+                    }
+                }
             }
         }
         tracing::debug!("node: unrecognized frame of {} bytes dropped", payload.len());

@@ -20,6 +20,7 @@
 //! | `node`        | `internal/node`    | Сборка узла                                 |
 
 pub mod api;
+pub mod chat;
 pub mod config;
 pub mod multiformat;
 pub mod node;
@@ -28,7 +29,9 @@ pub mod picoclaw;
 pub mod proto;
 pub mod routing;
 pub mod security;
+pub mod skills;
 pub mod storage;
 pub mod tasks;
+pub mod triggers;
 pub mod version;
 pub mod wire;

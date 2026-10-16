@@ -754,7 +754,7 @@ impl Message for ResultAck {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SkillDescriptor {
     pub name: String,
     pub version: i64,

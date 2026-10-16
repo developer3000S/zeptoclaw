@@ -363,6 +363,10 @@ pub struct PicoClawConfig {
     pub prompt_template: String,
     pub http: PicoClawHTTPConfig,
     pub stub: StubConfig,
+    /// Локальный Ollama-эндпоинт для brain-пула (Go: picoclaw.local_url).
+    pub local_url: String,
+    /// Явные внешние эндпоинты brain-пула (Go: picoclaw.backends).
+    pub backends: Vec<crate::picoclaw::BackendConfig>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -643,6 +647,8 @@ impl Config {
                 prompt_template: String::new(),
                 http: Default::default(),
                 stub: StubConfig { latency: dur("50ms"), echo: true },
+                local_url: "http://127.0.0.1:11434".into(),
+                backends: vec![],
             },
             security: SecurityConfig {
                 trust_mode: "open".into(),
