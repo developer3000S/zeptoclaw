@@ -415,7 +415,9 @@ pub struct Policy {
     min_trust_for_tasks: Trust,
     allow: std::collections::HashMap<String, bool>,
     deny: std::collections::HashMap<String, bool>,
-    observed: std::collections::HashMap<String, Trust>,
+    /// Наблюдения handshake; Arc<Mutex> — Clone даёт разделяемый снимок (как
+    /// shared map в Go), а не копию карты (копия теряла бы обучения).
+    observed: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Trust>>>,
     defense: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, PeerDefenseState>>>,
 }
 
@@ -474,18 +476,30 @@ impl Policy {
 
     /// Наблюдение handshake: никогда не понижать молча одним наблюдением.
     pub fn observe(&mut self, pid: &str, t: Trust) {
-        if let Some(cur) = self.observed.get(pid) {
+        let mut g = self.observed.lock().unwrap();
+        if let Some(cur) = g.get(pid) {
             if *cur <= t {
                 return;
             }
         }
-        self.observed.insert(pid.to_string(), t);
+        g.insert(pid.to_string(), t);
     }
 
-    /// Thread-safe версия observe для Arc<Policy> (используется узлом).
-    pub fn observe_connected(&self, _pid: &str, _t: Trust) {
-        // observed-карта требует &mut; в текущей сборке узла handshake-траст
-        // учится через таблицу соседей. TODO(port): завести Mutex на observed.
+    /// Thread-safe версия observe для Arc<Policy> (используется узлом):
+    /// handshake-наблюдение повышает траст, никогда не понижая молча.
+    pub fn observe_connected(&self, pid: &str, t: Trust) {
+        let mut g = self.observed.lock().unwrap();
+        if let Some(cur) = g.get(pid) {
+            if *cur <= t {
+                return;
+            }
+        }
+        g.insert(pid.to_string(), t);
+    }
+
+    /// Снимок наблюдаемого траста (для GET /api/v1/config и отладки).
+    pub fn observed_snapshot(&self) -> std::collections::HashMap<String, Trust> {
+        self.observed.lock().unwrap().clone()
     }
 
     /// Эффективный уровень доверия.
@@ -494,7 +508,7 @@ impl Policy {
             return Trust::Blocked;
         }
         let listed = self.allow.contains_key(pid);
-        let best = self.observed.get(pid).copied();
+        let best = self.observed.lock().unwrap().get(pid).copied();
         if listed {
             if self.mode == Mode::Private {
                 return Trust::Trusted;
@@ -513,6 +527,12 @@ impl Policy {
             return Trust::Blocked;
         }
         Trust::Untrusted
+    }
+
+    /// LevelOf — то же, что trust_of, под именем Go-версии (используется
+    /// search-relay для disclose_to-политики).
+    pub fn level_of(&self, pid: &str) -> Trust {
+        self.trust_of(pid)
     }
 
     pub fn allow_connection(&self, pid: &str) -> bool {

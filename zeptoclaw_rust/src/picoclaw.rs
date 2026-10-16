@@ -407,6 +407,11 @@ impl BackendPool {
         self.backends.lock().unwrap().clone()
     }
 
+    /// Общий HTTP-клиент пула (для chat-ручек поверх тех же эндпоинтов).
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
     /// Go: Usable — ответившие на последнем зонде бэкенды со списком моделей.
     pub fn usable(&self) -> Vec<Backend> {
         self.backends
