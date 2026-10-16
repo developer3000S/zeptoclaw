@@ -29,6 +29,8 @@ Mesh», версия 0.1).
 ## Содержание
 
 - [Быстрый старт](#быстрый-старт)
+- [Установка нод](#установка-нод)
+- [Установка UI](#установка-ui)
 - [Ключевые свойства](#ключевые-свойства)
 - [Архитектура](#архитектура)
 - [Структура репозитория](#структура-репозитория)
@@ -76,11 +78,73 @@ ZEPTOMESH_DATA=./n1 ZEPTOMESH_INDEX=1 ZEPTOMESH_MESH_PORT=4002 \
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md); эксплуатация и восстановление —
 [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
-> Команды Go-эпохи (`install.sh`, `scan`, `brain-scan`, `candidates`,
-> `backends`, `promote`, `friend-promote`, `share-keys`, `skills*`,
-> `triggers*`, `rotate`, `revoke`) в Rust-порту ещё не реализованы —
-> актуальный список команд и план переноса:
-> [zeptoclaw_rust/RUST_PORT.md](zeptoclaw_rust/RUST_PORT.md).
+> Команды Go-эпохи (`scan`, `brain-scan`, `candidates`, `backends`,
+> `promote`, `friend-promote`, `share-keys`, `skills*`, `triggers*`,
+> `rotate`, `revoke`) в Rust-порту ещё не реализованы — актуальный список
+> команд и план переноса: [zeptoclaw_rust/RUST_PORT.md](zeptoclaw_rust/RUST_PORT.md).
+
+---
+
+## Установка нод
+
+`install-nodes.sh` разворачивает **1..N нод** на одном сервере в двух режимах:
+
+- **`--mode local`** — процессы через systemd user-units (нужен `cargo` +
+  Rust ≥ 1.77, бинарь собирается из исходников).
+- **`--mode docker`** — Docker-контейнеры (`docker compose`). Старые образы
+  перед переустановкой удаляются, занятые порты автоматически смещаются на
+  свободные.
+
+```bash
+# Установить 2 ноды в Docker (вариант по умолчанию)
+./install-nodes.sh --nodes 2 --mode docker
+
+# Установить 3 ноды с закрытой сетью (PSK генерируется автоматически)
+./install-nodes.sh --nodes 3 --psk "/1/..." --mode docker
+
+# Одна нода напрямую (systemd)
+./install-nodes.sh --nodes 1 --mode local
+
+# С реальным инференсом через локальный Ollama
+./install-nodes.sh --nodes 2 --pico-mode ollama --ollama-url http://127.0.0.1:11434
+
+# Справка по всем опциям
+./install-nodes.sh --help
+```
+
+Раскладка портов для N нод (при совпадении с занятыми — смещается вверх): mesh
+`4001+i`, admin-API `14001+i`, Prometheus `24001+i`. При установке в Docker
+скрипт: удаляет старые образы `zeptomesh-node`, проверяет порты на занятость
+(локальные сокеты + опубликованные порты контейнеров) и выбирает альтернативы,
+поднимает первую ноду-якорь и подставляет её адрес как bootstrap для остальных.
+Данные нод — в `--data-dir` (по умолчанию `./zeptomesh-data`, в VCS не
+попадает). `--uninstall` полностью останавливает и удаляет стек.
+
+## Установка UI
+
+`install-ui.sh` разворачивает веб-дашборд для наблюдения за сетью. UI
+самостоятельно опрашивает admin-API нод и строит сводный граф сети (в т.ч.
+обнаруживает уже запущенные `zepto-*` контейнеры/локальные ноды на типовых
+портах). Режимы и требования — как у нод.
+
+```bash
+# Установить UI в Docker, ноды обнаружить автоматически
+./install-ui.sh --mode docker
+
+# Со своими нодами и токеном
+./install-ui.sh --nodes "http://127.0.0.1:14001,http://127.0.0.1:14002" \
+    --api-token $ZEPTOMESH_API_TOKEN
+
+# В локальном режиме на другом порту
+./install-ui.sh --mode local --port 28091 --nodes "http://127.0.0.1:14001"
+
+# Удалить UI
+./install-ui.sh --uninstall
+```
+
+UI по умолчанию доступен на `http://127.0.0.1:28090` (`--port` — сменить,
+занятый порт заменяется свободным). Полное описание переменных окружения и
+устройства UI — [docs/UI.md](docs/UI.md).
 
 ---
 
@@ -203,6 +267,8 @@ zeptoclaw/
 ├── docs/                       # ТЗ · ARCHITECTURE · PROTOCOLS · PICOCLAW-INTEGRATION ·
 │                               # DEPLOYMENT · RUNBOOK · STATUS · LOADTEST · TESTREPORT · UI
 ├── .env.example                # переменные LLM/каналов для PicoClaw
+├── install-nodes.sh            # установка 1..N нод mesh (local | docker)
+├── install-ui.sh               # установка UI-дашборда (local | docker)
 ├── ToDo.md / UPDATE.md         # план и журнал обслуживания
 ├── LICENSE                     # Apache License 2.0 (полный текст)
 └── .gitignore                  # target/, zeptomesh-data/, *.log, node_modules/ и пр.
@@ -211,8 +277,9 @@ zeptoclaw/
 Контракт протокола (`api/proto/zeptomesh/v1/mesh.proto`) описан в
 [docs/PROTOCOLS.md](docs/PROTOCOLS.md); protobuf-кодек Rust-порта реализует
 его напрямую (внешний `protoc` не требуется). Установочная инфраструктура
-Go-эпохи (`install.sh`, `Makefile`, `deploy/`, CI) удалена из дерева — см.
-журнал в [UPDATE.md](UPDATE.md).
+Go-эпохи (`Makefile`, `deploy/`, CI) удалена из дерева; вместо неё — скрипты
+[`install-nodes.sh`](install-nodes.sh) (ноды) и [`install-ui.sh`](install-ui.sh)
+(UI-дашборд) — см. [Установка нод](#установка-нод) и [Установка UI](#установка-ui).
 
 
 ---
@@ -450,7 +517,7 @@ security:
   поля, канонические энкодеры, схемы подписи, ключи gossip/DHT.
 - [PICOCLAW-INTEGRATION.md](docs/PICOCLAW-INTEGRATION.md) — проверенные интерфейсы
   PicoClaw, режимы адаптера, изоляция, таймауты.
-- [DEPLOYMENT.md](docs/DEPLOYMENT.md) — развёртывание (LAN/WAN, PSK, bootstrap). Справочник Go-эпохи: `install.sh`/Docker-файлы выведены из дерева.
+- [DEPLOYMENT.md](docs/DEPLOYMENT.md) — развёртывание (LAN/WAN, PSK, bootstrap). Установка готовыми скриптами: [`install-nodes.sh`](install-nodes.sh) (ноды) и [`install-ui.sh`](install-ui.sh) (UI-дашборд).
 - [RUNBOOK.md](docs/RUNBOOK.md) — эксплуатация (systemd/Docker, hot-reload, `leave`, метрики, восстановление). Справочник Go-эпохи; часть команд (`rotate`, `revoke`, hot-reload) в Rust-порту ещё не реализована.
   метрики, восстановление, бэкап ключей/БД).
 - [STATUS.md](docs/STATUS.md) — статус реализации ТЗ.
