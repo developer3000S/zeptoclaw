@@ -779,6 +779,7 @@ impl Manager {
     }
 
     /// Последний известный envelope задачи (для агрегатов/relay-доставки).
+    #[allow(dead_code)]
     fn envelope_of(&self, task_id: &str) -> Result<TaskEnvelope> {
         if let Some(e) = self.envelopes.lock().unwrap().get(task_id) {
             return Ok(e.clone());
@@ -786,6 +787,7 @@ impl Manager {
         bail!("tasks: unknown envelope {task_id}")
     }
 
+    #[allow(dead_code)]
     fn remember_envelope(&self, env: &TaskEnvelope) {
         let mut ins = self.instructions.lock().unwrap();
         if !env.payload().instruction.is_empty() {
@@ -1196,9 +1198,11 @@ impl Manager {
             None => Ok(()),
         }
     }
+    #[allow(dead_code)]
     fn deliver_ref(&self) -> Option<Deliver> {
         self.deliver.lock().unwrap().clone()
     }
+    #[allow(dead_code)]
     fn cancel_ref(&self) -> Option<CancelPeer> {
         self.cancel_peer.lock().unwrap().clone()
     }

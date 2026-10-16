@@ -4,7 +4,7 @@
 //! комбинация значений не сдвигала байты другого поля. Байт-в-байт
 //! совместимо с Go-реализацией: дайджесты и подписи взаимно проверяемы.
 
-use crate::proto::{Capabilities, KeyRebind, PeerRecord, SearchReply, SearchRequest, SkillDescriptor, SkillsSyncResponse, TaskAck, TaskEnvelope, TaskResult};
+use crate::proto::{Capabilities, KeyRebind, SkillDescriptor, SkillsSyncResponse, TaskAck, TaskEnvelope, TaskResult};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 

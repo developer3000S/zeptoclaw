@@ -119,7 +119,9 @@ pub struct Node {
 }
 
 struct PendingSearch {
+    #[allow(dead_code)]
     requester: String, // наш peer_id, от чьего имени просим
+    #[allow(dead_code)]
     skills: Vec<String>,
     deadline: std::time::Instant,
 }
@@ -831,10 +833,10 @@ impl Node {
         // Зарегистрировать ожидатель ответа ДО отправки (отменяя предыдущий на этом конне).
         let rx = {
             let mut g = self.pending_skill_rpc.lock().unwrap();
-            let chan = oneshot::channel();
-            let prev = g.insert(cid, chan);
-            if let Some((_, old_tx)) = prev {
-                drop(old_tx); // отменить предыдущий ожидающий вызов на этом конне
+            let (tx, rx) = oneshot::channel();
+            let prev = g.insert(cid, (tx, Some(rx)));
+            if let Some((_, Some(old_rx))) = prev {
+                let _ = old_rx; // отменить предыдущий ожидающий вызов на этом конне
             }
             g.get_mut(&cid).unwrap().1.take()
         };
@@ -949,7 +951,7 @@ impl Node {
                         .and_then(|hp| hp.rsplit(':').next().map(|p| p.to_string()))
                 })
                 .unwrap_or_else(|| "4001".into());
-            for base in local_subnet_prefixes() {
+            if let Some(base) = local_subnet_prefix() {
                 for i in 1..=254u8 {
                     targets.push(format!("{base}.{i}:{port}"));
                     if targets.len() >= sc.max_candidates.max(1) as usize + 254 {
@@ -980,8 +982,8 @@ impl Node {
                 false
             });
         }
-        while let Some(ok) = set.join_next().await.flatten() {
-            if ok {
+        while let Some(result) = set.join_next().await {
+            if result.unwrap_or(false) {
                 dialed += 1;
             }
         }
@@ -1451,8 +1453,8 @@ impl Node {
         // Разрешённые к горячему обновлению поля совпадают по структуре —
         // применяем conservative subset: interval'ы gossip/discovery/scan.
         let mut cur = self.cfg.as_ref().clone();
-        cur.discovery = fresh.discovery;
-        cur.discovery.gossip = fresh.discovery.gossip;
+        cur.discovery = fresh.discovery.clone();
+        cur.discovery.gossip = fresh.discovery.gossip.clone();
         tracing::info!(path = %path, "config_reload_subset_applied");
         // NOTE: Arc<Config> неизменяем в рантайме; реальное применение требует
         // рестарта (в Go аналогично перезапускают процесс). Возвращаем Ok с

@@ -50,6 +50,10 @@ pub struct Neighbor {
     pub skills_version: i64,
     /// Пир объявил graceful departure.
     pub left: bool,
+    /// Объявленные модели (для candidate-promotion).
+    pub models: Vec<String>,
+    /// Имя узла (из Capabilities).
+    pub node_name: String,
 }
 
 impl Neighbor {
@@ -321,6 +325,11 @@ impl Table {
         self.len() == 0
     }
 
+    /// Проверка наличия пира в таблице.
+    pub fn contains(&self, pid: &str) -> bool {
+        self.inner.lock().unwrap().neighbors.contains_key(pid)
+    }
+
     /// Снимок всех соседей: connected первыми, затем newest-last-seen (как Go).
     pub fn list(&self) -> Vec<Neighbor> {
         let mut out: Vec<Neighbor> = self
@@ -447,6 +456,8 @@ impl Table {
                     connected: false,
                     skills_version: r.skills_version,
                     left: false,
+                    models: vec![],
+                    node_name: String::new(),
                 },
             );
         }

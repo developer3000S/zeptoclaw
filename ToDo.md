@@ -50,3 +50,20 @@
    - Обновлен docs/STATUS.md с учетом реализованных модулей
    - Изменения закоммичены
    - Публикация выполнена на GitHub
+
+11. **Объединить ветку rewrite-the-project-in-rust с main, исправить ошибки компиляции Rust** — ✅ готово
+    - Ветка `rewrite-the-project-in-rust-880e5` объединена с `main` (fast-forward merge)
+    - Исправлены 9 ошибок компиляции:
+      - `local_subnet_prefixes` → `local_subnet_prefix` (опечатка)
+      - Исправлена работа с `JoinSet::join_next()` (flatten на Option)
+      - Исправлен тип `oneshot::channel` для `pending_skill_rpc`
+      - Исправлено перемещение `fresh.discovery.gossip`
+      - Добавлен метод `contains()` в `Table`
+      - Определена функция `hex_abbrev()` в api.rs
+      - Добавлены поля `models` и `node_name` в `Neighbor`
+      - Добавлены недостающие поля в инициализатор `Neighbor::restore()`
+    - Исправлены предупреждения:
+      - `#[allow(dead_code)]` для неиспользуемых методов и полей
+      - `if let` вместо `for` для Option
+      - Удалены неиспользуемые импорты
+    - Код компилируется чисто (0 errors, 0 warnings)

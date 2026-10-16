@@ -87,10 +87,10 @@ impl Schedule {
         let month = parse_field(fields[3], 1, 12)? as u16;
         // dow: 7 == 0 (Sunday)
         let dow_mask = parse_field(fields[4], 0, 7)?;
-        // Нормализация: значение 7 (воскресенье) → бит 0.
-        let mut dow = ((dow_mask >> 1) & 0x3F) as u8;
-        if dow_mask & (1 | 128) != 0 {
-            dow |= 1 << 0;
+        // Нормализация: биты 0-6 напрямую. Бит 7 (альтернативное воскресенье) → бит 0.
+        let mut dow = dow_mask as u8;
+        if dow_mask & 128 != 0 {
+            dow = (dow & 0x7F) | 1; // убрать бит 7, поставить бит 0
         }
         Ok(Schedule { minute, hour, dom, month, dow })
     }

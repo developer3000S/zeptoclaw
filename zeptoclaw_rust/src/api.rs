@@ -28,6 +28,16 @@ use crate::tasks::{result_json, SubmitRequest, SubtaskSpec};
 
 const MAX_BODY: usize = 8 << 20; // 8 MiB (Go: limitBody)
 
+/// Сокращённый hex-дайджест (8 символов + "…") для отображения.
+/// Соответствует Go-функции `shortHex` / `hexShort` из ui/.
+fn hex_abbrev(s: &str) -> String {
+    if s.len() <= 8 {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..8])
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Роли и токены (Go: config.APIRole / resolveTokens)
 // ---------------------------------------------------------------------------
