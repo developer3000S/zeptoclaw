@@ -1,28 +1,28 @@
 # ZeptoClaw Agent Mesh (`zeptomesh`)
 
-[![CI](https://github.com/developer3000S/zeptoclaw/actions/workflows/ci.yml/badge.svg)](https://github.com/developer3000S/zeptoclaw/actions/workflows/ci.yml)
-
 Полностью децентрализованная P2P-сеть автономных AI-агентов на базе
 [PicoClaw](https://github.com/sipeed/picoclaw). Узлы образуют сеть без
 обязательного центрального координатора и без общей базы данных: задача может
 поступить на любой узел, быть выполнена локально или рекурсивно делегирована
 соседям, а результат возвращается инициатору по пройденному маршруту.
 
-Реализовано по техническому заданию [`ТЗ.md`](ТЗ.md) («PicoClaw Agent Mesh»,
-версия 0.1).
+Реализовано по техническому заданию [`docs/ТЗ.md`](docs/ТЗ.md) («PicoClaw Agent
+Mesh», версия 0.1).
 
-> **Статус: рабочий демон.** Сетевой стек, обнаружение, маршрутизация, задачи,
-> административный API, CLI, тесты, `install.sh` (локально/Docker, N
-> экземпляров, автостарт) — написаны, компилируются и проверяются тестами.
-> Что из пунктов ТЗ сделано частично или не сделано — честный и актуальный
-> отчёт: [docs/STATUS.md](docs/STATUS.md).
-
-> **Rust-порт (`zeptoclaw_rust/`).** Ведётся параллельный порт демона на Rust:
-> crate `zeptomesh` + бинарь `zeptomesh-node`. Протокольный слой (protobuf,
-> wire-энкодеры), идентичность Ed25519, конфигурация, p2p-framing, хранилище,
-> маршрутизация, менеджер задач, PicoClaw-адаптеры, HTTP admin-API и CLI —
-> компилируются, тесты зелёные. Состав, статус и список непокрытых пакетов —
-> в [zeptoclaw_rust/RUST_PORT.md](zeptoclaw_rust/RUST_PORT.md).
+> **Основная реализация — Rust (`zeptoclaw_rust/`).** Crate `zeptomesh` +
+> бинарь `zeptomesh-node`: протокольный слой (ручной protobuf-кодек,
+> канонические wire-энкодеры), идентичность Ed25519, multiformat/CID/PeerID,
+> конфигурация, p2p-framing, хранилище, маршрутизация, менеджер задач,
+> PicoClaw-адаптеры (stub/cli/ollama/ws), HTTP admin-API и CLI — компилируются,
+> тесты зелёные. Состав, статус переноса и список непокрытых пакетов —
+> [zeptoclaw_rust/RUST_PORT.md](zeptoclaw_rust/RUST_PORT.md).
+>
+> **Go-референс удалён из дерева.** Пакеты `internal/*`, `cmd/`, `gen/`,
+> `install.sh`, `Makefile`, CI и каталог `.github/` выведены из репозитория
+> после завершения порта; Go-описания в `docs/` сохранены как спецификация
+> протокола и архитектуры. Статус реализации ТЗ Go-версией —
+> [docs/STATUS.md](docs/STATUS.md); покрытие Rust-порта — в таблице
+> `RUST_PORT.md`.
 
 ---
 
@@ -45,79 +45,39 @@
 ## Быстрый старт
 
 ```bash
-# Вариант A — установщик: локально (systemd, автостарт) или в Docker, N узлов
-./install.sh install --mode local --nodes 3      # sudo не обязателен: user-юниты
-./install.sh install --mode docker --nodes 3
-./install.sh status
-# Повторный запуск поверх существующего стека сохраняет прежний --pico-mode
-# (например ollama), если он не задан явно — режим не сбрасывается на stub.
+# Сборка и тесты Rust-демона
+cd zeptoclaw_rust
+cargo build --release              # бинарь target/release/zeptomesh-node
+cargo test                         # юнит-тесты + сквозной smoke_e2e
 
-# Вариант B — из исходников, два узла на одной машине
-
-export PATH=$PATH:/usr/local/go/bin
-go build -trimpath -o bin/ ./cmd/zeptomesh-node
-bin/zeptomesh-node genkey --out ./n0/keys/peer.key   # и то же для ./n1
-ZEPTOMESH_DATA=./n0 ZEPTOMESH_INDEX=0 bin/zeptomesh-node run -config configs/node.yaml &
+# Два узла на одной машине (конфиг переиспользуется из корня репозитория)
+./target/release/zeptomesh-node genkey --out ./n0/keys/peer.key --print-id
+./target/release/zeptomesh-node genkey --out ./n1/keys/peer.key --print-id
+ZEPTOMESH_DATA=./n0 ZEPTOMESH_INDEX=0 \
+  ./target/release/zeptomesh-node run -c ../configs/node.yaml &
 ZEPTOMESH_DATA=./n1 ZEPTOMESH_INDEX=1 ZEPTOMESH_MESH_PORT=4002 \
-  ZEPTOMESH_API_PORT=8082 ZEPTOMESH_PROM_LISTEN=127.0.0.1:9465 \
-  bin/zeptomesh-node run -config configs/node.yaml &
+  ZEPTOMESH_API_PORT=8082 \
+  ./target/release/zeptomesh-node run -c ../configs/node.yaml &
 
-# Проверка
-bin/zeptomesh-node status -addr http://127.0.0.1:8081
-bin/zeptomesh-node peers  -addr http://127.0.0.1:8081
-bin/zeptomesh-node submit -addr http://127.0.0.1:8081 -i "hello" -w
-# Если узел запущен с токеном админ-API (ZEPTOMESH_API_TOKEN в его окружении),
-# CLI должен знать имя env-переменной с ним — добавьте -token-env:
-# ZEPTOMESH_API_TOKEN=... bin/zeptomesh-node status -addr http://127.0.0.1:8081 \
-#   -token-env ZEPTOMESH_API_TOKEN
-# (или вообще без -addr: ZEPTOMESH_CONFIG=<путь к node.yaml> — CLI возьмёт
-#  адрес и имя токена из конфига)
-
-# Активный поиск других агентов: локальный хост + внешние источники
-bin/zeptomesh-node scan -addr http://127.0.0.1:8081
-# ...с перебором локальной подсети и ограничением числа кандидатов
-bin/zeptomesh-node scan -addr http://127.0.0.1:8081 -scope subnet -scope wan -max-candidates 32
-bin/zeptomesh-node scan -addr http://127.0.0.1:8081 -last   # отчёт прошлого скана
-
-# Brain: поиск LLM-эндпоинтов и автономная верификация (см. секцию brain ниже)
-bin/zeptomesh-node brain-scan   # опросить поисковики (Shodan/Censys/…) об открытых Ollama
-bin/zeptomesh-node candidates   # каталог найденных эндпоинтов (инвентарь)
-bin/zeptomesh-node backends     # пул проверенных бэкендов, которыми узел думает
-bin/zeptomesh-node promote -id <candidate_id>   # проверить эндпоинт зондом и принять
-# Передать найденные эндпоинты и поисковые ключи другу (админ-API друга):
-bin/zeptomesh-node friend-promote -friend <name> -id <candidate_id>
-bin/zeptomesh-node share-keys   # отправить другу ключи из brain.keys.share_envs
-# Если узел запущен с токеном админ-API (ZEPTOMESH_API_TOKEN в его окружении),
-# CLI должен знать имя env-переменной с ним — добавьте -token-env:
-# ZEPTOMESH_API_TOKEN=... bin/zeptomesh-node candidates -addr http://127.0.0.1:8081 \
-#   -token-env ZEPTOMESH_API_TOKEN
-# (или вообще без -addr: ZEPTOMESH_CONFIG=<путь к node.yaml> — CLI возьмёт
-#  адрес и имя токена из конфига)
+# Проверка (CLI того же бинаря)
+./target/release/zeptomesh-node status -addr http://127.0.0.1:8081
+./target/release/zeptomesh-node peers  -addr http://127.0.0.1:8081
+./target/release/zeptomesh-node submit -addr http://127.0.0.1:8081 -i "echo hello" -w
+# Если узел запущен с токеном админ-API — CLI должен знать имя env-переменной:
+#   ZEPTOMESH_API_TOKEN=... zeptomesh-node status -addr ... -token-env ZEPTOMESH_API_TOKEN
+# (или без -addr: ZEPTOMESH_CONFIG=<путь к node.yaml> — адрес и токен возьмутся из конфига)
 ```
 
-Локальный Ollama добавляется в пул как бэкенд `local` и верифицируется тем же
-зондом (`GET /api/tags`, fallback на OpenAI-совместимый `/v1/models`).
-Например, ответ `backends` при запущенном локальном Ollama:
+Внимание: `zeptomesh-data/` и ключи — runtime-данные, в VCS не попадают
+(см. `.gitignore`). Полные инструкции по развёртыванию —
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md); эксплуатация и восстановление —
+[docs/RUNBOOK.md](docs/RUNBOOK.md).
 
-```json
-{
-  "backends": [{
-    "id": "local", "kind": "local",
-    "base_url": "http://127.0.0.1:11434",
-    "verified": true, "reachable": true, "latency_ms": 25,
-    "models": ["qwen2.5:1.5b", "qwen3.5:0.8b", "..."]
-  }],
-  "count": 1, "enabled": true, "verified": 1
-}
-```
-
-Найденные эндпоинты также расходятся по mesh через gossip-топик
-`/zeptomesh/brain-catalog/0.1` — никакой центральной сверки, каждый узел
-верифицирует зондом сам.
-
-Полные инструкции по развёртыванию (LAN/WAN-профили, PSK, bootstrap,
-несколько экземпляров, firewall) — [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md);
-эксплуатация и восстановление — [docs/RUNBOOK.md](docs/RUNBOOK.md).
+> Команды Go-эпохи (`install.sh`, `scan`, `brain-scan`, `candidates`,
+> `backends`, `promote`, `friend-promote`, `share-keys`, `skills*`,
+> `triggers*`, `rotate`, `revoke`) в Rust-порту ещё не реализованы —
+> актуальный список команд и план переноса:
+> [zeptoclaw_rust/RUST_PORT.md](zeptoclaw_rust/RUST_PORT.md).
 
 ---
 
@@ -125,9 +85,9 @@ bin/zeptomesh-node share-keys   # отправить другу ключи из 
 
 | Область | Реализация |
 |---|---|
-| Язык сетевого слоя | Go 1.26 |
+| Язык демона | Rust (основная реализация; исходный Go-демон выведен из дерева)
 | Идентификация узла | Ed25519, самоаттестуемый libp2p `Peer ID` |
-| Транспорт | QUIC (основной) + TCP (резервный) |
+| Транспорт | Rust-порт: TCP (length-prefixed кадры); Go-референс: QUIC + TCP, Noise, relay v2 |
 | Шифрование | Noise (TCP-канал); TLS 1.3 внутри QUIC; сквозное и для реле |
 | Мультиплексирование | Yamux (поверх TCP) |
 | NAT-преодоление | Circuit relay v2: клиент реле + опциональное служение реле с лимитами |
@@ -139,7 +99,7 @@ bin/zeptomesh-node share-keys   # отправить другу ключи из 
 | Поиск исполнителя | Search-relay: расширенный опрос соседей с `full_refresh` навыков |
 | Активный скан окружения | `scan` (`POST /api/v1/admin/scan`): агент сам прощупывает локальный хост, LAN (вкл. перебор подсети) и внешние источники (DHT, bootstrap, peer-exchange, search topic), находит других агентов и устанавливает с ними связь (dial + проверка подписанных capabilities → сосед в таблице); опционально медленный фоновый скан по `discovery.scan` |
 | Brain (поиск LLM) | `brain` в конфиге: каталог открытых Ollama-эндпоинтов из поисковиков (Censys/Shodan/GreyNoise/ZoomEye/CriminalIP/Netlas) + пул проверенных бэкендов; **верификация автономная** — зонд `GET /api/tags`, ответивший эндпоинт получает `verified` и трафик, центрального подтверждения нет (FOA §4.4.4 игнорируется по директиве). Обмен находками и API-ключами поиска с агентами-друзьями через их admin API и общий gossip-топик |
-| Хранилище | BadgerDB v4 (node-local) + content-addressed артефакты на диске |
+| Хранилище | Rust-порт: append-only JSONL + content-addressed артефакты sha256; Go-референс: BadgerDB v4 |
 | Делегирование | TTL, маршрут без петель, дедупликация, лимиты фан-аута и параллелизма, rate limiting |
 | Декомпозиция | план подзадач (`subtasks` / `--subtask`) → дочерние конверты → один подписанный итог: секции в порядке плана, дедуп артефактов по hash, ретрай retryable-ребёна |
 | Ограничения исполнителя | `max_parallel_tasks_per_peer`, порог свободного места (`statfs`), квота workspace при сборе артефактов, `RLIMIT_AS` + отдельная группа процессов для дочернего PicoClaw |
@@ -224,162 +184,83 @@ bin/zeptomesh-node share-keys   # отправить другу ключи из 
 
 ```text
 zeptoclaw/
-├── api/proto/zeptomesh/v1/
-│   └── mesh.proto              # контракт: TaskEnvelope, TaskResult, Capabilities, RPC
-├── gen/zeptomesh/v1/
-│   └── mesh.pb.go              # генерируется (protoc-gen-go), в VCS для `go build` без protoc
-├── cmd/zeptomesh-node/
-│   ├── main.go                 # демон: run | version | genkey | psk | reload | leave |
-│   │                           #       rotate | revoke
-│   └── client.go               # CLI админ-API: status|peers|capabilities|submit (--subtask)|
-│                               #                   tasks|get|cancel|resubmit|reload|leave|
-│                               #                   skills|skill-set|skill-rm|skills-sync|
-│                               #                   triggers|trigger-add|trigger-rm|
-│                               #                   rebinds|rotate|revoke|scan|
-│                               #                   candidates|backends|brain-scan|promote|
-│                               #                   friend-promote|share-keys (brain)
-├── internal/
-│   ├── api/                    # HTTP/JSON админ-API (+ bearer-токен, /metrics)
-│   ├── config/                 # YAML-конфиг, дефолты, валидация, ${VAR:-default}   + тесты
-│   ├── discovery/              # local.go, mdns.go, bootstrap.go, dht.go, gossip.go,
-│   │                           #        searchtopic.go, scan.go (активный скан окружения)
-│   ├── logging/                # slog + мост для stdlib-логера libp2p
-│   ├── metrics/                # Prometheus (приватный registry) + выделенный слушатель
-│   ├── node/                   # сборка компонентов узла, композитный skill-источник
-│   ├── p2p/                    # host.go (libp2p+relay), service.go, framing.go, gater.go + тесты
-│   ├── picoclaw/               # adapter.go, cli.go, ws.go, stub.go, factory.go, limits_unix.go
-│   ├── routing/                # table.go: соседи, скоринг, Select()
-│   ├── security/               # identity.go, signing.go, trust.go, rebind.go, audit.go + тесты
-│   ├── skills/                 # registry.go: версионированные дескрипторы навыков,
-│   │                           #        обмен с соседями, дельта-синхронизация + тесты
-│   ├── simulator/              # модель mesh'а для нагрузочного теста ТЗ 17.3
-│   │                           #        (100/500/1000 узлов, `make test-load`)
-│   ├── storage/                # storage.go: BadgerDB + артефакты sha256
-│   ├── tasks/                  # manager.go (исполнение/делегирование/search-relay),
-│   │                           # decomposition.go (план/агрегация), task.go, disk_unix.go + тесты
-│   ├── telemetry/              # установка SDK OpenTelemetry + OTLP-экспортёр (ТЗ 14.3)
-│   ├── tracing/                # спаны конвейера задач; контекст едет в подписанных labels
-│   ├── triggers/               # cron.go, triggers.go, scheduler.go: плановые задачи
-│   │                           # (ТЗ 6.6.1 п.4) + тесты
-│   ├── version/                # сборочный штамп
-│   └── wire/                   # канонические энкодеры (общие для digest и подписей) + тесты
-├── configs/
-│   ├── node.yaml               # шаблон демона (env-параметризован, использует install.sh)
-│   └── examples/
-│       ├── lan.yaml            # профиль «одна локальная сеть»  (ТЗ 22.8)
-│       ├── wan.yaml            # профиль «Интернет / разные хосты»
-│       └── dev-node.yaml       # профиль «несколько узлов на одной машине» (make dev-cluster)
-├── scripts/
-│   ├── dev-cluster.sh          # поднять/остановить отладочный кластер, задачи, ротация
-│   └── acceptance.sh           # живые приёмочные испытания E.1–E.6 (ТЗ §20) на реальных процессах
-├── Makefile                    # сборка, проверка, тесты, proto, отладочный кластер
-├── deploy/ansible/             # массовое развёртывание на 100+ хостов (ТЗ 15.4):
-│                               #   роль zeptomesh — шесть шагов ТЗ по отдельным тегам
-├── deploy/docker/
-│   ├── Dockerfile              # многоэтапная сборка, non-root, HEALTHCHECK
-│   └── docker-compose.yml      # готовая сеть из 3 узлов
-├── docs/                       # ARCHITECTURE · PROTOCOLS · PICOCLAW-INTEGRATION ·
-│                               # DEPLOYMENT · RUNBOOK · STATUS · LOADTEST · TESTREPORT
-├── install.sh                  # установка: локально (systemd) или Docker, N экземпляров, автостарт
-├── zeptoclaw_rust/             # Rust-порт демона (crate `zeptomesh`, бинарь `zeptomesh-node`):
+├── zeptoclaw_rust/             # основная реализация демона (Rust)
 │   ├── src/                    #   proto · wire · multiformat · security · config · p2p ·
 │   │                           #   storage · routing · tasks · picoclaw · api · node · main
 │   ├── tests/smoke_e2e.rs      #   сквозной smoke-тест (запуск узла + admin-API)
-│   └── RUST_PORT.md            #   состав, статус переноса, инструкция по сборке
-├── LICENSE                     # Apache License 2.0 (полный текст)
-├── ТЗ.md                       # исходное техническое задание
+│   ├── Cargo.toml / Cargo.lock
+│   ├── README.md               #   быстрый старт порта
+│   └── RUST_PORT.md            #   состав, статус переноса, обслуживание/очистка
+├── configs/
+│   ├── node.yaml               # шаблон демона (env-параметризован; читают оба стека)
+│   └── examples/
+│       ├── lan.yaml            # профиль «одна локальная сеть»  (ТЗ 22.8)
+│       ├── wan.yaml            # профиль «Интернет / разные хосты»
+│       └── dev-node.yaml       # профиль «несколько узлов на одной машине»
+├── docs/                       # ТЗ · ARCHITECTURE · PROTOCOLS · PICOCLAW-INTEGRATION ·
+│                               # DEPLOYMENT · RUNBOOK · STATUS · LOADTEST · TESTREPORT · UI
 ├── .env.example                # переменные LLM/каналов для PicoClaw
-└── go.mod / go.sum
+├── ToDo.md / UPDATE.md         # план и журнал обслуживания
+├── LICENSE                     # Apache License 2.0 (полный текст)
+└── .gitignore                  # target/, zeptomesh-data/, *.log, node_modules/ и пр.
 ```
+
+Контракт протокола (`api/proto/zeptomesh/v1/mesh.proto`) описан в
+[docs/PROTOCOLS.md](docs/PROTOCOLS.md); protobuf-кодек Rust-порта реализует
+его напрямую (внешний `protoc` не требуется). Установочная инфраструктура
+Go-эпохи (`install.sh`, `Makefile`, `deploy/`, CI) удалена из дерева — см.
+журнал в [UPDATE.md](UPDATE.md).
+
 
 ---
 
 ## Требования
 
-Для сборки:
+Для сборки Rust-демона:
 
-- Go ≥ 1.26 (`go.mod` объявляет `go 1.26.0`);
-- доступ к прокси модулей (или предварительно заполненный модульный кэш).
+- Rust ≥ 1.77 (edition 2021), `cargo`;
+- доступ к crates.io (или предварительно заполненный кэш зависимостей);
+- Linux для тестов `picoclaw` (используются POSIX-ограничения RLIMIT).
 
-Для регенерации protobuf-кода (опционально — `gen/` есть в репозитории):
+Внешний `protoc` **не требуется** — protobuf-кодек написан вручную
+(`proto.rs`). Для Docker-режима — Docker 24+ с compose (профиль Go-эпохи,
+`Dockerfile` выведен из дерева). Для выполнения задач реальным агентом —
+установленный `picoclaw` (см.
+[docs/PICOCLAW-INTEGRATION.md](docs/PICOCLAW-INTEGRATION.md)); без него узел
+работает в режиме `picoclaw.mode: stub` — детерминированный offline-исполнитель.
 
-- `protoc` (проверено на libprotoc 3.21.12);
-- `protoc-gen-go` (проверено на v1.36.6):
-
-```bash
-go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6
-```
-
-Для Docker-режима — Docker 24+ с compose. Для выполнения задач реальным
-агентом — установленный `picoclaw`
-(см. [docs/PICOCLAW-INTEGRATION.md](docs/PICOCLAW-INTEGRATION.md)). Без него
-узел работает в режиме `picoclaw.mode: stub` — детерминированный
- offline-исполнитель.
 
 ---
 
 ## Сборка и проверка
 
-Проект собирается `make` (цели самодокументируемы — `make help`). Напрямую
-`go`-командами — тоже; обе таблицы ниже эквивалентны.
-
-```bash
-export PATH=$PATH:/usr/local/go/bin
-
-make            # fmt-check + vet + build + test — стандартная проверка
-make ci         # локальный эквивалент CI: статика, сборка, тесты под -race
-make build      # демон в bin/zeptomesh-node (версия/коммит в ldflags)
-make cross      # linux/{amd64,arm64} (ТЗ 15.1)
-make test       # все тесты; также test-race, test-cover, test-unit, bench
-make proto      # регенерация gen/ из api/proto (нужны protoc и protoc-gen-go)
-make lint       # golangci-lint, если установлен (иначе ворота — vet + gofmt)
-make dev-cluster      # 3 узла на одной машине (scripts/dev-cluster.sh)
-make dev-status       # сводка по отладочному кластеру
-make dev-rotate       # ротация ключа узла 0 + перезапуск под новым
-make dev-cluster-down # остановить кластер
-```
-
-Эквивалент без Makefile:
-
-```bash
-go build ./...          # все пакеты
-go vet ./...
-gofmt -l .              # пустой вывод = всё отформатировано
-go test ./...           # юнит-тесты internal/{wire,security,skills,routing,discovery,config,tasks,p2p}
-go test -race ./...     # то же под детектором гонок
-go build -trimpath -o bin/ ./cmd/zeptomesh-node
-
-# Регенерация protobuf-кода (нужны protoc и protoc-gen-go в PATH):
-protoc --proto_path=api/proto --go_out=gen --go_opt=paths=source_relative \
-    api/proto/zeptomesh/v1/mesh.proto
-```
-
-Покрытие тестов и его границы — таблица в [docs/STATUS.md](docs/STATUS.md#тесты-покрытие-текущее).
-Отчёт о тестировании целиком (инвентарь, маппинг на ТЗ §17, живая приёмка
-E.1–E.6, найденные дефекты, что не проверено) — [docs/TESTREPORT.md](docs/TESTREPORT.md).
-
-CI-конвейер (ТЗ 15.1) — GitHub Actions, `.github/workflows/ci.yml`: статика
-(fmt/vet/proto-check), сборка + cross linux/{amd64,arm64}, юнит-набор под
-`-race`, интеграционные сценарии (race + стресс `-count=2`), живые приёмочные
-испытания `scripts/acceptance.sh`, родной arm64-раннер и сборка Docker-образа.
-Гейты совпадают с разделом 5 TESTREPORT; `make ci` — локальный эквивалент
-быстрого подмножества.
-
-### Rust-порт (`zeptoclaw_rust/`)
-
 ```bash
 cd zeptoclaw_rust
-cargo build --release        # бинарь target/release/zeptomesh-node
-cargo test                   # юнит + smoke_e2e (70 тестов)
+
+cargo build --release      # бинарь target/release/zeptomesh-node
+cargo test                 # юнит-тесты + сквозной tests/smoke_e2e.rs (70 тестов)
+cargo clippy               # статика (чистый вывод = ворота пройдены)
+cargo fmt --check          # форматирование
+
+# быстрая проверка бинаря
 target/debug/zeptomesh-node version
 target/debug/zeptomesh-node genkey --out ./n0/keys/peer.key --print-id
 ZEPTOMESH_DATA=./n0 ZEPTOMESH_INDEX=0 \
   target/debug/zeptomesh-node run -c ../configs/node.yaml &
-../bin/zeptomesh-node status -addr http://127.0.0.1:8081   # CLI совместим с Go-узлом
+target/debug/zeptomesh-node status -addr http://127.0.0.1:8081
 ```
 
-Состав, статус переноса по модулям и известные ограничения —
-[zeptoclaw_rust/RUST_PORT.md](zeptoclaw_rust/RUST_PORT.md).
+Тесты `picoclaw` используют POSIX-ограничения (RLIMIT), поэтому полный набор
+прогоняется на Linux. Состав модулей, статус переноса по Go-пакетам и
+известные ограничения — [zeptoclaw_rust/RUST_PORT.md](zeptoclaw_rust/RUST_PORT.md).
+
+Покрытие тестами Go-эпохи (инвентарь, маппинг на ТЗ §17, живая приёмка
+E.1–E.6) сохранено как справочник требований:
+[docs/STATUS.md](docs/STATUS.md), [docs/TESTREPORT.md](docs/TESTREPORT.md).
+CI-конвейер Go-версии (`.github/workflows/ci.yml`) удалён вместе с Go-деревом;
+для Rust-порта CI-ворота пока нет — это пункт плана (см. TODO(port) в
+`RUST_PORT.md`).
+
 
 ---
 
@@ -510,6 +391,10 @@ security:
 
 ## Протоколы
 
+> Контракт `api/proto/zeptomesh/v1/mesh.proto` и генерированный код удалены из дерева вместе с Go-пакетами;
+> описание полей и схем подписи полностью сохранено ниже и в [docs/PROTOCOLS.md](docs/PROTOCOLS.md)
+> (единая спецификация для обоих портов).
+
 Сетевые протоколы узлов: `/zeptomesh/{task,result,rpc}/0.1.0`.
 
 - `TaskEnvelope` — конверт задачи (ТЗ 6.6.1 п.1): подписанная инструкция, навыки,
@@ -562,12 +447,12 @@ security:
   поля, канонические энкодеры, схемы подписи, ключи gossip/DHT.
 - [PICOCLAW-INTEGRATION.md](docs/PICOCLAW-INTEGRATION.md) — проверенные интерфейсы
   PicoClaw, режимы адаптера, изоляция, таймауты.
-- [DEPLOYMENT.md](docs/DEPLOYMENT.md) — развёртывание (LAN/WAN, PSK, bootstrap).
-- [RUNBOOK.md](docs/RUNBOOK.md) — эксплуатация (systemd/Docker, hot-reload, `leave`,
+- [DEPLOYMENT.md](docs/DEPLOYMENT.md) — развёртывание (LAN/WAN, PSK, bootstrap). Справочник Go-эпохи: `install.sh`/Docker-файлы выведены из дерева.
+- [RUNBOOK.md](docs/RUNBOOK.md) — эксплуатация (systemd/Docker, hot-reload, `leave`, метрики, восстановление). Справочник Go-эпохи; часть команд (`rotate`, `revoke`, hot-reload) в Rust-порту ещё не реализована.
   метрики, восстановление, бэкап ключей/БД).
 - [STATUS.md](docs/STATUS.md) — статус реализации ТЗ.
-- [LOADTEST.md](docs/LOADTEST.md) — нагрузочное тестирование (ТЗ 17.3).
-- [TESTREPORT.md](docs/TESTREPORT.md) — отчёт о тестировании.
+- [LOADTEST.md](docs/LOADTEST.md) — нагрузочное тестирование (ТЗ 17.3). Симулятор Go-эпохи (`internal/simulator`) в Rust-порт не перенесён.
+- [TESTREPORT.md](docs/TESTREPORT.md) — отчёт о тестировании Go-версии (справочник требований к тестам порта).
 - [zeptoclaw_rust/RUST_PORT.md](zeptoclaw_rust/RUST_PORT.md) — Rust-порт:
   состав модулей, статус переноса Go → Rust, сборка и известные ограничения.
 
@@ -629,6 +514,9 @@ api:
 
 ## Обновлен дашборд
 
+
+> Примечание: веб-дашборд (`ui/`, BFF `zeptomesh-ui`) удалён из дерева после
+> перехода на Rust-реализацию; описание сохранено как ТЗ будущего Rust/UI-стека.
 В веб-дашборде (BFF `zeptomesh-ui`) теперь отображаются:
 
 - **Версия и время работы** — в шапке (`#version-indicator`) показываются

@@ -257,6 +257,47 @@ pub fn extract_key_from_peer_id(peer_id: &str) -> Result<VerifyingKey, SecError>
     unmarshal_public_key(blob)
 }
 
+/// Проверка подписи по уже извлечённому VerifyingKey (для self-certifying
+/// идентификаторов вроде PeerID, где прото-оболочка не нужна).
+pub fn verify_key(vk: &VerifyingKey, msg: &[u8], sig: &[u8]) -> Result<(), SecError> {
+    let raw: [u8; 64] = sig.try_into().map_err(|_| SecError::BadSignature)?;
+    vk.verify(msg, &Signature::from_bytes(&raw))
+        .map_err(|_| SecError::BadSignature)
+}
+
+/// Префикс локальной /24 сети ("a.b.c") по первому не-петичному IPv4-адресу
+/// интерфейсов (Go: internal/discovery/scan.go localSubnetPrefix).
+/// Реализация через `ip -4 -o addr` — без дополнительных зависимостей.
+pub fn local_subnet_prefix() -> Option<String> {
+    let out = std::process::Command::new("ip")
+        .args(["-4", "-o", "addr", "show"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        // Формат: "2: eth4    inet 10.0.6.79/24 brd ... scope global ..."
+        let mut it = line.split_whitespace();
+        let _idx = it.next()?;
+        let _name = it.next()?;
+        if it.next()? != "inet" {
+            continue;
+        }
+        let cidr = it.next()?;
+        let ip = cidr.split('/').next()?;
+        let o: Vec<u8> = ip
+            .split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if o.len() != 4 || o[0] == 127 {
+            continue;
+        }
+        return Some(format!("{}.{}.{}", o[0], o[1], o[2]));
+    }
+    None
+}
+
 fn write_key_file(path: &Path, data: &[u8]) -> Result<(), SecError> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
@@ -415,7 +456,9 @@ pub struct Policy {
     min_trust_for_tasks: Trust,
     allow: std::collections::HashMap<String, bool>,
     deny: std::collections::HashMap<String, bool>,
-    observed: std::collections::HashMap<String, Trust>,
+    /// Наблюдения handshake; Arc<Mutex> — Clone даёт разделяемый снимок (как
+    /// shared map в Go), а не копию карты (копия теряла бы обучения).
+    observed: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Trust>>>,
     defense: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, PeerDefenseState>>>,
 }
 
@@ -474,18 +517,30 @@ impl Policy {
 
     /// Наблюдение handshake: никогда не понижать молча одним наблюдением.
     pub fn observe(&mut self, pid: &str, t: Trust) {
-        if let Some(cur) = self.observed.get(pid) {
+        let mut g = self.observed.lock().unwrap();
+        if let Some(cur) = g.get(pid) {
             if *cur <= t {
                 return;
             }
         }
-        self.observed.insert(pid.to_string(), t);
+        g.insert(pid.to_string(), t);
     }
 
-    /// Thread-safe версия observe для Arc<Policy> (используется узлом).
-    pub fn observe_connected(&self, _pid: &str, _t: Trust) {
-        // observed-карта требует &mut; в текущей сборке узла handshake-траст
-        // учится через таблицу соседей. TODO(port): завести Mutex на observed.
+    /// Thread-safe версия observe для Arc<Policy> (используется узлом):
+    /// handshake-наблюдение повышает траст, никогда не понижая молча.
+    pub fn observe_connected(&self, pid: &str, t: Trust) {
+        let mut g = self.observed.lock().unwrap();
+        if let Some(cur) = g.get(pid) {
+            if *cur <= t {
+                return;
+            }
+        }
+        g.insert(pid.to_string(), t);
+    }
+
+    /// Снимок наблюдаемого траста (для GET /api/v1/config и отладки).
+    pub fn observed_snapshot(&self) -> std::collections::HashMap<String, Trust> {
+        self.observed.lock().unwrap().clone()
     }
 
     /// Эффективный уровень доверия.
@@ -494,7 +549,7 @@ impl Policy {
             return Trust::Blocked;
         }
         let listed = self.allow.contains_key(pid);
-        let best = self.observed.get(pid).copied();
+        let best = self.observed.lock().unwrap().get(pid).copied();
         if listed {
             if self.mode == Mode::Private {
                 return Trust::Trusted;
@@ -513,6 +568,12 @@ impl Policy {
             return Trust::Blocked;
         }
         Trust::Untrusted
+    }
+
+    /// LevelOf — то же, что trust_of, под именем Go-версии (используется
+    /// search-relay для disclose_to-политики).
+    pub fn level_of(&self, pid: &str) -> Trust {
+        self.trust_of(pid)
     }
 
     pub fn allow_connection(&self, pid: &str) -> bool {

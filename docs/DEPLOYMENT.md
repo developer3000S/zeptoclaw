@@ -1,5 +1,12 @@
 # Руководство по развёртыванию
 
+> **Примечание (2026-10):** документ описывает Go-стек эпохи установки
+> (`install.sh`, `Makefile`, `deploy/`, `scripts/dev-cluster.sh`) — они выведены
+> из дерева после переноса на Rust. Сетевые топологии, профили LAN/WAN, PSK и
+> bootstrap остаются в силе: Rust-узел читает те же `configs/node.yaml` и
+> env-overrides `ZEPTOMESH_*`. Актуальные команды сборки/запуска:
+> [../zeptoclaw_rust/RUST_PORT.md](../zeptoclaw_rust/RUST_PORT.md).
+
 Документ для администратора: как установить и запустить сеть ZeptoClaw Agent
 Mesh (ТЗ 19.5–19.6, 22). Эксплуатация после запуска — [RUNBOOK.md](RUNBOOK.md);
 соответствие ТЗ и известные границы — [STATUS.md](STATUS.md).

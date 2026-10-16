@@ -20,7 +20,8 @@ ZEPTOMESH_DATA=./n0 ZEPTOMESH_INDEX=0 \
 
 - **[RUST_PORT.md](RUST_PORT.md)** — состав модулей, статус переноса по
   Go-пакетам, ключевые решения и известные ограничения.
-- Контракт протокола: [../api/proto/zeptomesh/v1/mesh.proto](../api/proto/zeptomesh/v1/mesh.proto)
+- Контракт протокола: описан в [../docs/PROTOCOLS.md](../docs/PROTOCOLS.md)
+  (`api/proto/.../mesh.proto` удалён из дерева после переноса; `proto.rs` реализует его напрямую)
 - Канонические энкодеры: [../docs/PROTOCOLS.md](../docs/PROTOCOLS.md)
 - Архитектура: [../docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md)
 
