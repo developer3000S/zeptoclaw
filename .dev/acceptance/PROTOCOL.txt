@@ -1,0 +1,42 @@
+
+== E.1 Запуск одного узла ==
+  PASS: узел стартует (отдельный процесс) и отвечает на /healthz
+  PASS: ключ сгенерирован: /root/soft/zeptoclaw/.dev/acceptance/node-0/keys/peer.key (права 600)
+  PASS: API/mesh/prometheus-порты слушают только 127.0.0.1
+  PASS: локальная задача через PicoClaw(stub): COMPLETED, worker=12D3KooWCPdbdh…
+
+== E.2 Два узла находят друг друга (реестр unix-сокетов), обмениваются возможностями ==
+  PASS: узел 0 соединился с узлом 1: neighbors_connected=1
+  PASS: обмен возможностями: узел 0 выучил навыки соседа (peers-обзор содержит coding)
+  PASS: идентичности различны: 12D3KooWJx… / 12D3KooWKB…
+
+== E.3 Делегирование: навыка нет у инициатора — задача уходит соседу и возвращается ==
+  PASS: задача coding исполнена соседом: COMPLETED, worker=12D3KooWKBJ4qc… (id 01a0a784-fd57-7b60-a66a-7306bfc7e896)
+  PASS: результат подписан исполнителем (worker_signature)
+
+== E.4 Многопрыжковая маршрутизация (цепочка n0→n1→n2, знакомство только по bootstrap) ==
+  PASS: n0 знает ровно один узел (ребро n0→n1): neighbors_connected=1
+  PASS: исполнитель за два ребра: COMPLETED, worker=12D3KooWEdyXcw… (id 01a0a785-287e-710c-8f9e-ba7288a60a60)
+  PASS: маршрут сохранён: route_stack = [n0, n1], исполнитель не в транзитном стеке
+  PASS: журнал n1: ретрансляция (status=COMPLETED, delegated_to=n2, worker=12D3KooWEdyXcwf6WcJzQbgrr6ra4w8kyYP3ETuRDNPrctuDHY4a)
+
+== E.5 Отказ узла: сеть живёт дальше, задача не теряется молча ==
+  PASS: до отказа: summarize исполнен (id 01a0a785-661a-7f00-8469-c29fb989dc87)
+  info: n2 (единственный носитель summarize) убит SIGKILL без анонса ухода
+  PASS: задача на мёртвый навык не зависла: status=FAILED, причина: no eligible peers reachable: no neighbour advertises skills [summarize]
+  PASS: живая часть сети работает: research-задача COMPLETED
+
+== E.6 Безопасность: PSK-граница, авторизация API, секреты не светятся ==
+  PASS: узлы с разными PSK не соединяются, даже видя сокеты друг друга (neighbors=0)
+  PASS: исполнения через PSK-границу нет: status=FAILED
+  PASS: неавторизованный запрос к API отклонён (HTTP 401)
+  PASS: с bearer-токеном API отвечает (HTTP 200)
+  PASS: API-секрет не появляется в логах
+  info: peer id (публичный идентификатор) в логе присутствует — это не секрет
+  info: поддельный/переписанный TaskEnvelope на wire-потоке (E.6 п.1) покрыт
+  info:   интеграционным прогоном TestIntegrationUnsignedAndRewrittenTasksAreRefused
+  info:   (живой libp2p: unsigned отвергается, переписанный содержимый — по origin-подписи);
+  info:   повторить то же из bash без raw-клиента протокола нельзя — это отмечено в протоколе.
+
+== ИТОГ: 21/21 пройдено (FAIL=0) ==
+протокол: /root/soft/zeptoclaw/.dev/acceptance/PROTOCOL.txt
