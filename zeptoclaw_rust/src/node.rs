@@ -23,7 +23,13 @@ use crate::proto::{
     TaskEnvelope, TaskResult,
 };
 use crate::routing::{Neighbor, Table, CAT_LAN, CAT_LOCAL, CAT_WAN};
+<<<<<<< HEAD
 use crate::security::{extract_key_from_peer_id, Identity, Mode, Policy, Trust};
+=======
+use crate::security::{
+    extract_key_from_peer_id, local_subnet_prefix, Identity, Mode, Policy, Trust,
+};
+>>>>>>> main
 use crate::skills::Registry;
 use crate::storage::{self, Store};
 use crate::tasks::{self as tasksmod, Manager, SubmitRequest};
@@ -422,13 +428,22 @@ impl Node {
 
         // Brain: периодический зонд LLM-бэкендов (Go: brain pool probe ticker).
         if let Some(pool) = self.pool.clone() {
+<<<<<<< HEAD
             let scan = *self.cfg.discovery.scan.interval.max(&Duration::from_secs(5));
+=======
+            let scan = self.cfg.discovery.scan.interval.max(Duration::from_secs(5));
+            let p = pool.clone();
+>>>>>>> main
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(scan);
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     tick.tick().await;
+<<<<<<< HEAD
                     pool.probe().await;
+=======
+                    p.probe().await;
+>>>>>>> main
                 }
             });
             // Первый зонд — сразу, чтобы usable() не был пустым до первого тика.
@@ -611,6 +626,7 @@ impl Node {
         }
         // Подпись автора запроса.
         if !req.signature.is_empty() {
+<<<<<<< HEAD
             if let Some(vk) = extract_key_from_peer_id(&req.requester_peer_id) {
                 let body = wire::search_request_body(&req);
                 if crate::security::verify(&vk.to_bytes().to_vec(), &body, &req.signature).is_err()
@@ -618,6 +634,20 @@ impl Node {
                     tracing::debug!("search: bad request signature from {}", req.requester_peer_id);
                     return;
                 }
+=======
+            match extract_key_from_peer_id(&req.requester_peer_id) {
+                Ok(vk) => {
+                    let body = wire::search_request_body(&req);
+                    if crate::security::verify_key(&vk, &body, &req.signature).is_err() {
+                        tracing::debug!(
+                            "search: bad request signature from {}",
+                            req.requester_peer_id
+                        );
+                        return;
+                    }
+                }
+                Err(_) => return,
+>>>>>>> main
             }
         }
         let ttl = *topic.request_ttl;
@@ -671,6 +701,7 @@ impl Node {
         }
         drop(pending);
         if !rep.signature.is_empty() {
+<<<<<<< HEAD
             if let Some(vk) = extract_key_from_peer_id(&rep.responder_peer_id) {
                 let body = wire::search_reply_body(&rep);
                 if crate::security::verify(&vk.to_bytes().to_vec(), &body, &rep.signature).is_err()
@@ -678,6 +709,17 @@ impl Node {
                     tracing::debug!("search: bad reply signature from {}", rep.responder_peer_id);
                     return;
                 }
+=======
+            match extract_key_from_peer_id(&rep.responder_peer_id) {
+                Ok(vk) => {
+                    let body = wire::search_reply_body(&rep);
+                    if crate::security::verify_key(&vk, &body, &rep.signature).is_err() {
+                        tracing::debug!("search: bad reply signature from {}", rep.responder_peer_id);
+                        return;
+                    }
+                }
+                Err(_) => return,
+>>>>>>> main
             }
         }
         for p in &rep.peers {
@@ -751,9 +793,15 @@ impl Node {
         // Политика раскрытия та же, что в sync-round.
         let trust = self
             .conn_of(cid)
+<<<<<<< HEAD
             .and_then(|c| c.peer_id)
             .map(|p| self.table.trust_of(&p))
             .unwrap_or(Trust::Unknown);
+=======
+            .and_then(|c| c.peer_id.clone())
+            .map(|p| self.table.trust_of(&p))
+            .unwrap_or(Trust::Untrusted);
+>>>>>>> main
         let disclose = self.cfg.capabilities.skill_exchange.disclose_to.as_str();
         let allowed = match disclose {
             "trusted" => trust >= Trust::Trusted,
