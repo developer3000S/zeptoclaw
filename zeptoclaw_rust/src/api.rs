@@ -302,31 +302,369 @@ impl Server {
             ("POST", "/api/v1/admin/leave") | ("POST", "/api/v1/shutdown") => {
                 self.shutdown_alias().await
             }
-            // Модули, ещё не перенесённые на Rust (brain/chat/triggers/skills-sync):
-            ("POST", "/api/v1/admin/scan")
-            | ("GET", "/api/v1/admin/scan")
-            | ("POST", "/api/v1/chat")
-            | ("GET", "/api/v1/chat/history")
-            | ("GET", "/api/v1/skills")
-            | ("POST", "/api/v1/skills")
-            | ("POST", "/api/v1/skills/sync")
-            | ("GET", "/api/v1/triggers")
-            | ("POST", "/api/v1/triggers")
-            | ("GET", "/api/v1/rebinds")
-            | ("POST", "/api/v1/admin/reload-config")
+            // Scan (Go: internal/discovery LAN/subnet sweep)
+            ("POST", "/api/v1/admin/scan") => self.run_scan().await,
+            ("GET", "/api/v1/admin/scan") => json_resp(StatusCode::OK, self.node.scan_status_json()),
+            // Chat (Go: internal/chat поверх brain-пула)
+            ("POST", "/api/v1/chat") => self.chat_send(c).await,
+            ("GET", "/api/v1/chat/history") => self.chat_history(&c.query),
+            // Skills-реестр (Go: internal/skills)
+            ("GET", "/api/v1/skills") => self.skills_list(),
+            ("POST", "/api/v1/skills") => self.skills_add(c),
+            ("POST", "/api/v1/skills/sync") => self.skills_sync(c).await,
+            // Triggers (Go: internal/triggers)
+            ("GET", "/api/v1/triggers") => self.triggers_list(),
+            ("POST", "/api/v1/triggers") => self.triggers_add(c),
+            // Brain / LLM-бэкенды (Go: internal/brain)
+            ("GET", "/api/v1/brain/backends") => self.brain_backends(),
+            ("POST", "/api/v1/brain/scan") => self.brain_probe().await,
+            ("POST", "/api/v1/candidates/promote") => self.candidates_promote(c).await,
+            ("GET", "/api/v1/brain/candidates") => self.brain_candidates(),
+            // Admin lifecycle
+            ("POST", "/api/v1/admin/reload-config") => self.reload_config(),
+            // Ручки Go-версии, не имеющие аналога в Rust-порте (перевод ключей
+            // между узлами/друзьями и rebinds): остаются 501 осознанно.
+            ("GET", "/api/v1/rebinds")
             | ("POST", "/api/v1/admin/rotate-key")
             | ("POST", "/api/v1/admin/revoke")
-            | ("POST", "/api/v1/candidates/promote")
-            | ("GET", "/api/v1/brain/candidates")
-            | ("GET", "/api/v1/brain/backends")
-            | ("POST", "/api/v1/brain/scan")
             | ("POST", "/api/v1/keys/exchange")
             | ("POST", "/api/v1/keys/share")
             | ("POST", "/api/v1/friends/promote") => err_resp(
                 StatusCode::NOT_IMPLEMENTED,
-                "this endpoint belongs to modules not yet ported (brain/chat/triggers/skills)",
+                "endpoint not available in the Rust port (no Go analogue implemented)",
             ),
             _ => not_found(),
+        }
+    }
+
+    // ---- scan ----
+
+    async fn run_scan(&self) -> Resp {
+        match self.node.clone().run_scan().await {
+            Ok(found) => json_resp(
+                StatusCode::OK,
+                serde_json::json!({ "dialed": found, "neighbors_total": self.node.table.len() }),
+            ),
+            Err(e) => err_resp(StatusCode::CONFLICT, e.to_string()),
+        }
+    }
+
+    // ---- chat ----
+
+    async fn chat_send(&self, c: &Ctx) -> Resp {
+        let svc = match &self.node.chat {
+            Some(s) => s.clone(),
+            None => {
+                return err_resp(
+                    StatusCode::CONFLICT,
+                    "chat disabled: configure picoclaw.local_url or picoclaw.backends",
+                )
+            }
+        };
+        #[derive(Deserialize)]
+        struct Req {
+            #[serde(default)]
+            conversation: String,
+            #[serde(default)]
+            message: String,
+            #[serde(default)]
+            model: Option<String>,
+        }
+        let body = match c.json_body() {
+            Ok(b) => b,
+            Err(e) => return err_resp(StatusCode::BAD_REQUEST, e),
+        };
+        let r: Req = match serde_json::from_value(body) {
+            Ok(r) => r,
+            Err(e) => return err_resp(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}")),
+        };
+        if r.message.trim().is_empty() {
+            return err_resp(StatusCode::BAD_REQUEST, "message is required");
+        }
+        let conv = if r.conversation.is_empty() { "default".to_string() } else { r.conversation };
+        match svc.send(&conv, &r.message, r.model.as_deref()).await {
+            Ok((reply, backend_id)) => json_resp(
+                StatusCode::OK,
+                serde_json::json!({
+                    "conversation": conv,
+                    "reply": reply.content,
+                    "backend": backend_id,
+                    "created_at": reply.created_at,
+                }),
+            ),
+            Err(e) => err_resp(StatusCode::BAD_GATEWAY, e.to_string()),
+        }
+    }
+
+    fn chat_history(&self, query: &str) -> Resp {
+        let svc = match &self.node.chat {
+            Some(s) => s.clone(),
+            None => {
+                return err_resp(
+                    StatusCode::CONFLICT,
+                    "chat disabled: configure picoclaw.local_url or picoclaw.backends",
+                )
+            }
+        };
+        let q = parse_query(query);
+        let conv = q.get("conversation").cloned().unwrap_or_else(|| "default".into());
+        let msgs = svc.history(&conv);
+        json_resp(
+            StatusCode::OK,
+            serde_json::json!({ "conversation": conv, "count": msgs.len(), "messages": msgs }),
+        )
+    }
+
+    // ---- skills ----
+
+    fn skills_list(&self) -> Resp {
+        let reg = match &self.node.skills {
+            Some(r) => r.clone(),
+            None => {
+                return err_resp(
+                    StatusCode::CONFLICT,
+                    "skills exchange disabled (capabilities.skill_exchange.enabled=false)",
+                )
+            }
+        };
+        let docs = reg.list();
+        json_resp(
+            StatusCode::OK,
+            serde_json::json!({
+                "version": reg.version(),
+                "count": docs.len(),
+                "skills": docs.iter().map(|d| serde_json::json!({
+                    "name": d.name,
+                    "version": d.version,
+                    "updated_at": d.updated_at,
+                    "digest": hex_abbrev(&d.digest),
+                    "description": d.description,
+                    "models": d.models,
+                    "attributes": d.attributes,
+                })).collect::<Vec<_>>(),
+            }),
+        )
+    }
+
+    fn skills_add(&self, c: &Ctx) -> Resp {
+        let reg = match &self.node.skills {
+            Some(r) => r.clone(),
+            None => {
+                return err_resp(
+                    StatusCode::CONFLICT,
+                    "skills exchange disabled (capabilities.skill_exchange.enabled=false)",
+                )
+            }
+        };
+        #[derive(Deserialize)]
+        struct Req {
+            name: String,
+            #[serde(default)]
+            description: String,
+            #[serde(default)]
+            models: Vec<String>,
+        }
+        let body = match c.json_body() {
+            Ok(b) => b,
+            Err(e) => return err_resp(StatusCode::BAD_REQUEST, e),
+        };
+        let r: Req = match serde_json::from_value(body) {
+            Ok(v) => v,
+            Err(e) => return err_resp(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}")),
+        };
+        if r.name.trim().is_empty() {
+            return err_resp(StatusCode::BAD_REQUEST, "name is required");
+        }
+        // Дескриптор с текущим временем; digest — sha256 от канонического тела.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let mut d = crate::proto::SkillDescriptor {
+            name: r.name.clone(),
+            version: now,
+            updated_at: now,
+            digest: String::new(),
+            description: r.description,
+            models: r.models,
+            attributes: Default::default(),
+        };
+        d.digest = hex::encode(crate::wire::sha256_bytes(&crate::wire::skill_digest_body(&d)));
+        reg.upsert_own(d);
+        json_resp(StatusCode::ACCEPTED, serde_json::json!({ "name": r.name, "version": now }))
+    }
+
+    async fn skills_sync(&self, c: &Ctx) -> Resp {
+        let reg = match &self.node.skills {
+            Some(r) => r.clone(),
+            None => {
+                return err_resp(
+                    StatusCode::CONFLICT,
+                    "skills exchange disabled (capabilities.skill_exchange.enabled=false)",
+                )
+            }
+        };
+        #[derive(Deserialize)]
+        struct Req {
+            #[serde(default)]
+            peer_id: String,
+            #[serde(default)]
+            full: bool,
+        }
+        let body = match c.json_body() {
+            Ok(b) => b,
+            Err(e) => return err_resp(StatusCode::BAD_REQUEST, e),
+        };
+        let r: Req = match serde_json::from_value(body) {
+            Ok(v) => v,
+            Err(e) => return err_resp(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}")),
+        };
+        if r.peer_id.is_empty() || !self.node.table.contains(&r.peer_id) {
+            return err_resp(StatusCode::NOT_FOUND, format!("unknown peer: {}", r.peer_id));
+        }
+        // Отправить SkillsSyncRequest по активному конну к пиру и дождаться ответа.
+        let req_msg = reg.build_request(&r.peer_id, r.full);
+        match self.node.rpc_skills_sync(&r.peer_id, req_msg).await {
+            Ok(imported) => json_resp(
+                StatusCode::OK,
+                serde_json::json!({ "peer_id": r.peer_id, "imported": imported, "version": reg.version() }),
+            ),
+            Err(e) => err_resp(StatusCode::BAD_GATEWAY, e.to_string()),
+        }
+    }
+
+    // ---- triggers ----
+
+    fn triggers_list(&self) -> Resp {
+        let sch = match &self.node.scheduler {
+            Some(s) => s.clone(),
+            None => return json_resp(StatusCode::OK, serde_json::json!({ "count": 0, "triggers": [] })),
+        };
+        let list = sch.list();
+        json_resp(StatusCode::OK, serde_json::json!({ "count": list.len(), "triggers": list }))
+    }
+
+    fn triggers_add(&self, c: &Ctx) -> Resp {
+        let sch = match &self.node.scheduler {
+            Some(s) => s.clone(),
+            None => {
+                return err_resp(
+                    StatusCode::CONFLICT,
+                    "triggers scheduler inactive (no triggers configured at startup)",
+                )
+            }
+        };
+        let body = match c.json_body() {
+            Ok(b) => b,
+            Err(e) => return err_resp(StatusCode::BAD_REQUEST, e),
+        };
+        let tc: crate::config::TriggerConfig = match serde_json::from_value(body) {
+            Ok(v) => v,
+            Err(e) => return err_resp(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}")),
+        };
+        match sch.add(tc.clone()) {
+            Ok(next) => json_resp(
+                StatusCode::ACCEPTED,
+                serde_json::json!({ "id": tc.id, "next_run": next }),
+            ),
+            Err(e) => err_resp(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()),
+        }
+    }
+
+    // ---- brain ----
+
+    fn pool_or_err(&self) -> Option<Arc<crate::picoclaw::BackendPool>> {
+        self.node.pool.clone()
+    }
+
+    fn brain_backends(&self) -> Resp {
+        let pool = match self.pool_or_err() {
+            Some(p) => p,
+            None => {
+                return err_resp(
+                    StatusCode::CONFLICT,
+                    "brain disabled: configure picoclaw.local_url or picoclaw.backends",
+                )
+            }
+        };
+        let list = pool.list();
+        json_resp(
+            StatusCode::OK,
+            serde_json::json!({ "count": list.len(), "backends": list }),
+        )
+    }
+
+    async fn brain_probe(&self) -> Resp {
+        let pool = match self.pool_or_err() {
+            Some(p) => p,
+            None => {
+                return err_resp(
+                    StatusCode::CONFLICT,
+                    "brain disabled: configure picoclaw.local_url or picoclaw.backends",
+                )
+            }
+        };
+        pool.probe().await;
+        let list = pool.list();
+        let usable = pool.usable().len();
+        json_resp(
+            StatusCode::OK,
+            serde_json::json!({ "probed": list.len(), "usable": usable, "backends": list }),
+        )
+    }
+
+    async fn candidates_promote(&self, c: &Ctx) -> Resp {
+        #[derive(Deserialize)]
+        struct Req {
+            base_url: String,
+            #[serde(default)]
+            api_key_env: String,
+            #[serde(default)]
+            promoted_from: String,
+        }
+        let body = match c.json_body() {
+            Ok(b) => b,
+            Err(e) => return err_resp(StatusCode::BAD_REQUEST, e),
+        };
+        let r: Req = match serde_json::from_value(body) {
+            Ok(v) => v,
+            Err(e) => return err_resp(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}")),
+        };
+        if r.base_url.trim().is_empty() || !(r.base_url.starts_with("http://") || r.base_url.starts_with("https://")) {
+            return err_resp(StatusCode::BAD_REQUEST, "base_url must be an http(s) URL");
+        }
+        match self.node.promote_backend(&r.base_url, &r.api_key_env, &r.promoted_from).await {
+            Ok(b) => json_resp(StatusCode::OK, serde_json::json!({ "backend": b })),
+            Err(e) => err_resp(StatusCode::CONFLICT, e.to_string()),
+        }
+    }
+
+    fn brain_candidates(&self) -> Resp {
+        // Кандидаты = найденные scan'ом эндпоинты ещё не добавлены в пул
+        // автоматически (промоуток через /api/v1/candidates/promote). Список
+        // формируется из записей соседей с объявленными моделями.
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        for n in self.node.table.list() {
+            if n.models.is_empty() {
+                continue;
+            }
+            out.push(serde_json::json!({
+                "peer_id": n.peer_id,
+                "node_name": n.node_name,
+                "models": n.models,
+                "addrs": n.addrs,
+            }));
+        }
+        json_resp(StatusCode::OK, serde_json::json!({ "count": out.len(), "candidates": out }))
+    }
+
+    fn reload_config(&self) -> Resp {
+        match self.node.reload_config() {
+            Ok(()) => json_resp(
+                StatusCode::OK,
+                serde_json::json!({ "status": "reloaded", "note": "restart required for non-hot fields" }),
+            ),
+            Err(e) => err_resp(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()),
         }
     }
 

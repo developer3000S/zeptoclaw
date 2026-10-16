@@ -318,6 +318,7 @@ mod tests {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Trust {
     Trusted = 0,
+    Unknown = 5,
     #[default]
     Untrusted = 3,
     Known = 1,
@@ -329,6 +330,7 @@ impl Trust {
     pub fn as_str(&self) -> &'static str {
         match self {
             Trust::Trusted => "trusted",
+            Trust::Unknown => "unknown",
             Trust::Known => "known",
             Trust::Limited => "limited",
             Trust::Untrusted => "untrusted",

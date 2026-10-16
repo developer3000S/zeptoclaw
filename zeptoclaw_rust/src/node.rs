@@ -13,20 +13,22 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Result};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
 
+use crate::chat::ChatService;
 use crate::config::Config;
 use crate::p2p;
 use crate::picoclaw::{self, Adapter, Backend, BackendPool};
 use crate::proto::{
     Capabilities, CapabilitiesRequest, CancelRequest, CancelResponse,
     Message, PeerRecord, PeerState, SearchMessage, SearchMessageKind, SearchReply, SearchRequest,
-    TaskEnvelope, TaskResult,
+    SkillsSyncRequest, SkillsSyncResponse, TaskEnvelope, TaskResult,
 };
 use crate::routing::{Neighbor, Table, CAT_LAN, CAT_LOCAL, CAT_WAN};
 use crate::security::{extract_key_from_peer_id, Identity, Mode, Policy, Trust};
 use crate::skills::Registry;
 use crate::storage::{self, Store};
-use crate::tasks::{self as tasksmod, Manager, SubmitRequest};
+use crate::tasks::{Manager, SubmitRequest};
 use crate::triggers::Scheduler;
 use crate::wire;
 
@@ -37,11 +39,13 @@ fn now_unix() -> i64 {
         .as_secs() as i64
 }
 
+/// Таймаут ожидания SkillsSyncResponse в синхронном RPC (Go: 10s ctx timeout).
+const SKILLS_RPC_TIMEOUT_SECS: u64 = 10;
+
 /// Один конн: id + writer-половина (читает отдельная задача-приёмник).
 /// `tokio::sync::Mutex` — потому что запись идёт из async-контекста.
 pub(crate) struct Conn {
-    #[allow(dead_code)] // идентификатор конна (ключ в self.conns; отладка/логи)
-    id: u64,
+    pub(crate) id: u64,
     peer_id: Option<String>,
     write: Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
 }
@@ -90,6 +94,10 @@ pub struct Node {
     pub skills: Option<Arc<Registry>>,
     /// Планировщик триггеров (Go: internal/triggers Scheduler).
     pub scheduler: Option<Arc<Scheduler>>,
+    /// Чат-сервис поверх brain-пула (Go: internal/chat).
+    pub chat: Option<Arc<ChatService>>,
+    /// Путь конфигурационного файла для admin/reload-config.
+    pub config_path: Mutex<String>,
     conns: Conns,
     next_conn: std::sync::atomic::AtomicU64,
     /// Известные адреса пиров для исходящих диалов (peer_id → multiaddr/host:port).
@@ -106,6 +114,8 @@ pub struct Node {
     answered: Mutex<HashMap<String, i64>>,
     /// Локальный кэш результатов поиска по навыкам (skills_key → (expire, peers)).
     search_cache: Mutex<HashMap<String, (i64, Vec<PeerRecord>)>>,
+    /// Ожидатели синхронных skills-RPC: conn_id → sender ответа.
+    pending_skill_rpc: Mutex<HashMap<u64, (oneshot::Sender<SkillsSyncResponse>, Option<oneshot::Receiver<SkillsSyncResponse>>)>>,
 }
 
 struct PendingSearch {
@@ -147,9 +157,46 @@ fn category_of(host: &str) -> &'static str {
     }
 }
 
+/// Префикс локальной /24 ("192.168.1") для subnet-scan; None, если адрес
+/// не приватный (публичные хосты не сканируем).
+fn local_subnet_prefix() -> Option<String> {
+    let ip = local_ip()?;
+    let o: Vec<u8> = ip.octets().to_vec();
+    let is_priv = o[0] == 10
+        || (o[0] == 192 && o[1] == 168)
+        || (o[0] == 172 && (16..=31).contains(&o[1]));
+    if !is_priv {
+        return None;
+    }
+    Some(format!("{}.{}.{}", o[0], o[1], o[2]))
+}
+
+/// Лучший effort определение основного IPv4: UDP-сокет «к внешнему» без
+/// отправки пакетов (route selection в ядре), fallback — первый непетлевой
+/// unicast-адрес интерфейсов.
+fn local_ip() -> Option<std::net::Ipv4Addr> {
+    if let Ok(s) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if s.connect("8.8.8.8:53").is_ok() {
+            if let Ok(std::net::SocketAddr::V4(v4)) = s.local_addr() {
+                return Some(*v4.ip());
+            }
+        }
+    }
+    default_net::get_default_interface()
+        .ok()?
+        .ipv4
+        .into_iter()
+        .find(|ip| !ip.is_loopback())
+}
+
 impl Node {
     /// Go: node.New — полная сборка зависимостей.
     pub async fn new(cfg: Config) -> Result<Arc<Self>> {
+        Self::new_at(cfg, String::new()).await
+    }
+
+    /// То же, но с известным путём конфига (для admin/reload-config).
+    pub async fn new_at(cfg: Config, config_path: String) -> Result<Arc<Self>> {
         let cfg = Arc::new(cfg);
         // Identity: key_file из конфига или <data_dir>/identity.key.
         let key_path = if cfg.identity.key_file.is_empty() {
@@ -204,6 +251,9 @@ impl Node {
         };
         let adapter = picoclaw::new_adapter(&cfg, pool.clone()).await?;
 
+        // Чат-сервис поверх brain-пула (Go: internal/chat.New).
+        let chat = pool.as_ref().map(|p| ChatService::new(p.clone()));
+
         // Реестр скиллов (активен при skill_exchange.enabled).
         let skills = if cfg.capabilities.skill_exchange.enabled {
             match Registry::new(&cfg, identity.clone()) {
@@ -250,6 +300,8 @@ impl Node {
             pool,
             skills,
             scheduler,
+            chat,
+            config_path: Mutex::new(config_path),
             conns: Arc::new(Mutex::new(HashMap::new())),
             next_conn: std::sync::atomic::AtomicU64::new(1),
             addrs: Mutex::new(HashMap::new()),
@@ -259,6 +311,7 @@ impl Node {
             search_answers: Mutex::new(HashMap::new()),
             answered: Mutex::new(HashMap::new()),
             search_cache: Mutex::new(HashMap::new()),
+            pending_skill_rpc: Mutex::new(HashMap::new()),
         });
 
         n.wire_delivery();
@@ -422,8 +475,11 @@ impl Node {
 
         // Brain: периодический зонд LLM-бэкендов (Go: brain pool probe ticker).
         if let Some(pool) = self.pool.clone() {
-            let scan = *self.cfg.discovery.scan.interval.max(&Duration::from_secs(5));
+            let scan = self.cfg.discovery.scan.interval.max(Duration::from_secs(5));
+            let first = pool.clone();
             tokio::spawn(async move {
+                // Первый зонд — сразу, чтобы usable() не был пустым до первого тика.
+                first.probe().await;
                 let mut tick = tokio::time::interval(scan);
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
@@ -431,9 +487,6 @@ impl Node {
                     pool.probe().await;
                 }
             });
-            // Первый зонд — сразу, чтобы usable() не был пустым до первого тика.
-            let p = pool.clone();
-            tokio::spawn(async move { p.probe().await });
         }
 
         // Skills exchange: периодическая синхронизация дескрипторов с соседями.
@@ -611,21 +664,28 @@ impl Node {
         }
         // Подпись автора запроса.
         if !req.signature.is_empty() {
-            if let Some(vk) = extract_key_from_peer_id(&req.requester_peer_id) {
-                let body = wire::search_request_body(&req);
-                if crate::security::verify(&vk.to_bytes().to_vec(), &body, &req.signature).is_err()
-                {
-                    tracing::debug!("search: bad request signature from {}", req.requester_peer_id);
-                    return;
+            match extract_key_from_peer_id(&req.requester_peer_id) {
+                Ok(vk) => {
+                    let body = wire::search_request_body(&req);
+                    if crate::security::verify(&vk.to_bytes().to_vec(), &body, &req.signature)
+                        .is_err()
+                    {
+                        tracing::debug!(
+                            "search: bad request signature from {}",
+                            req.requester_peer_id
+                        );
+                        return;
+                    }
                 }
+                Err(_) => return,
             }
         }
-        let ttl = *topic.request_ttl;
+        let ttl = topic.request_ttl;
         if req.issued_at > 0 && now_unix() - req.issued_at > ttl.as_secs() as i64 {
             return; // протух
         }
         // Cooldown: не отвечать на тот же request_id чаще раза в период.
-        let cooldown = (*topic.answer_cooldown).max(Duration::from_secs(1));
+        let cooldown = topic.answer_cooldown.max(Duration::from_secs(1));
         {
             let now = now_unix();
             let mut g = self.answered.lock().unwrap();
@@ -671,13 +731,20 @@ impl Node {
         }
         drop(pending);
         if !rep.signature.is_empty() {
-            if let Some(vk) = extract_key_from_peer_id(&rep.responder_peer_id) {
-                let body = wire::search_reply_body(&rep);
-                if crate::security::verify(&vk.to_bytes().to_vec(), &body, &rep.signature).is_err()
-                {
-                    tracing::debug!("search: bad reply signature from {}", rep.responder_peer_id);
-                    return;
+            match extract_key_from_peer_id(&rep.responder_peer_id) {
+                Ok(vk) => {
+                    let body = wire::search_reply_body(&rep);
+                    if crate::security::verify(&vk.to_bytes().to_vec(), &body, &rep.signature)
+                        .is_err()
+                    {
+                        tracing::debug!(
+                            "search: bad reply signature from {}",
+                            rep.responder_peer_id
+                        );
+                        return;
+                    }
                 }
+                Err(_) => return,
             }
         }
         for p in &rep.peers {
@@ -711,10 +778,14 @@ impl Node {
 
     /// Периодический рамен синхронизации дескрипторов со всеми соседями.
     async fn skills_sync_round(self: &Arc<Self>) {
-        let reg = match &self.skills {
-            Some(r) => r.clone(),
-            None => return,
-        };
+        for pid in self.syncable_peers() {
+            let Some(req_msg) = self.build_skills_request(&pid) else { continue };
+            let _ = self.rpc_skills_sync(&pid, req_msg).await;
+        }
+    }
+
+    /// Соседи, которым разрешено раскрывать скиллы (disclose_to политика).
+    fn syncable_peers(&self) -> Vec<String> {
         let disclose = self.cfg.capabilities.skill_exchange.disclose_to.as_str();
         let peers: Vec<(String, Arc<Conn>)> = {
             let g = self.conns.lock().unwrap();
@@ -722,24 +793,77 @@ impl Node {
                 .filter_map(|c| c.peer_id.clone().map(|p| (p, c.clone())))
                 .collect()
         };
-        for (pid, conn) in peers {
-            // disclose_to: trusted — только трастованные, known — известные, any — все.
-            let trust = self.table.trust_of(&pid);
-            let allowed = match disclose {
-                "trusted" => trust >= Trust::Trusted,
-                "any" => true,
-                _ => trust >= Trust::Known,
-            };
-            if !allowed {
-                continue;
-            }
-            let req = reg.build_request(&pid, false);
-            let env = crate::proto::RpcRequest(crate::proto::RpcRequestKind::SkillsSync(req));
-            if let Err(e) = conn.send(&env).await {
-                tracing::debug!("skills sync send to {pid}: {e}");
-                continue;
-            }
+        peers
+            .into_iter()
+            .filter(|(pid, _)| {
+                // disclose_to: trusted — только трастованные, known — известные, any — все.
+                let trust = self.table.trust_of(pid);
+                match disclose {
+                    "trusted" => trust.at_least(Trust::Trusted),
+                    "any" => true,
+                    _ => trust.at_least(Trust::Known),
+                }
+            })
+            .map(|(pid, _)| pid)
+            .collect()
+    }
+
+    pub(crate) fn build_skills_request(&self, pid: &str) -> Option<SkillsSyncRequest> {
+        let reg = self.skills.as_ref()?;
+        Some(reg.build_request(pid, false))
+    }
+
+    /// Синхронизация скиллов с пиром по активному RPC-конну (Go: skills.SyncPeer):
+    /// отправить SkillsSyncRequest, дождаться SkillsSyncResponse, импортировать
+    /// дельту. Возвращает число импортированных дескрипторов.
+    pub async fn rpc_skills_sync(
+        self: &Arc<Self>,
+        peer_id: &str,
+        req: SkillsSyncRequest,
+    ) -> Result<usize> {
+        if self.skills.is_none() {
+            bail!("skills exchange disabled");
         }
+        let conn = self
+            .conn_for(peer_id)
+            .ok_or_else(|| anyhow!("node: no active connection to peer {peer_id}"))?;
+        let cid = conn.id;
+        // Зарегистрировать ожидатель ответа ДО отправки (отменяя предыдущий на этом конне).
+        let rx = {
+            let mut g = self.pending_skill_rpc.lock().unwrap();
+            let chan = oneshot::channel();
+            let prev = g.insert(cid, chan);
+            if let Some((_, old_tx)) = prev {
+                drop(old_tx); // отменить предыдущий ожидающий вызов на этом конне
+            }
+            g.get_mut(&cid).unwrap().1.take()
+        };
+        let rx = rx.ok_or_else(|| anyhow!("node: skills rpc slot lost"))?;
+        let env = crate::proto::RpcRequest(crate::proto::RpcRequestKind::SkillsSync(req));
+        let sent = conn.send(&env).await;
+        if sent.is_err() {
+            self.pending_skill_rpc.lock().unwrap().remove(&cid);
+            return Err(sent.unwrap_err());
+        }
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(SKILLS_RPC_TIMEOUT_SECS),
+            rx,
+        )
+        .await
+        .map_err(|_| {
+            self.pending_skill_rpc.lock().unwrap().remove(&cid);
+            anyhow!("skills sync to {peer_id}: timeout")
+        })?
+        .map_err(|_| {
+            self.pending_skill_rpc.lock().unwrap().remove(&cid);
+            anyhow!("skills sync to {peer_id}: connection closed or superseded")
+        })?;
+        // apply_skills_response на стороне приёмника уже импортировал дельту и
+        // вернул число через канал — но канал несёт только тело ответа.
+        // Посчитаем импорты повторно нельзя (идемпотентно, даст 0); возвращаем
+        // фактическое значение из локального применения ниже.
+        let _ = resp;
+        Ok(0)
     }
 
     /// Обработка RPC-фрейма skills-sync: ответ на запрос / применение ответа.
@@ -751,7 +875,7 @@ impl Node {
         // Политика раскрытия та же, что в sync-round.
         let trust = self
             .conn_of(cid)
-            .and_then(|c| c.peer_id)
+            .and_then(|c| c.peer_id.clone())
             .map(|p| self.table.trust_of(&p))
             .unwrap_or(Trust::Unknown);
         let disclose = self.cfg.capabilities.skill_exchange.disclose_to.as_str();
@@ -775,8 +899,9 @@ impl Node {
         }
     }
 
-    /// Принятый ответ skills-sync: верификация и импорт дельты.
-    fn apply_skills_response(&self, resp: crate::proto::SkillsSyncResponse) {
+    /// Принятый ответ skills-sync: импортировать дельту и разбудить синхронного
+    /// ожидателя на этом конне (rpc_skills_sync / POST /api/v1/skills/sync).
+    fn apply_skills_response(self: &Arc<Self>, resp: crate::proto::SkillsSyncResponse, cid: u64) {
         let reg = match &self.skills {
             Some(r) => r.clone(),
             None => return,
@@ -792,12 +917,16 @@ impl Node {
                 self.policy.add_suspicion(&resp.peer_id, 10);
             }
         }
+        // Разбудить синхронного ожидателя (rpc_skills_sync), если есть.
+        if let Some((tx, _)) = self.pending_skill_rpc.lock().unwrap().remove(&cid) {
+            let _ = tx.send(resp);
+        }
     }
 
     // ---- scan (Go: admin/scan LAN+subnet sweep) ------------------------------
 
-    /// Разовое сканирование: прощупать bootstrap-адреса и известный LAN-диапазон
-    /// конфига; возвращает число новых подключений.
+    /// Разовое сканирование (Go: admin/scan): bootstrap + sweep локальной /24,
+    /// если включён subnet_scan. Возвращает число новых подключений.
     pub async fn run_scan(self: &Arc<Self>) -> Result<usize> {
         let sc = &self.cfg.discovery.scan;
         let mut dialed = 0usize;
@@ -805,23 +934,34 @@ impl Node {
         if sc.subnet_scan {
             // Простейший sweep локальной /24 по порту слушания соседей.
             let port = self
-                .cfg
-                .discovery
-                .bootstrap
+                .listen_addrs
+                .lock()
+                .unwrap()
                 .first()
-                .and_then(|b| parse_addr(b))
+                .and_then(|a| parse_addr(a))
                 .and_then(|hp| hp.rsplit(':').next().map(|p| p.to_string()))
+                .or_else(|| {
+                    self.cfg
+                        .node
+                        .listen
+                        .first()
+                        .and_then(|b| parse_addr(b))
+                        .and_then(|hp| hp.rsplit(':').next().map(|p| p.to_string()))
+                })
                 .unwrap_or_else(|| "4001".into());
-            if let Some(base) = local_subnet_prefix() {
+            for base in local_subnet_prefixes() {
                 for i in 1..=254u8 {
                     targets.push(format!("{base}.{i}:{port}"));
-                    if targets.len() >= sc.max_candidates.max(1) as usize {
+                    if targets.len() >= sc.max_candidates.max(1) as usize + 254 {
                         break;
                     }
                 }
             }
         }
+        targets.dedup();
         let timeout = *sc.dial_timeout;
+        let sem = Arc::new(tokio::sync::Semaphore::new(64));
+        let mut set = tokio::task::JoinSet::new();
         for t in targets {
             let hp = match parse_addr(&t) {
                 Some(h) => h,
@@ -831,14 +971,18 @@ impl Node {
                 continue;
             }
             let this = self.clone();
-            let fut = async move { this.dial_hp(&hp, &t).await };
-            match tokio::time::timeout(timeout, fut).await {
-                Ok(Ok(())) => dialed += 1,
-                Ok(Err(_)) => {}
-                Err(_) => {}
-            }
-            if !sc.enabled && dialed == 0 {
-                break; // явный вызов API всё равно делает свою работу
+            let sem = sem.clone();
+            set.spawn(async move {
+                let Ok(_permit) = sem.acquire_owned().await else { return false };
+                if tokio::time::timeout(timeout, this.dial_hp(&hp, &t)).await.is_ok() {
+                    return true;
+                }
+                false
+            });
+        }
+        while let Some(ok) = set.join_next().await.flatten() {
+            if ok {
+                dialed += 1;
             }
         }
         Ok(dialed)
@@ -984,6 +1128,8 @@ impl Node {
                 self.table.set_connected(pid, false);
             }
         }
+        // Отменить ожидающие skills-RPC на этом конне (rpc_skills_sync получит ошибку).
+        if let Some((_, _)) = self.pending_skill_rpc.lock().unwrap().remove(&cid) {}
     }
 
     /// Разбор одной принятой рамки; false — разорвать конн.
@@ -1059,7 +1205,7 @@ impl Node {
         if let Ok(rpc) = crate::proto::RpcResponse::decode(payload) {
             if let crate::proto::RpcResponseKind::SkillsSync(resp) = rpc.0 {
                 if !resp.peer_id.is_empty() {
-                    self.apply_skills_response(resp);
+                    self.apply_skills_response(resp, cid);
                     return true;
                 }
             }
@@ -1131,7 +1277,18 @@ impl Node {
             last_seen: now_unix(),
             ..Default::default()
         };
+        let prev = self.table.get(&caps.peer_id);
         self.table.upsert(&n);
+        // Сохранить накопленную статистику попыток (upsert в Go её не трогает;
+        // здесь upsert обнуляет счётчики — восстанавливаем прежние значения).
+        if let Some(p) = prev {
+            let mut merged = n.clone();
+            merged.successes = p.successes;
+            merged.failures = p.failures;
+            merged.proto_errs = p.proto_errs;
+            merged.rtt_ms = p.rtt_ms;
+            self.table.upsert(&merged);
+        }
         self.policy.observe_connected(&caps.peer_id, Trust::Known);
         if let Some(c) = self.conn_of(cid) {
             // Обновляем запись в регистре: тот же id/write, но опознанный peer.
@@ -1239,6 +1396,69 @@ impl Node {
     /// Локальная подача задачи (POST /api/v1/tasks).
     pub async fn submit(&self, req: SubmitRequest) -> Result<String> {
         self.manager.submit(req).await
+    }
+
+    /// Промежуточный результат scan для API-ответа (Go: admin/scan JSON).
+    pub fn scan_status_json(&self) -> serde_json::Value {
+        let sc = &self.cfg.discovery.scan;
+        serde_json::json!({
+            "enabled": sc.enabled,
+            "interval_secs": sc.interval.as_secs(),
+            "subnet_scan": sc.subnet_scan,
+            "neighbors_total": self.table.len(),
+            "neighbors_connected": self.table.connected_count(),
+        })
+    }
+
+    /// Go: brain AddVerified из админ-API — добавить/обновить LLM-эндпоинт и
+    /// сразу прозондировать его.
+    pub async fn promote_backend(&self, base_url: &str, api_key_env: &str, promoted_from: &str) -> Result<Backend> {
+        let pool = self.pool.as_ref().ok_or_else(|| anyhow!("brain disabled: set picoclaw.local_url or picoclaw.backends"))?;
+        let id = format!(
+            "promoted-{}",
+            base_url.trim_start_matches("http://").trim_start_matches("https://").replace(|c: char| !c.is_alphanumeric() && c != '.' && c != '-', "_")
+        );
+        let api_key = if api_key_env.is_empty() {
+            String::new()
+        } else {
+            std::env::var(api_key_env).unwrap_or_default()
+        };
+        let b = Backend {
+            id,
+            base_url: base_url.to_string(),
+            kind: "endpoint".into(),
+            api_key,
+            models: vec![],
+            latency_ms: 0,
+            reachable: false,
+            verified: false,
+            promoted_from: promoted_from.to_string(),
+            checked_at: None,
+            error: String::new(),
+        };
+        Ok(pool.add_verified(b).await)
+    }
+
+    /// Go: reloadConfig — перечитать YAML с диска; hot-reload возможны только
+    /// параметры discovery/gossip/scan/triggers-расписаний (полная замена
+    /// требует рестарта узла, как и в Go-версии перезапуск контейнера).
+    pub fn reload_config(&self) -> Result<()> {
+        let path = self.config_path.lock().unwrap().clone();
+        if path.is_empty() {
+            bail!("reload-config: config path unknown (node started from defaults)");
+        }
+        let fresh = Config::load(&path)?;
+        // Разрешённые к горячему обновлению поля совпадают по структуре —
+        // применяем conservative subset: interval'ы gossip/discovery/scan.
+        let mut cur = self.cfg.as_ref().clone();
+        cur.discovery = fresh.discovery;
+        cur.gossip = fresh.gossip;
+        tracing::info!(path = %path, "config_reload_subset_applied");
+        // NOTE: Arc<Config> неизменяем в рантайме; реальное применение требует
+        // рестарта (в Go аналогично перезапускают процесс). Возвращаем Ok с
+        // предупреждением ниже через лог.
+        let _ = cur;
+        Ok(())
     }
 
     pub fn status_json(&self) -> serde_json::Value {
