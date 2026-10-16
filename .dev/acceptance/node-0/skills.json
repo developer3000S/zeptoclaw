@@ -1,0 +1,18 @@
+{
+  "epoch": 2,
+  "skills": [
+    {
+      "name": "research",
+      "version": 2,
+      "updated_at": "2026-09-16T00:02:26.021289862Z",
+      "digest": "",
+      "description": "dev-cluster placeholder skill",
+      "models": [
+        "dev-stub"
+      ],
+      "attributes": {
+        "env": "dev"
+      }
+    }
+  ]
+}
