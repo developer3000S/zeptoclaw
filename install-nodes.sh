@@ -52,6 +52,12 @@ COMPOSE_PROJECT_NAME="zeptomesh"
 IMAGE_NAME="zeptomesh-node"
 IMAGE_TAG="latest"
 
+# Массивы портов (глобальные — заполняются в prepare_docker / install_local
+# и читаются в generate_docker_compose / install_local / install_docker)
+declare -a MESH_PORTS=()
+declare -a API_PORTS=()
+declare -a PROM_PORTS=()
+
 # Канонический репозиторий
 REPO_URL="git@github.com:developer3000S/zeptoclaw.git"
 
@@ -329,10 +335,6 @@ prepare_docker() {
     local mesh_port=$BASE_MESH_PORT
     local api_port=$((BASE_MESH_PORT + 10000))
     local prom_port=$((BASE_MESH_PORT + 20000))
-
-    declare -a MESH_PORTS=()
-    declare -a API_PORTS=()
-    declare -a PROM_PORTS=()
 
     for i in $(seq 0 $((NUM_NODES - 1))); do
         local m_port
@@ -625,7 +627,10 @@ install_docker() {
 create_dockerfile() {
     cat > deploy/docker/Dockerfile << 'DOCKERFILE_EOF'
 # ZeptoClaw Agent Mesh - Docker
-FROM rust:1.77-slim as builder
+# Образ соответствует локальному тулчейну (rustc 1.99): Cargo.lock не
+# коммитится, поэтому свежие транзитивные зависимости (icu_provider,
+# uuid и др.) требуют актуальной версии rustc — не ниже локальной.
+FROM rust:1.99-slim AS builder
 
 WORKDIR /build
 
@@ -687,9 +692,6 @@ install_local() {
     log_info "Проверка портов..."
     local mesh_port=$BASE_MESH_PORT
     local api_port=$((BASE_MESH_PORT + 10000))
-
-    declare -a MESH_PORTS=()
-    declare -a API_PORTS=()
 
     for i in $(seq 0 $((NUM_NODES - 1))); do
         local m_port
