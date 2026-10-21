@@ -735,6 +735,14 @@ impl Config {
         if let Ok(v) = std::env::var("ZEPTOMESH_LOG_LEVEL") {
             self.telemetry.log_level = v;
         }
+        // Go: ZEPTOMESH_BOOTSTRAP доливается в discovery.bootstrap поверх YAML
+        // (список через запятую), поэтому один смонтированный шаблон обслуживает
+        // все экземпляры mesh.
+        if let Ok(v) = std::env::var("ZEPTOMESH_BOOTSTRAP") {
+            for addr in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                self.discovery.bootstrap.push(addr.to_string());
+            }
+        }
     }
 
     /// Аналог Validate(): проверки согласованности + вывод путей-по-умолчанию
@@ -860,5 +868,23 @@ mod tests {
         assert_eq!(expand_env("x ${ZM_UNSET_XX:-fallback} y"), "x fallback y");
         assert_eq!(expand_env("no vars here"), "no vars here");
         assert_eq!(expand_env("broken ${NOPE"), "broken ${NOPE");
+    }
+
+    #[test]
+    fn env_bootstrap_appends_to_yaml_list() {
+        std::env::remove_var("ZEPTOMESH_BOOTSTRAP");
+        let mut c = Config::defaults();
+        let before = c.discovery.bootstrap.len();
+        std::env::set_var(
+            "ZEPTOMESH_BOOTSTRAP",
+            "/ip4/10.0.0.1/tcp/4001, /ip4/10.0.0.2/tcp/4002,,",
+        );
+        c.apply_env_overrides();
+        std::env::remove_var("ZEPTOMESH_BOOTSTRAP");
+        assert_eq!(c.discovery.bootstrap.len(), before + 2);
+        assert!(c.discovery.bootstrap.ends_with(&[
+            "/ip4/10.0.0.1/tcp/4001".to_string(),
+            "/ip4/10.0.0.2/tcp/4002".to_string(),
+        ]));
     }
 }

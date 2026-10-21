@@ -389,6 +389,10 @@ generate_docker_compose() {
     # Создаём директорию
     mkdir -p "$DATA_DIR"
 
+    # Абсолютный путь к корню репозитория (там лежат deploy/ и zeptoclaw_rust/)
+    local repo_root
+    repo_root="$(cd "$(dirname "$0")" && pwd)"
+
     cat > "$output_file" << 'DOCKER_COMPOSE_EOF'
 version: '3.8'
 
@@ -421,7 +425,7 @@ DOCKER_COMPOSE_EOF
         cat >> "$output_file" << DOCKER_SERVICE_EOF
   ${node_name}:
     build:
-      context: .
+      context: ${repo_root}
       dockerfile: deploy/docker/Dockerfile
     container_name: ${node_name}
     hostname: ${node_name}
@@ -493,7 +497,9 @@ identity:
 discovery:
   local_registry: true
   mdns: true
-  bootstrap: ${ZEPTOMESH_BOOTSTRAP:-}
+  # Список, а не строка: конфиг парсится строго (Vec<String>), а адреса входа
+  # в сеть доливаются из env ZEPTOMESH_BOOTSTRAP (через запятую).
+  bootstrap: []
   dht: true
   dht_mode: auto
 
@@ -647,12 +653,14 @@ COPY zeptoclaw_rust/ ./zeptoclaw_rust/
 WORKDIR /build/zeptoclaw_rust
 RUN cargo build --release
 
-# Минимальный runtime образ
-FROM debian:bookworm-slim
+# Минимальный runtime образ — та же версия Debian, что и builder (trixie):
+# бинарник собран против glibc 2.41, bookworm (2.36) даёт ошибку
+# «weak version `GLIBC_2.39' not found» на старте.
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libssl3 \
+    libssl3t64 \
     && rm -rf /var/lib/apt/lists/*
 
 # Создание пользователя
@@ -753,6 +761,7 @@ node:
   data_dir: ${node_data}
   listen:
     - /ip4/0.0.0.0/tcp/${mesh_port}
+    - /ip4/0.0.0.0/udp/${mesh_port}/quic-v1
 YAML_EOF
 
         # Создание systemd unit

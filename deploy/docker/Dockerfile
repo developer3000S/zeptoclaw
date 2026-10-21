@@ -19,12 +19,14 @@ COPY zeptoclaw_rust/ ./zeptoclaw_rust/
 WORKDIR /build/zeptoclaw_rust
 RUN cargo build --release
 
-# Минимальный runtime образ
-FROM debian:bookworm-slim
+# Минимальный runtime образ — та же версия Debian, что и builder (trixie):
+# бинарник собран против glibc 2.41, bookworm (2.36) даёт ошибку
+# «weak version `GLIBC_2.39' not found» на старте.
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libssl3 \
+    libssl3t64 \
     && rm -rf /var/lib/apt/lists/*
 
 # Создание пользователя

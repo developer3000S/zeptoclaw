@@ -177,7 +177,7 @@ find_free_port() {
                 echo "$port"; return 0
             fi
         fi
-        ((port++)); ((attempt++))
+        port=$((port + 1)); attempt=$((attempt + 1))
     done
     log_error "Не удалось найти свободный порт"
     return 1
@@ -241,7 +241,7 @@ generate_html() {
     done
     nodes_json+="]"
 
-    cat > "$output" << HTML_EOF
+    cat > "$output" << 'HTML_EOF'
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -298,9 +298,9 @@ generate_html() {
     <div class="footer">ZeptoClaw Agent Mesh | <span id="update-time"></span></div>
 
     <script>
-        const NODES = ${nodes_json};
-        const API_TOKEN = '${API_TOKEN}';
-        const POLL_INTERVAL = ${POLL_INTERVAL};
+        const NODES = __NODES_JSON__;
+        const API_TOKEN = '__API_TOKEN__';
+        const POLL_INTERVAL = __POLL_INTERVAL__;
 
         async function fetchJSON(url, fallback = null) {
             try {
@@ -366,19 +366,19 @@ generate_html() {
                     </div>`;
             });
 
-            statsHtml = \`
+            statsHtml = `
                 <div class="node-item">
-                    <div class="stat"><span class="stat-label">Активных нод</span><span class="stat-value">\${activeNodes}/\${NODES.length}</span></div>
+                    <div class="stat"><span class="stat-label">Активных нод</span><span class="stat-value">${activeNodes}/${NODES.length}</span></div>
                 </div>
                 <div class="node-item">
-                    <div class="stat"><span class="stat-label">Всего соседей в сети</span><span class="stat-value">\${totalPeers}</span></div>
+                    <div class="stat"><span class="stat-label">Всего соседей в сети</span><span class="stat-value">${totalPeers}</span></div>
                 </div>
                 <div class="node-item">
-                    <div class="stat"><span class="stat-label">Всего выполнено задач</span><span class="stat-value">\${totalCompleted}</span></div>
+                    <div class="stat"><span class="stat-label">Всего выполнено задач</span><span class="stat-value">${totalCompleted}</span></div>
                 </div>
                 <div class="node-item">
-                    <div class="stat"><span class="stat-label">Всего ошибок</span><span class="stat-value">\${totalFailed}</span></div>
-                </div>\`;
+                    <div class="stat"><span class="stat-label">Всего ошибок</span><span class="stat-value">${totalFailed}</span></div>
+                </div>`;
 
             nodesContainer.innerHTML = nodesHtml || '<div class="error">Ноды не найдены</div>';
             statsContainer.innerHTML = statsHtml;
@@ -396,6 +396,14 @@ generate_html() {
 </body>
 </html>
 HTML_EOF
+
+    # Подставляем динамические значения (heredoc отмечен, чтобы bash не разворачивал JS)
+    sed -i \
+        -e "s|__NODES_JSON__|${nodes_json}|g" \
+        -e "s|__API_TOKEN__|${API_TOKEN}|g" \
+        -e "s|__POLL_INTERVAL__|${POLL_INTERVAL}|g" \
+        "$output"
+
     log_success "UI HTML создан: $output"
 }
 
@@ -517,8 +525,8 @@ install_docker() {
         create_dockerfile
     fi
 
-    log_info "Сборка Docker-образа..."
-    docker build -f "$dockerfile" -t "${IMAGE_NAME}:${IMAGE_TAG}" . || {
+    log_info "Сборка Docker-образа (контекст $DATA_DIR)..."
+    docker build -f "$dockerfile" -t "${IMAGE_NAME}:${IMAGE_TAG}" "$DATA_DIR" || {
         log_error "Ошибка сборки Docker-образа"
         exit 1
     }
@@ -536,7 +544,7 @@ install_docker() {
             break
         fi
         sleep 1
-        ((waited++))
+        waited=$((waited + 1))
     done
 
     show_status
