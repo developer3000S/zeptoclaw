@@ -26,6 +26,7 @@ pub mod discovery;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -65,12 +66,40 @@ pub struct UiConfig {
     pub nodes_file: PathBuf,
     /// Токен доступа к самому дашборду (пусто — без авторизации).
     pub token: String,
+    /// Токен роли operator (может ставить задачи, но не менять реестр).
+    pub operator_token: String,
+    /// Токен роли viewer (только чтение).
+    pub viewer_token: String,
     /// Bearer-токен для нод, у которых нет собственного.
     pub api_token: String,
     /// Интервал опроса нод, сек.
     pub poll_interval: u64,
     /// Порты admin-API, которые обходятся при обнаружении.
     pub discovery_ports: Vec<u16>,
+    /// Запрет любых мутаций (режим «только чтение»).
+    pub readonly: bool,
+}
+
+/// Роль пользователя дашборда.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UiRole {
+    /// Только чтение: GET-запросы.
+    Viewer,
+    /// Оператор: чтение + постановка/отмена задач.
+    Operator,
+    /// Администратор: всё, включая CRUD нод.
+    Admin,
+}
+
+impl UiRole {
+    /// Строковое имя роли (для JSON и логов).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UiRole::Viewer => "viewer",
+            UiRole::Operator => "operator",
+            UiRole::Admin => "admin",
+        }
+    }
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -100,9 +129,13 @@ impl UiConfig {
             data_dir,
             nodes_file,
             token: env_or("ZEPTOMESH_UI_TOKEN", ""),
+            operator_token: env_or("ZEPTOMESH_UI_OPERATOR_TOKEN", ""),
+            viewer_token: env_or("ZEPTOMESH_UI_VIEWER_TOKEN", ""),
             api_token: env_or("ZEPTOMESH_UI_API_TOKEN", ""),
             poll_interval,
             discovery_ports,
+            readonly: env_or("ZEPTOMESH_UI_READONLY", "") == "1"
+                || env_or("ZEPTOMESH_UI_READONLY", "").eq_ignore_ascii_case("true"),
         })
     }
 }
@@ -276,6 +309,15 @@ impl Registry {
         Ok(())
     }
 
+    /// Очистить реестр (режим импорта `replace`).
+    pub async fn clear(&self) {
+        let mut guard = self.nodes.write().await;
+        guard.clear();
+        let snapshot = guard.clone();
+        drop(guard);
+        self.save(&snapshot).await.ok();
+    }
+
     /// Сохранить реестр на диск (атомарно).
     async fn save(&self, nodes: &[NodeEntry]) -> Result<()> {
         if let Some(dir) = self.path.parent() {
@@ -361,6 +403,10 @@ pub struct Server {
     reg: Registry,
     http: reqwest::Client,
     mesh: MeshCache,
+    /// Число обработанных HTTP-запросов (для Prometheus).
+    requests_total: AtomicU64,
+    /// Число ошибок проксирования к admin-API узлов.
+    proxy_errors: AtomicU64,
 }
 
 impl Server {
@@ -376,6 +422,8 @@ impl Server {
             reg,
             http,
             mesh: MeshCache::new(ttl),
+            requests_total: AtomicU64::new(0),
+            proxy_errors: AtomicU64::new(0),
         }))
     }
 
@@ -427,8 +475,10 @@ impl Server {
         let path = req.uri().path().to_string();
         let query = req.uri().query().unwrap_or("").to_string();
 
-        // Авторизация самого дашборда.
-        if !self.cfg.token.is_empty() && path != "/healthz" {
+        // Авторизация дашборда: определить роль по предъявленному токену.
+        let role = if path == "/healthz" {
+            UiRole::Admin
+        } else {
             let presented = req
                 .headers()
                 .get("authorization")
@@ -436,10 +486,20 @@ impl Server {
                 .and_then(|v| v.strip_prefix("Bearer "))
                 .unwrap_or("")
                 .to_string();
-            if !const_eq(presented.as_bytes(), self.cfg.token.as_bytes()) {
-                return err_resp(StatusCode::UNAUTHORIZED, "неверный токен дашборда");
+            match role_for(&self.cfg, &presented) {
+                Some(r) => r,
+                None => return err_resp(StatusCode::UNAUTHORIZED, "неверный токен дашборда"),
             }
+        };
+        if !role_allows(&self.cfg, role, &method, &path) {
+            let reason = if self.cfg.readonly && method != Method::GET && method != Method::HEAD {
+                "дашборд работает в режиме «только чтение»"
+            } else {
+                "недостаточно прав для этой операции"
+            };
+            return err_resp(StatusCode::FORBIDDEN, reason);
         }
+        self.requests_total.fetch_add(1, Ordering::Relaxed);
 
         let body = match read_body(req).await {
             Ok(b) => b,
@@ -473,7 +533,10 @@ impl Server {
             return self.nodes_search(&query).await;
         }
         if path == "/api/v1/nodes/import" && method == Method::POST {
-            return self.nodes_import(body).await;
+            return self.nodes_import(body, &query).await;
+        }
+        if path == "/api/v1/nodes/export" && method == Method::GET {
+            return self.node_export(&query).await;
         }
         if let Some(rest) = path.strip_prefix("/api/v1/nodes/") {
             let id = rest.trim_end_matches('/');
@@ -496,6 +559,11 @@ impl Server {
         // --- снимок сети ---
         if path == "/api/v1/mesh" && method == Method::GET {
             return self.mesh_snapshot().await;
+        }
+
+        // --- метрики Prometheus ---
+        if (method == Method::GET || method == Method::HEAD) && path == "/metrics" {
+            return self.metrics().await;
         }
 
         // --- задачи ---
@@ -610,10 +678,15 @@ impl Server {
     }
 
     /// Поиск нод: по IP (одиночному, CIDR или диапазону) либо по подстроке.
+    ///
+    /// Дополнительно можно отфильтровать по навыку (`?skill=`) — тогда
+    /// проверяется реальный реестр навыков каждой ноды, а не только её теги.
     async fn nodes_search(&self, query: &str) -> Resp {
         let params = parse_query(query);
         let q = params.get("q").cloned().unwrap_or_default();
         let q = q.trim();
+        let skill = params.get("skill").cloned().unwrap_or_default();
+        let skill = skill.trim();
         let nodes = self.reg.list().await;
 
         let matched: Vec<NodeEntry> = if q.is_empty() {
@@ -640,27 +713,90 @@ impl Server {
                 .collect()
         };
 
+        // Фильтр по навыку: спрашиваем у нод их реестр навыков.
+        let matched = if skill.is_empty() {
+            matched
+        } else {
+            let want = skill.to_lowercase();
+            let mut futs = Vec::new();
+            for node in &matched {
+                let node = node.clone();
+                let want = want.clone();
+                futs.push(async move {
+                    let has = match self.call(&node, Method::GET, "/api/v1/skills", None).await {
+                        Ok((status, value)) if status.is_success() => value
+                            .get("skills")
+                            .and_then(|s| s.as_array())
+                            .map(|arr| {
+                                arr.iter().any(|s| {
+                                    s.get("name")
+                                        .and_then(|n| n.as_str())
+                                        .map(|n| n.to_lowercase() == want)
+                                        .unwrap_or(false)
+                                })
+                            })
+                            .unwrap_or(false),
+                        _ => false,
+                    };
+                    (node, has)
+                });
+            }
+            let probed = futures::future::join_all(futs).await;
+            probed
+                .into_iter()
+                .filter_map(|(node, has)| if has { Some(node) } else { None })
+                .collect()
+        };
+
         json_resp(
             StatusCode::OK,
             json!({
                 "query": q,
+                "skill": skill,
                 "count": matched.len(),
                 "nodes": matched,
             }),
         )
     }
 
-    /// Импортировать найденные обходом ноды в реестр.
-    async fn nodes_import(&self, body: Bytes) -> Resp {
+    /// Импортировать ноды в реестр.
+    ///
+    /// Принимает как найденные обходом записи (`ip`/`port`/`url`/`node_name`),
+    /// так и полные записи реестра (`name`/`url`/`token`/`enabled`/`tags`).
+    /// Режим задаётся query-параметром `mode`:
+    /// - `merge` (по умолчанию) — добавить новые, существующие по URL пропустить;
+    /// - `upsert` — добавить новые, существующие по URL обновить;
+    /// - `replace` — очистить реестр и записать только импортируемые записи.
+    async fn nodes_import(&self, body: Bytes, query: &str) -> Resp {
         let Ok(v) = serde_json::from_slice::<Value>(&body) else {
             return err_resp(StatusCode::BAD_REQUEST, "некорректный JSON");
         };
-        let items = v
-            .get("nodes")
-            .and_then(|n| n.as_array())
+        let mode = parse_query(query)
+            .get("mode")
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_else(|| "merge".to_string());
+        if !matches!(mode.as_str(), "merge" | "upsert" | "replace") {
+            return err_resp(
+                StatusCode::BAD_REQUEST,
+                "mode должен быть merge, upsert или replace",
+            );
+        }
+        let items = match &v {
+            Value::Array(a) => a.clone(),
+            Value::Object(o) => o
+                .get("nodes")
+                .and_then(|n| n.as_array())
+                .cloned()
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+
+        if mode == "replace" {
+            self.reg.clear().await;
+        }
+
         let mut added = Vec::new();
+        let mut updated = Vec::new();
         let mut skipped = Vec::new();
         for item in items {
             let url = item
@@ -670,12 +806,19 @@ impl Server {
                 .trim()
                 .to_string();
             if url.is_empty() {
+                skipped.push("запись без url".to_string());
                 continue;
             }
+            let url = url.trim_end_matches('/').to_string();
             let name = item
-                .get("node_name")
+                .get("name")
                 .and_then(|u| u.as_str())
                 .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    item.get("node_name")
+                        .and_then(|u| u.as_str())
+                        .filter(|s| !s.is_empty())
+                })
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| {
                     item.get("ip")
@@ -683,23 +826,95 @@ impl Server {
                         .unwrap_or(&url)
                         .to_string()
                 });
-            let entry = NodeEntry {
-                id: String::new(),
-                name,
-                url: url.trim_end_matches('/').to_string(),
-                token: None,
-                enabled: true,
-                tags: vec!["discovered".to_string()],
-                created_at: None,
-            };
-            match self.reg.add(entry).await {
-                Ok(n) => added.push(n),
-                Err(_) => skipped.push(url),
+            let token = item
+                .get("token")
+                .and_then(|t| t.as_str())
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty());
+            let enabled = item.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true);
+            let tags: Vec<String> = item
+                .get("tags")
+                .and_then(|t| t.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_else(|| vec!["imported".to_string()]);
+
+            let existing = self.reg.find_by_url(&url).await;
+            match existing {
+                Some(cur) if mode == "upsert" => {
+                    let patch = NodePatch {
+                        name: Some(name),
+                        url: Some(url.clone()),
+                        token,
+                        enabled: Some(enabled),
+                        tags: Some(tags),
+                    };
+                    match self.reg.update(&cur.id, patch).await {
+                        Ok(n) => updated.push(n),
+                        Err(e) => skipped.push(format!("{url}: {e}")),
+                    }
+                }
+                Some(_) => skipped.push(url),
+                None => {
+                    let entry = NodeEntry {
+                        id: String::new(),
+                        name,
+                        url: url.clone(),
+                        token,
+                        enabled,
+                        tags,
+                        created_at: None,
+                    };
+                    match self.reg.add(entry).await {
+                        Ok(n) => added.push(n),
+                        Err(e) => skipped.push(format!("{url}: {e}")),
+                    }
+                }
             }
         }
         json_resp(
             StatusCode::OK,
-            json!({"added": added.len(), "skipped": skipped, "nodes": added}),
+            json!({
+                "mode": mode,
+                "added": added.len(),
+                "updated": updated.len(),
+                "skipped": skipped,
+                "nodes": added,
+            }),
+        )
+    }
+
+    /// Экспорт реестра нод в JSON (структура совместима с импортом).
+    ///
+    /// Токены нод по умолчанию **не** попадают в выгрузку: иначе секрет
+    /// утечёт в файл. Передать их явно — `?include_tokens=true`.
+    async fn node_export(&self, query: &str) -> Resp {
+        let include_tokens = parse_query(query)
+            .get("include_tokens")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        let nodes = self.reg.list().await;
+        let nodes: Vec<Value> = nodes
+            .into_iter()
+            .map(|mut n| {
+                if !include_tokens {
+                    n.token = None;
+                }
+                serde_json::to_value(n).unwrap_or(Value::Null)
+            })
+            .collect();
+        json_resp(
+            StatusCode::OK,
+            json!({
+                "version": 1,
+                "exported_at": Utc::now().to_rfc3339(),
+                "include_tokens": include_tokens,
+                "count": nodes.len(),
+                "nodes": nodes,
+            }),
         )
     }
 
@@ -793,6 +1008,120 @@ impl Server {
         let snapshot = self.build_mesh().await;
         self.mesh.put(snapshot.clone()).await;
         json_resp(StatusCode::OK, snapshot)
+    }
+
+    /// Метрики дашборда в формате Prometheus textformat.
+    ///
+    /// Снимок сети берётся из кэша (без пересборки — иначе эндпоинт был бы
+    /// слишком тяжёлым для скрапера), инвентарь задач — параллельный опрос
+    /// нод с ограничением числа одновременных запросов.
+    async fn metrics(&self) -> Resp {
+        let all = self.reg.list().await;
+        let enabled: Vec<NodeEntry> = all.iter().filter(|n| n.enabled).cloned().collect();
+
+        // Статистика сети — из последнего снимка, если он уже есть.
+        let cached = self.mesh.get().await;
+        let online = cached
+            .as_ref()
+            .and_then(|v| v["stats"]["online"].as_u64())
+            .unwrap_or(0);
+        let discovered = cached
+            .as_ref()
+            .and_then(|v| v["stats"]["discovered"].as_u64())
+            .unwrap_or(0);
+        let links = cached
+            .as_ref()
+            .and_then(|v| v["stats"]["links"].as_u64())
+            .unwrap_or(0);
+
+        // Инвентарь задач: параллельный опрос нод.
+        let sem = Arc::new(Semaphore::new(16));
+        let mut futs = Vec::new();
+        for node in &enabled {
+            let sem = sem.clone();
+            let node = node.clone();
+            futs.push(async move {
+                let _permit = sem.acquire_owned().await.ok()?;
+                let (status, value) = self
+                    .call(&node, Method::GET, "/api/v1/tasks?limit=1000", None)
+                    .await
+                    .ok()?;
+                if !status.is_success() {
+                    return None;
+                }
+                Some(value)
+            });
+        }
+        let inventories = futures::future::join_all(futs).await;
+
+        let mut completed = 0u64;
+        let mut failed = 0u64;
+        let mut running = 0u64;
+        let mut task_total = 0u64;
+        for inv in inventories.into_iter().flatten() {
+            let Some(list) = inv.get("tasks").and_then(|t| t.as_array()) else {
+                continue;
+            };
+            for t in list {
+                task_total += 1;
+                match t.get("status").and_then(|s| s.as_str()).unwrap_or("") {
+                    "COMPLETED" => completed += 1,
+                    "FAILED" | "REJECTED" => failed += 1,
+                    _ => running += 1,
+                }
+            }
+        }
+
+        let body = format!(
+            "# HELP zeptomesh_ui_nodes_total Managed nodes in the registry.\n\
+             # TYPE zeptomesh_ui_nodes_total gauge\n\
+             zeptomesh_ui_nodes_total {total}\n\
+             # HELP zeptomesh_ui_nodes_enabled Enabled managed nodes.\n\
+             # TYPE zeptomesh_ui_nodes_enabled gauge\n\
+             zeptomesh_ui_nodes_enabled {enabled}\n\
+             # HELP zeptomesh_ui_nodes_online Nodes reachable at the last poll.\n\
+             # TYPE zeptomesh_ui_nodes_online gauge\n\
+             zeptomesh_ui_nodes_online {online}\n\
+             # HELP zeptomesh_ui_nodes_discovered Peers seen but not managed.\n\
+             # TYPE zeptomesh_ui_nodes_discovered gauge\n\
+             zeptomesh_ui_nodes_discovered {discovered}\n\
+             # HELP zeptomesh_ui_links Edges in the mesh graph.\n\
+             # TYPE zeptomesh_ui_links gauge\n\
+             zeptomesh_ui_links {links}\n\
+             # HELP zeptomesh_ui_tasks_total Task records across all nodes.\n\
+             # TYPE zeptomesh_ui_tasks_total gauge\n\
+             zeptomesh_ui_tasks_total {task_total}\n\
+             # HELP zeptomesh_ui_tasks_completed_total Completed tasks.\n\
+             # TYPE zeptomesh_ui_tasks_completed_total counter\n\
+             zeptomesh_ui_tasks_completed_total {completed}\n\
+             # HELP zeptomesh_ui_tasks_failed_total Failed or rejected tasks.\n\
+             # TYPE zeptomesh_ui_tasks_failed_total counter\n\
+             zeptomesh_ui_tasks_failed_total {failed}\n\
+             # HELP zeptomesh_ui_tasks_running Tasks in a non-terminal state.\n\
+             # TYPE zeptomesh_ui_tasks_running gauge\n\
+             zeptomesh_ui_tasks_running {running}\n\
+             # HELP zeptomesh_ui_requests_total HTTP requests handled by the BFF.\n\
+             # TYPE zeptomesh_ui_requests_total counter\n\
+             zeptomesh_ui_requests_total {requests}\n\
+             # HELP zeptomesh_ui_proxy_errors_total Failed proxies to node admin APIs.\n\
+             # TYPE zeptomesh_ui_proxy_errors_total counter\n\
+             zeptomesh_ui_proxy_errors_total {proxy_errors}\n\
+             # HELP zeptomesh_ui_build_info Dashboard build information.\n\
+             # TYPE zeptomesh_ui_build_info gauge\n\
+             zeptomesh_ui_build_info{{version=\"0.1\",component=\"zeptomesh-ui\"}} 1\n",
+            total = all.len(),
+            enabled = enabled.len(),
+            online = online,
+            discovered = discovered,
+            links = links,
+            task_total = task_total,
+            completed = completed,
+            failed = failed,
+            running = running,
+            requests = self.requests_total.load(Ordering::Relaxed),
+            proxy_errors = self.proxy_errors.load(Ordering::Relaxed),
+        );
+        text_resp(StatusCode::OK, "text/plain; version=0.0.4; charset=utf-8", body)
     }
 
     async fn build_mesh(&self) -> Value {
@@ -961,6 +1290,9 @@ impl Server {
     // -----------------------------------------------------------------
 
     /// Список задач по всем (или выбранной) нодам.
+    ///
+    /// Фильтры: `status` (точное совпадение статуса), `q` (подстрока в
+    /// инструкции), `skill` (требуемый навык), `node_id`, `limit`.
     async fn tasks_list(&self, query: &str) -> Resp {
         let params = parse_query(query);
         let limit = params
@@ -969,6 +1301,9 @@ impl Server {
             .unwrap_or(50)
             .clamp(1, 500);
         let node_filter = params.get("node_id").cloned().unwrap_or_default();
+        let status_filter = params.get("status").cloned().unwrap_or_default();
+        let text_filter = params.get("q").cloned().unwrap_or_default().to_lowercase();
+        let skill_filter = params.get("skill").cloned().unwrap_or_default().to_lowercase();
 
         let all = self.reg.list().await;
         let targets: Vec<NodeEntry> = all
@@ -1011,10 +1346,65 @@ impl Server {
                 Err(e) => errors.push(json!({"error": e.to_string()})),
             }
         }
-        tasks.truncate(limit);
+
+        let filtered: Vec<Value> = tasks
+            .into_iter()
+            .filter(|t| {
+                if !status_filter.is_empty() {
+                    let st = t.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    if !st.eq_ignore_ascii_case(&status_filter) {
+                        return false;
+                    }
+                }
+                if !text_filter.is_empty() {
+                    let instr = t
+                        .get("instruction")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    if !instr.contains(&text_filter) {
+                        return false;
+                    }
+                }
+                if !skill_filter.is_empty() {
+                    let skills = t
+                        .get("required_skills")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let hit = skills.iter().any(|s| {
+                        s.as_str()
+                            .map(|v| v.to_lowercase() == skill_filter)
+                            .or_else(|| {
+                                s.get("name")
+                                    .and_then(|v| v.as_str())
+                                    .map(|v| v.to_lowercase() == skill_filter)
+                            })
+                            .unwrap_or(false)
+                    });
+                    if !hit {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        let mut filtered = filtered;
+        filtered.truncate(limit);
         json_resp(
             StatusCode::OK,
-            json!({"tasks": tasks, "errors": errors, "count": tasks.len()}),
+            json!({
+                "tasks": filtered,
+                "errors": errors,
+                "count": filtered.len(),
+                "filters": {
+                    "status": status_filter,
+                    "q": text_filter,
+                    "skill": skill_filter,
+                    "node_id": node_filter,
+                },
+            }),
         )
     }
 
@@ -1277,6 +1667,57 @@ fn const_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
+/// Определить роль по предъявленному токену.
+///
+/// Пустая конфигурация (токены не заданы) — авторизация выключена, роль
+/// всегда `Admin`. Иначе токен должен совпасть с одним из заданных.
+fn role_for(cfg: &UiConfig, presented: &str) -> Option<UiRole> {
+    let admin = cfg.token.trim();
+    let operator = cfg.operator_token.trim();
+    let viewer = cfg.viewer_token.trim();
+    if admin.is_empty() && operator.is_empty() && viewer.is_empty() {
+        return Some(UiRole::Admin);
+    }
+    if !admin.is_empty() && const_eq(presented.as_bytes(), admin.as_bytes()) {
+        return Some(UiRole::Admin);
+    }
+    if !operator.is_empty() && const_eq(presented.as_bytes(), operator.as_bytes()) {
+        return Some(UiRole::Operator);
+    }
+    if !viewer.is_empty() && const_eq(presented.as_bytes(), viewer.as_bytes()) {
+        return Some(UiRole::Viewer);
+    }
+    None
+}
+
+/// Проверить, разрешена ли операция роли.
+///
+/// `readonly` запрещает любые мутации независимо от роли. Оператору
+/// разрешены только задачи и проксирование к узлам (без `admin`-ручек узла);
+/// изменение реестра нод доступно лишь администратору.
+fn role_allows(cfg: &UiConfig, role: UiRole, method: &Method, path: &str) -> bool {
+    if cfg.readonly && *method != Method::GET && *method != Method::HEAD {
+        return false;
+    }
+    match role {
+        UiRole::Admin => true,
+        UiRole::Viewer => *method == Method::GET || *method == Method::HEAD,
+        UiRole::Operator => {
+            if *method == Method::GET || *method == Method::HEAD {
+                return true;
+            }
+            if path.starts_with("/api/v1/tasks") {
+                return true;
+            }
+            if path.starts_with("/api/v1/proxy/") {
+                // Не даём проксировать разрушительные admin-ручки узла.
+                return !path.contains("/admin/");
+            }
+            false
+        }
+    }
+}
+
 /// Разобрать query-строку в карту.
 fn parse_query(q: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
@@ -1343,6 +1784,15 @@ fn json_resp(status: StatusCode, v: Value) -> Resp {
     Response::builder()
         .status(status)
         .header("content-type", "application/json; charset=utf-8")
+        .body(Full::new(Bytes::from(body)))
+        .unwrap()
+}
+
+/// Текстовый ответ (Prometheus textformat и подобное).
+fn text_resp(status: StatusCode, content_type: &str, body: String) -> Resp {
+    Response::builder()
+        .status(status)
+        .header("content-type", content_type)
         .body(Full::new(Bytes::from(body)))
         .unwrap()
 }

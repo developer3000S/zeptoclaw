@@ -129,6 +129,11 @@ fn role_allows(role: Role, method: &Method, path: &str) -> bool {
 // Сервер
 // ---------------------------------------------------------------------------
 
+/// Пауза между ответом на `/api/v1/shutdown` (или `/leave`) и реальной
+/// остановкой узла. Нужна, чтобы HTTP-ответ успел уйти клиенту до выхода
+/// процесса: иначе соединение рвётся на полпути (hyper: IncompleteMessage).
+const SHUTDOWN_GRACE_MS: u64 = 250;
+
 pub struct Server {
     node: Arc<Node>,
     cfg: Arc<Config>,
@@ -940,7 +945,15 @@ impl Server {
     }
 
     async fn leave(&self) -> Resp {
-        self.node.request_shutdown();
+        let node = self.node.clone();
+        tokio::spawn(async move {
+            // Пауза перед реальной остановкой: ответ «leaving» должен уйти
+            // клиенту до выхода процесса. Иначе main.rs завершается через
+            // std::process::exit, не дописав тело ответа, и клиент видит обрыв
+            // соединения (hyper: IncompleteMessage).
+            tokio::time::sleep(std::time::Duration::from_millis(SHUTDOWN_GRACE_MS)).await;
+            node.request_shutdown();
+        });
         json_resp(StatusCode::OK, serde_json::json!({ "status": "leaving" }))
     }
 

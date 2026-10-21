@@ -6,8 +6,10 @@ zeptoclaw_rust/Cargo.lock  # binary crate: lockfile — личное для ка
 *.rs.bk
 
 # Go (archive; удалён из дерева, но может остаться от старых клонов)
-bin/
-dist/
+# Якорь в начале — иначе паттерн игнорирует и zeptoclaw_rust/src/bin/,
+# где лежит точка входа бинаря zeptomesh-ui, объявленного в Cargo.toml.
+/bin/
+/dist/
 *.test
 
 # Cross-compile outputs
