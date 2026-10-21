@@ -223,6 +223,9 @@ impl Table {
     pub fn upsert(&self, n: &Neighbor) -> Neighbor {
         let mut g = self.inner.lock().unwrap();
         let cur = g.neighbors.entry(n.peer_id.clone()).or_default();
+        // Ключ карты — peer_id, но и в самой записи поле должно быть заполнено:
+        // иначе сосед остаётся с пустым id (gossip, trust, выбор кандидата, API).
+        cur.peer_id = n.peer_id.clone();
         if !n.addrs.is_empty() {
             cur.addrs = n.addrs.clone();
         }
@@ -437,6 +440,11 @@ impl Table {
         let recs = st.list_peers()?;
         let mut g = self.inner.lock().unwrap();
         for r in recs {
+            // Запись без peer_id — мусор: такого «пира» нельзя ни адресовать,
+            // ни проверить подписью, в таблицу его тащить незачем.
+            if r.peer_id.is_empty() {
+                continue;
+            }
             g.neighbors.insert(
                 r.peer_id.clone(),
                 Neighbor {

@@ -281,8 +281,8 @@ find_free_port() {
             fi
         fi
 
-        ((port++))
-        ((attempt++))
+        port=$((port + 1))
+        attempt=$((attempt + 1))
     done
 
     log_error "Не удалось найти свободный порт после $max_attempts попыток"
@@ -394,32 +394,22 @@ generate_docker_compose() {
     repo_root="$(cd "$(dirname "$0")" && pwd)"
 
     cat > "$output_file" << 'DOCKER_COMPOSE_EOF'
-version: '3.8'
-
 services:
 DOCKER_COMPOSE_EOF
 
-    local bootstrap_addrs=""
     for i in $(seq 0 $((NUM_NODES - 1))); do
         local mesh_port=${MESH_PORTS[$i]}
         local api_port=${API_PORTS[$i]}
         local prom_port=${PROM_PORTS[$i]}
         local node_name="${NAME_PREFIX}-${i}"
-        local data_subdir="${DATA_DIR}/${i}"
 
-        # Первый узел — якорь для остальных
+        # Нода 0 — якорь: её адреса знают все остальные, сама она ни к кому
+        # не подключается (соседей находит через gossip/DHT).
+        # Rust-нода понимает только /ip4/../tcp/.., /ip6/../tcp/.. или голый
+        # host:port — имя контейнера резолвится через DNS docker-сети.
         local bootstrap=""
-        if [[ $i -eq 0 ]]; then
-            bootstrap=""
-        else
-            bootstrap="${NAME_PREFIX}-0:${mesh_port}"
-        fi
-
-        # Формируем bootstrap строку для этой ноды
-        if [[ -n "$bootstrap_addrs" ]]; then
-            bootstrap_addrs="${bootstrap_addrs},/ip4/127.0.0.1/tcp/${bootstrap}"
-        else
-            bootstrap_addrs="/ip4/127.0.0.1/tcp/${mesh_port}"
+        if [[ $i -gt 0 ]]; then
+            bootstrap="${NAME_PREFIX}-0:${MESH_PORTS[0]}"
         fi
 
         cat >> "$output_file" << DOCKER_SERVICE_EOF
@@ -427,6 +417,7 @@ DOCKER_COMPOSE_EOF
     build:
       context: ${repo_root}
       dockerfile: deploy/docker/Dockerfile
+    image: ${IMAGE_NAME}:${IMAGE_TAG}
     container_name: ${node_name}
     hostname: ${node_name}
     restart: unless-stopped
@@ -441,7 +432,7 @@ DOCKER_COMPOSE_EOF
       - ZEPTOMESH_MESH_PORT=${mesh_port}
       - ZEPTOMESH_API_PORT=${api_port}
       - ZEPTOMESH_PROM_LISTEN=:${prom_port}
-      - ZEPTOMESH_BOOTSTRAP=${bootstrap_addrs}
+      - ZEPTOMESH_BOOTSTRAP=${bootstrap}
       - ZEPTOMESH_PSK=${PSK}
       - ZEPTOMESH_PICO_MODE=${PICO_MODE}
       - ZEPTOMESH_OLLAMA_URL=${OLLAMA_URL}
@@ -603,7 +594,7 @@ install_docker() {
             break
         fi
         sleep 1
-        ((waited++))
+        waited=$((waited + 1))
     done
 
     if [[ $waited -ge $max_wait ]]; then

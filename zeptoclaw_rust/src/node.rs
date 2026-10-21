@@ -420,7 +420,15 @@ impl Node {
                 .await
                 .map_err(|e| anyhow!("node: bind {sock}: {e}"))?;
             let actual = ln.local_addr()?;
-            bound.push(format!("/ip4/{}/tcp/{}", actual.ip(), actual.port()));
+            // Объявляем соседям не bind-адрес (0.0.0.0), а реальный адрес в сети.
+            let ip = if actual.is_ipv4() && actual.ip().is_unspecified() {
+                Self::routable_ip()
+                    .map(std::net::IpAddr::from)
+                    .unwrap_or(actual.ip())
+            } else {
+                actual.ip()
+            };
+            bound.push(format!("/ip4/{}/tcp/{}", ip, actual.port()));
             let this = self.clone();
             tokio::spawn(async move {
                 loop {
@@ -447,14 +455,33 @@ impl Node {
         );
         tracing::info!(peer_id = %self.self_id(), listen = ?bound, "node_started");
 
-        // Bootstrap-диалы.
+        // Bootstrap-диалы с ретраем: якорь может подняться позже нас, а scan по
+        // умолчанию выключен — однократный диал оставлял ноду изолированной.
         let this = self.clone();
         let boot = self.cfg.discovery.bootstrap.clone();
         tokio::spawn(async move {
-            for b in boot {
-                if let Some(hp) = parse_addr(&b) {
-                    let _ = this.dial_hp(&hp, &b).await;
+            let mut pending: Vec<(String, String)> = boot
+                .iter()
+                .filter_map(|b| parse_addr(b).map(|hp| (hp, b.clone())))
+                .collect();
+            let mut delay = Duration::from_secs(2);
+            while !pending.is_empty() {
+                let mut failed = Vec::new();
+                for (hp, orig) in pending {
+                    match this.dial_hp(&hp, &orig).await {
+                        Ok(()) => tracing::info!("bootstrap connected: {orig}"),
+                        Err(e) => {
+                            tracing::debug!("bootstrap dial {orig} failed: {e}");
+                            failed.push((hp, orig));
+                        }
+                    }
                 }
+                pending = failed;
+                if pending.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(30));
             }
         });
 
@@ -472,6 +499,9 @@ impl Node {
                 this.gossip_round().await;
                 this.prune_round();
                 this.expire_searches();
+                // Peer-exchange: подключаемся к пирам, чьи адреса узнали из
+                // gossip, — без этого mesh остаётся звездой от bootstrap-ноды.
+                this.dial_known_peers().await;
             }
         });
 
@@ -669,9 +699,7 @@ impl Node {
             match extract_key_from_peer_id(&req.requester_peer_id) {
                 Ok(vk) => {
                     let body = wire::search_request_body(&req);
-                    if crate::security::verify(&vk.to_bytes().to_vec(), &body, &req.signature)
-                        .is_err()
-                    {
+                    if crate::security::verify_key(&vk, &body, &req.signature).is_err() {
                         tracing::debug!(
                             "search: bad request signature from {}",
                             req.requester_peer_id
@@ -736,9 +764,7 @@ impl Node {
             match extract_key_from_peer_id(&rep.responder_peer_id) {
                 Ok(vk) => {
                     let body = wire::search_reply_body(&rep);
-                    if crate::security::verify(&vk.to_bytes().to_vec(), &body, &rep.signature)
-                        .is_err()
-                    {
+                    if crate::security::verify_key(&vk, &body, &rep.signature).is_err() {
                         tracing::debug!(
                             "search: bad reply signature from {}",
                             rep.responder_peer_id
@@ -750,7 +776,7 @@ impl Node {
             }
         }
         for p in &rep.peers {
-            if p.peer_id == self.self_id() {
+            if p.peer_id.is_empty() || p.peer_id == self.self_id() {
                 continue;
             }
             // Кандидат из ответа — в таблицу соседей (неподключённая запись).
@@ -1026,6 +1052,59 @@ impl Node {
         self.dial_hp(&hp, addr).await
     }
 
+    /// Peer-exchange: подключаемся к пирам, чьи адреса узнали из gossip или из
+    /// capabilities, но с которыми ещё нет живого соединения. Без этого mesh
+    /// остаётся звездой от bootstrap-ноды (scan по умолчанию выключен).
+    async fn dial_known_peers(self: &Arc<Self>) -> usize {
+        let me = self.self_id();
+        // Пиры, с которыми уже есть живое соединение.
+        let connected: HashSet<String> = self
+            .conns
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|c| c.peer_id.clone())
+            .collect();
+        let targets: Vec<String> = {
+            let g = self.addrs.lock().unwrap();
+            g.iter()
+                .filter(|(pid, as_)| {
+                    !pid.is_empty()
+                        && pid.as_str() != me.as_str()
+                        && !connected.contains(pid.as_str())
+                        && !as_.is_empty()
+                })                .flat_map(|(_, as_)| as_.iter().cloned())
+                .collect()
+        };
+        let mut dialed = 0usize;
+        let timeout = *self.cfg.discovery.scan.dial_timeout;
+        for a in targets {
+            let Some(hp) = parse_addr(&a) else { continue };
+            // 0.0.0.0 — bind-адрес, а не адрес в сети: connect по нему ушёл бы
+            // в localhost, т.е. нода подключилась бы сама к себе.
+            if hp.starts_with("0.0.0.0:") || hp.starts_with("[::]:") {
+                continue;
+            }
+            match tokio::time::timeout(timeout, self.dial_hp(&hp, &a)).await {
+                Ok(Ok(())) => dialed += 1,
+                _ => {}
+            }
+        }
+        dialed
+    }
+
+    /// Routable IP-адрес ноды для объявления соседям. Docker прописывает
+    /// HOSTNAME в /etc/hosts вместе с IP-контейнера, поэтому getaddrinfo даёт
+    /// адрес, по которому ноду реально видят из docker-сети: bind-адрес 0.0.0.0
+    /// соседям бесполезен — connect по нему уходит в localhost.
+    fn routable_ip() -> Option<std::net::Ipv4Addr> {
+        use std::net::ToSocketAddrs;
+        let host = std::env::var("HOSTNAME").ok()?;
+        let mut addrs = (host.as_str(), 0u16).to_socket_addrs().ok()?;
+        let ip = addrs.find(|a| a.is_ipv4() && !a.ip().is_loopback())?.ip();
+        ip.as_ipv4().copied()
+    }
+
     /// Принятый TCP-конн: handshake capabilities → attach reader-loop.
     async fn handle_conn(self: &Arc<Self>, stream: TcpStream) -> Result<()> {
         let peer = stream.peer_addr()?;
@@ -1243,12 +1322,7 @@ impl Node {
     fn absorb_capabilities(self: &Arc<Self>, cid: u64, caps: Capabilities) {
         let body_ok = extract_key_from_peer_id(&caps.peer_id)
             .map(|vk| {
-                crate::security::verify(
-                    &vk.to_bytes().to_vec(),
-                    &wire::caps_body(&caps),
-                    &caps.signature,
-                )
-                .is_ok()
+                crate::security::verify_key(&vk, &wire::caps_body(&caps), &caps.signature).is_ok()
             })
             .unwrap_or(false);
         if !body_ok {
@@ -1320,7 +1394,7 @@ impl Node {
             .map(|n| n.peer_id)
             .collect();
         for st in g.states {
-            if st.peer_id == self.self_id() || own.contains(&st.peer_id) {
+            if st.peer_id.is_empty() || st.peer_id == self.self_id() || own.contains(&st.peer_id) {
                 continue;
             }
             if !self.policy.allow_connection(&st.peer_id) {
@@ -1364,6 +1438,7 @@ impl Node {
             .table
             .list()
             .into_iter()
+            .filter(|n| !n.peer_id.is_empty())
             .take(64)
             .map(|n| PeerState {
                 peer_id: n.peer_id,
