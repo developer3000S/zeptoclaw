@@ -13,6 +13,10 @@ path = "src/lib.rs"
 name = "zeptomesh-node"
 path = "src/main.rs"
 
+[[bin]]
+name = "zeptomesh-ui"
+path = "src/bin/zeptomesh-ui.rs"
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"

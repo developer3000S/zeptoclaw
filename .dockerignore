@@ -1,0 +1,17 @@
+# Сборочные артефакты Rust (2.7 ГБ локально) — в контекст сборки не нужны
+zeptoclaw_rust/target/
+**/*.rs.bk
+
+# Git
+.git/
+.gitignore
+
+# Runtime-данные узлов и дашборда
+zeptomesh-data/
+zeptomesh-ui-data/
+zeptomesh_rust_data/
+.dev/
+
+# Логи и дампы
+*.log
+*.dump

@@ -33,5 +33,6 @@ pub mod skills;
 pub mod storage;
 pub mod tasks;
 pub mod triggers;
+pub mod ui;
 pub mod version;
 pub mod wire;

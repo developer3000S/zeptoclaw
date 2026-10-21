@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ZeptoClaw Mesh Dashboard</title>
+<style>
+    :root {
+        --bg: #0b1120;
+        --panel: #111c33;
+        --panel-2: #16233d;
+        --border: #24344f;
+        --text: #e2e8f0;
+        --muted: #7d8da8;
+        --accent: #38bdf8;
+        --ok: #22c55e;
+        --warn: #f59e0b;
+        --err: #ef4444;
+        --violet: #a78bfa;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+        background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px;
+    }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+    header {
+        background: linear-gradient(90deg, #0f1b33, #0b1120);
+        border-bottom: 1px solid var(--border);
+        padding: .85rem 1.5rem;
+        display: flex; align-items: center; gap: 1.25rem; flex-wrap: wrap;
+        position: sticky; top: 0; z-index: 50;
+    }
+    header h1 { font-size: 1.15rem; color: var(--accent); font-weight: 650; letter-spacing: .2px; }
+    header h1 span { color: var(--muted); font-weight: 400; font-size: .8rem; margin-left: .4rem; }
+    .spacer { flex: 1; }
+
+    .badge {
+        padding: .22rem .6rem; border-radius: 999px; font-size: .78rem;
+        border: 1px solid transparent; white-space: nowrap;
+    }
+    .badge-ok { background: #22c55e1f; color: var(--ok); border-color: #22c55e40; }
+    .badge-err { background: #ef44441f; color: var(--err); border-color: #ef444440; }
+    .badge-warn { background: #f59e0b1f; color: var(--warn); border-color: #f59e0b40; }
+    .badge-muted { background: #7d8da81f; color: var(--muted); border-color: #7d8da840; }
+    .badge-violet { background: #a78bfa1f; color: var(--violet); border-color: #a78bfa40; }
+
+    button, .btn {
+        background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+        padding: .45rem .85rem; border-radius: .5rem; cursor: pointer; font-size: .85rem;
+        font-family: inherit; transition: background .12s, border-color .12s;
+    }
+    button:hover { background: #1d2b48; border-color: #35496d; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.primary { background: var(--accent); color: #062031; border-color: var(--accent); font-weight: 600; }
+    button.primary:hover { background: #0ea5e9; }
+    button.danger { color: var(--err); border-color: #ef444455; }
+    button.danger:hover { background: #ef44441a; }
+    button.ghost { background: transparent; }
+    button.sm { padding: .25rem .55rem; font-size: .78rem; }
+
+    input, select, textarea {
+        background: #0a1428; color: var(--text); border: 1px solid var(--border);
+        border-radius: .5rem; padding: .45rem .6rem; font-size: .85rem; font-family: inherit; width: 100%;
+    }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+    textarea { resize: vertical; min-height: 70px; }
+    label { display: block; font-size: .75rem; color: var(--muted); margin-bottom: .25rem; text-transform: uppercase; letter-spacing: .4px; }
+    .field { margin-bottom: .8rem; }
+    .row { display: flex; gap: .6rem; flex-wrap: wrap; align-items: flex-end; }
+    .row > * { flex: 1 1 160px; }
+    .row > .shrink { flex: 0 0 auto; }
+
+    nav.tabs { display: flex; gap: .25rem; padding: 0 1.5rem; background: #0d1729; border-bottom: 1px solid var(--border); }
+    nav.tabs button {
+        background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0;
+        padding: .7rem 1rem; color: var(--muted); font-weight: 500;
+    }
+    nav.tabs button:hover { color: var(--text); background: #ffffff08; }
+    nav.tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    main { padding: 1.5rem; max-width: 1600px; margin: 0 auto; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: .75rem; padding: 1.1rem; margin-bottom: 1.25rem; }
+    .panel h2 { font-size: .95rem; color: var(--accent); margin-bottom: .9rem; display: flex; align-items: center; gap: .5rem; }
+    .panel h2 .hint { font-size: .75rem; color: var(--muted); font-weight: 400; }
+
+    table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    th { text-align: left; color: var(--muted); font-weight: 500; font-size: .72rem; text-transform: uppercase; letter-spacing: .4px; padding: .45rem .6rem; border-bottom: 1px solid var(--border); }
+    td { padding: .5rem .6rem; border-bottom: 1px solid #1b2740; vertical-align: middle; }
+    tr:hover td { background: #ffffff06; }
+    td.actions { text-align: right; white-space: nowrap; }
+    td.actions button { margin-left: .3rem; }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: .8rem; }
+    .stat { background: var(--panel-2); border: 1px solid var(--border); border-radius: .6rem; padding: .8rem .9rem; }
+    .stat .k { color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .5px; }
+    .stat .v { font-size: 1.5rem; font-weight: 600; margin-top: .2rem; }
+    .stat .v.small { font-size: 1.05rem; }
+
+    #graph-wrap { position: relative; height: 620px; background: #080f1e; border: 1px solid var(--border); border-radius: .6rem; overflow: hidden; }
+    #graph { width: 100%; height: 100%; display: block; cursor: grab; }
+    #graph.dragging { cursor: grabbing; }
+    .g-node { cursor: pointer; }
+    .g-node circle { transition: stroke-width .12s; }
+    .g-node:hover circle { stroke-width: 3; }
+    .g-label { font-size: 11px; fill: #cbd5e1; pointer-events: none; user-select: none; }
+    .g-link { stroke: #35496d; stroke-width: 1.4; }
+    .g-link.live { stroke: #38bdf8; stroke-width: 2; }
+    .graph-legend { position: absolute; top: .6rem; left: .6rem; background: #0b1120dd; border: 1px solid var(--border); border-radius: .5rem; padding: .5rem .7rem; font-size: .72rem; color: var(--muted); }
+    .graph-legend div { display: flex; align-items: center; gap: .4rem; margin: .15rem 0; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+
+    .inspector { position: absolute; top: .6rem; right: .6rem; width: 300px; max-height: calc(100% - 1.2rem); overflow: auto;
+                 background: #0b1120f2; border: 1px solid var(--border); border-radius: .6rem; padding: .8rem; font-size: .82rem; }
+    .inspector h3 { font-size: .9rem; margin-bottom: .5rem; color: var(--accent); }
+    .kv { display: flex; justify-content: space-between; gap: .6rem; padding: .18rem 0; border-bottom: 1px solid #1b2740; }
+    .kv span:first-child { color: var(--muted); }
+    .kv span:last-child { text-align: right; word-break: break-all; }
+
+    .toast-host { position: fixed; bottom: 1rem; right: 1rem; display: flex; flex-direction: column; gap: .5rem; z-index: 200; }
+    .toast { background: var(--panel-2); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+             border-radius: .5rem; padding: .6rem .9rem; font-size: .85rem; box-shadow: 0 6px 24px #0008; max-width: 380px; }
+    .toast.err { border-left-color: var(--err); }
+    .toast.ok { border-left-color: var(--ok); }
+
+    .modal-bg { position: fixed; inset: 0; background: #04070ecc; display: none; align-items: center; justify-content: center; z-index: 100; padding: 1rem; }
+    .modal-bg.open { display: flex; }
+    .modal { background: var(--panel); border: 1px solid var(--border); border-radius: .8rem; padding: 1.3rem; width: 100%; max-width: 520px; max-height: 90vh; overflow: auto; }
+    .modal h3 { margin-bottom: 1rem; color: var(--accent); font-size: 1rem; }
+    .modal-actions { display: flex; gap: .5rem; justify-content: flex-end; margin-top: 1.1rem; }
+
+    .empty { color: var(--muted); text-align: center; padding: 1.6rem; font-size: .85rem; }
+    .muted { color: var(--muted); }
+    .small { font-size: .78rem; }
+    .nowrap { white-space: nowrap; }
+    .check { display: flex; align-items: center; gap: .45rem; font-size: .82rem; color: var(--text); }
+    .check input { width: auto; }
+    .chips { display: flex; flex-wrap: wrap; gap: .35rem; }
+    .chip { background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: .2rem .6rem; font-size: .75rem; color: var(--muted); }
+    .node-pick { max-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: .5rem; padding: .5rem; }
+    .node-pick label { display: flex; align-items: center; gap: .5rem; padding: .25rem .3rem; text-transform: none; letter-spacing: 0; font-size: .83rem; color: var(--text); cursor: pointer; }
+    .node-pick input { width: auto; }
+    footer { text-align: center; color: var(--muted); font-size: .72rem; padding: 1.2rem; border-top: 1px solid var(--border); margin-top: 1.5rem; }
+    .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+    <h1>⚡ ZeptoClaw Mesh <span>Dashboard</span></h1>
+    <span class="badge badge-muted" id="net-status">загрузка…</span>
+    <span class="badge badge-muted" id="node-count">0 нод</span>
+    <div class="spacer"></div>
+    <select id="poll-select" style="width:auto" title="Интервал опроса">
+        <option value="0">без автообновления</option>
+        <option value="3">3 с</option>
+        <option value="5" selected>5 с</option>
+        <option value="10">10 с</option>
+        <option value="30">30 с</option>
+        <option value="60">60 с</option>
+    </select>
+    <button id="btn-refresh">🔄 Обновить</button>
+</header>
+
+<nav class="tabs">
+    <button data-tab="net" class="active">🌐 Сеть</button>
+    <button data-tab="nodes">📡 Ноды</button>
+    <button data-tab="tasks">📋 Задачи</button>
+    <button data-tab="skills">🧩 Навыки и триггеры</button>
+    <button data-tab="find">🔎 Обнаружение</button>
+</nav>
+
+<main>
+    <!-- ================= СЕТЬ ================= -->
+    <section id="tab-net">
+        <div class="panel">
+            <h2>📊 Сводка сети</h2>
+            <div class="grid" id="net-stats"></div>
+        </div>
+        <div class="panel">
+            <h2>🌐 Граф связей <span class="hint">управляемые ноды и обнаруженные пиры, рёбра — соседства по mesh</span></h2>
+            <div id="graph-wrap">
+                <svg id="graph"></svg>
+                <div class="graph-legend">
+                    <div><span class="dot" style="background:#22c55e"></span> управляемая, онлайн</div>
+                    <div><span class="dot" style="background:#ef4444"></span> управляемая, офлайн</div>
+                    <div><span class="dot" style="background:#a78bfa"></span> обнаруженный пир</div>
+                    <div><span class="dot" style="background:#38bdf8"></span> активное ребро</div>
+                </div>
+                <div class="inspector hidden" id="inspector"></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ================= НОДЫ ================= -->
+    <section id="tab-nodes" class="hidden">
+        <div class="panel">
+            <h2>🔎 Поиск нод <span class="hint">IP, диапазон IP (10.0.0.1-10.0.0.50), CIDR (10.0.0.0/24) или имя</span></h2>
+            <div class="row">
+                <div>
+                    <label for="search-q">Фильтр</label>
+                    <input id="search-q" placeholder="например 10.0.0.0/24 или zepto-0">
+                </div>
+                <div class="shrink">
+                    <button id="btn-search" class="primary">Найти</button>
+                </div>
+                <div class="shrink">
+                    <button id="btn-search-clear" class="ghost">Сброс</button>
+                </div>
+            </div>
+            <div class="small muted" id="search-info" style="margin-top:.5rem"></div>
+        </div>
+        <div class="panel">
+            <h2>📡 Управляемые ноды <span class="hint">добавляйте, редактируйте, удаляйте</span></h2>
+            <div class="row" style="margin-bottom:.9rem">
+                <div class="shrink"><button id="btn-add-node" class="primary">➕ Добавить ноду</button></div>
+                <div class="shrink"><button id="btn-import">📥 Импорт найденных</button></div>
+                <div class="shrink"><button id="btn-toggle-all">⏻ Включить/выключить все</button></div>
+            </div>
+            <div style="overflow:auto">
+                <table>
+                    <thead><tr>
+                        <th>Статус</th><th>Имя</th><th>URL</th><th>IP</th><th>Peer ID</th>
+                        <th>Соседей</th><th>Задач</th><th>Метки</th><th></th>
+                    </tr></thead>
+                    <tbody id="nodes-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <!-- ================= ЗАДАЧИ ================= -->
+    <section id="tab-tasks" class="hidden">
+        <div class="panel">
+            <h2>🚀 Поставить задачу</h2>
+            <div class="field">
+                <label for="t-instruction">Инструкция</label>
+                <textarea id="t-instruction" placeholder="Что нужно сделать нодам…"></textarea>
+            </div>
+            <div class="row">
+                <div class="field" style="flex:2 1 320px">
+                    <label for="t-nodes">Ноды-получатели</label>
+                    <div class="node-pick" id="t-nodes"></div>
+                </div>
+                <div class="field" style="flex:1 1 200px">
+                    <label for="t-skills">Навыки (через запятую)</label>
+                    <input id="t-skills" placeholder="python, summarize">
+                </div>
+                <div class="field" style="flex:0 1 100px">
+                    <label for="t-ttl">TTL</label>
+                    <input id="t-ttl" type="number" value="0" min="0">
+                </div>
+                <div class="field" style="flex:0 1 110px">
+                    <label for="t-priority">Приоритет</label>
+                    <input id="t-priority" type="number" value="0" min="-1" max="255">
+                </div>
+                <div class="field" style="flex:0 1 120px">
+                    <label for="t-timeout">Таймаут, с</label>
+                    <input id="t-timeout" type="number" value="0" min="0">
+                </div>
+            </div>
+            <div class="row" style="margin-bottom:.8rem">
+                <div class="shrink"><label class="check"><input type="checkbox" id="t-shell"> разрешить shell</label></div>
+                <div class="shrink"><label class="check"><input type="checkbox" id="t-network" checked> разрешить сеть</label></div>
+            </div>
+            <button id="btn-submit-task" class="primary">Отправить задачу</button>
+            <span class="small muted" id="t-result" style="margin-left:.6rem"></span>
+        </div>
+        <div class="panel">
+            <h2>📋 Журнал задач <span class="hint">объединён по всем нодам</span></h2>
+            <div class="row" style="margin-bottom:.8rem">
+                <div class="shrink">
+                    <select id="task-node-filter" style="width:auto"><option value="">все ноды</option></select>
+                </div>
+                <div class="shrink"><button id="btn-refresh-tasks">Обновить журнал</button></div>
+            </div>
+            <div style="overflow:auto">
+                <table>
+                    <thead><tr>
+                        <th>ID</th><th>Нода</th><th>Инструкция</th><th>Статус</th><th>Создан</th><th></th>
+                    </tr></thead>
+                    <tbody id="tasks-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <!-- ================= НАВЫКИ ================= -->
+    <section id="tab-skills" class="hidden">
+        <div class="panel">
+            <h2>🧩 Навыки и триггеры <span class="hint">данные читаются с выбранной ноды</span></h2>
+            <div class="row" style="margin-bottom:.9rem">
+                <div>
+                    <label for="skill-node">Нода</label>
+                    <select id="skill-node"></select>
+                </div>
+                <div class="shrink"><button id="btn-load-skills" class="primary">Загрузить</button></div>
+            </div>
+            <div class="row" style="margin-bottom:.9rem">
+                <div class="shrink"><button id="btn-skills" class="ghost">Навыки</button></div>
+                <div class="shrink"><button id="btn-triggers" class="ghost">Триггеры</button></div>
+                <div class="shrink"><button id="btn-brain" class="ghost">LLM-бэкенды</button></div>
+                <div class="shrink"><button id="btn-config" class="ghost">Конфигурация</button></div>
+            </div>
+            <div id="skills-out"><div class="empty">Выберите ноду и нажмите «Загрузить»</div></div>
+        </div>
+    </section>
+
+    <!-- ================= ОБНАРУЖЕНИЕ ================= -->
+    <section id="tab-find" class="hidden">
+        <div class="panel">
+            <h2>🔎 Поиск нод в сети <span class="hint">обход admin-API портов по диапазону адресов</span></h2>
+            <div class="row">
+                <div>
+                    <label for="d-cidr">Подсеть (CIDR)</label>
+                    <input id="d-cidr" placeholder="10.0.0.0/24">
+                </div>
+                <div>
+                    <label for="d-from">С адреса</label>
+                    <input id="d-from" placeholder="10.0.0.1">
+                </div>
+                <div>
+                    <label for="d-to">По адрес</label>
+                    <input id="d-to" placeholder="10.0.0.50">
+                </div>
+                <div>
+                    <label for="d-ports">Порты</label>
+                    <input id="d-ports" placeholder="14002,14003">
+                </div>
+                <div class="shrink"><button id="btn-discover" class="primary">Сканировать</button></div>
+            </div>
+            <div class="small muted" style="margin-top:.5rem">
+                Пустые поля ⇒ сканируется локальный хост на портах по умолчанию. Диапазон не может превышать 4096 адресов.
+            </div>
+        </div>
+        <div class="panel">
+            <h2>📡 Найденные узлы</h2>
+            <div style="overflow:auto">
+                <table>
+                    <thead><tr><th>IP</th><th>Порт</th><th>Имя</th><th>Peer ID</th><th>URL</th><th></th></tr></thead>
+                    <tbody id="found-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+</main>
+
+<footer>ZeptoClaw Agent Mesh Dashboard · <span id="update-time"></span></footer>
+<div class="toast-host" id="toasts"></div>
+
+<!-- ================= МОДАЛКА НОДЫ ================= -->
+<div class="modal-bg" id="node-modal">
+    <div class="modal">
+        <h3 id="node-modal-title">Добавить ноду</h3>
+        <div class="field"><label for="n-name">Имя</label><input id="n-name" placeholder="zepto-0"></div>
+        <div class="field"><label for="n-url">URL admin-API</label><input id="n-url" placeholder="http://127.0.0.1:14002"></div>
+        <div class="field"><label for="n-token">Токен ноды (необязательно)</label><input id="n-token" type="password" placeholder="если у ноды свой токен"></div>
+        <div class="field"><label for="n-tags">Метки (через запятую)</label><input id="n-tags" placeholder="prod, edge"></div>
+        <div class="field"><label class="check"><input type="checkbox" id="n-enabled" checked> включена в опрос и граф</label></div>
+        <div class="modal-actions">
+            <button class="ghost" id="node-cancel">Отмена</button>
+            <button class="primary" id="node-save">Сохранить</button>
+        </div>
+    </div>
+</div>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------- состояние
+const state = {
+    tab: 'net',
+    mesh: null,
+    nodes: [],
+    found: [],
+    editing: null,
+    pollTimer: null,
+    pollMs: 5000,
+    graph: { nodes: [], links: [], pos: new Map(), sim: null },
+    selected: null
+};
+
+// ---------------------------------------------------------------- утилиты
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function api(path, opts = {}) {
+    const res = await fetch(path, {
+        ...opts,
+        headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+        body: opts.body ? JSON.stringify(opts.body) : undefined
+    });
+    const text = await res.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (_) { data = { raw: text }; }
+    if (!res.ok) throw new Error((data && data.error) || `HTTP ${res.status}`);
+    return data;
+}
+
+function toast(msg, kind = '') {
+    const el = document.createElement('div');
+    el.className = 'toast ' + kind;
+    el.textContent = msg;
+    $('toasts').appendChild(el);
+    setTimeout(() => el.remove(), 4200);
+}
+
+function shortId(id) { return (id || '').length > 14 ? (id || '').slice(0, 12) + '…' : (id || ''); }
+
+function fmtTime(v) {
+    if (!v) return '—';
+    const d = new Date(v);
+    return isNaN(d) ? String(v) : d.toLocaleString();
+}
+
+function statusBadge(t) {
+    const map = {
+        SUCCEEDED: 'badge-ok', COMPLETED: 'badge-ok', DONE: 'badge-ok',
+        FAILED: 'badge-err', REJECTED: 'badge-err', TIMEOUT: 'badge-err',
+        RUNNING: 'badge-violet', PENDING: 'badge-muted', QUEUED: 'badge-muted',
+        FORWARDED: 'badge-warn'
+    };
+    return `<span class="badge ${map[t] || 'badge-muted'}">${esc(t || '—')}</span>`;
+}
+
+// ---------------------------------------------------------------- вкладки
+document.querySelectorAll('nav.tabs button').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('nav.tabs button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        state.tab = btn.dataset.tab;
+        document.querySelectorAll('main > section').forEach(s => s.classList.add('hidden'));
+        $('tab-' + state.tab).classList.remove('hidden');
+        if (state.tab === 'tasks') loadTasks();
+        if (state.tab === 'skills') fillNodeSelectors();
+        if (state.tab === 'net') drawGraph();
+    });
+});
+
+// ---------------------------------------------------------------- загрузка
+async function refreshAll() {
+    try {
+        const [mesh, nodes] = await Promise.all([api('/api/v1/mesh'), api('/api/v1/nodes')]);
+        state.mesh = mesh;
+        state.nodes = nodes.nodes || [];
+        renderNetStats();
+        renderNodes();
+        drawGraph();
+        fillNodeSelectors();
+        const online = (mesh.stats && mesh.stats.online) || 0;
+        const total = (mesh.stats && mesh.stats.enabled) || 0;
+        const badge = $('net-status');
+        badge.textContent = `${online}/${total} нод онлайн`;
+        badge.className = 'badge ' + (online > 0 ? 'badge-ok' : 'badge-err');
+        $('node-count').textContent = `${state.nodes.length} управляемых · ${((mesh.stats || {}).links || 0) >= 0 ? '' : ''}${(mesh.discovered || []).length} пиров`;
+        $('update-time').textContent = 'Обновлено: ' + new Date().toLocaleTimeString();
+    } catch (e) {
+        $('net-status').textContent = 'ошибка: ' + e.message;
+        $('net-status').className = 'badge badge-err';
+    }
+}
+
+function renderNetStats() {
+    const s = (state.mesh && state.mesh.stats) || {};
+    const cards = [
+        ['Управляемых нод', s.managed ?? 0, ''],
+        ['Онлайн', s.online ?? 0, ''],
+        ['Обнаружено пиров', (state.mesh && state.mesh.discovered || []).length, ''],
+        ['Соседей в сети', s.total_peers ?? 0, ''],
+        ['Рёбер графа', (state.mesh && state.mesh.links || []).length, '']
+    ];
+    $('net-stats').innerHTML = cards.map(([k, v]) =>
+        `<div class="stat"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
+}
+
+// ---------------------------------------------------------------- список нод
+function renderNodes() {
+    const rows = state.nodes.map(n => {
+        const st = state.mesh ? (state.mesh.nodes || []).find(m => m.id === n.id) : null;
+        const online = st ? st.online : false;
+        const status = st && st.status ? st.status : null;
+        const ip = hostOf(n.url);
+        const tags = (n.tags || []).map(t => `<span class="chip">${esc(t)}</span>`).join(' ');
+        return `<tr data-id="${esc(n.id)}">
+            <td><span class="badge ${online ? 'badge-ok' : 'badge-err'}">${online ? 'онлайн' : 'офлайн'}</span></td>
+            <td><strong>${esc(n.name)}</strong>${n.enabled ? '' : ' <span class="badge badge-muted">выкл</span>'}</td>
+            <td class="mono small nowrap">${esc(n.url)}</td>
+            <td class="mono small">${esc(ip || '—')}</td>
+            <td class="mono small" title="${esc((st && st.peer_id) || '')}">${esc(shortId(st && st.peer_id))}</td>
+            <td>${status ? (status.neighbors_connected ?? 0) + '/' + (status.neighbors_total ?? 0) : '—'}</td>
+            <td>${status ? (status.tasks_completed ?? 0) : '—'}</td>
+            <td>${tags || '—'}</td>
+            <td class="actions">
+                <button class="sm" data-act="task" data-id="${esc(n.id)}" title="Поставить задачу">🚀</button>
+                <button class="sm" data-act="toggle" data-id="${esc(n.id)}" title="Включить/выключить">⏻</button>
+                <button class="sm" data-act="edit" data-id="${esc(n.id)}" title="Редактировать">✎</button>
+                <button class="sm danger" data-act="del" data-id="${esc(n.id)}" title="Удалить">🗑</button>
+            </td></tr>`;
+    }).join('');
+    $('nodes-body').innerHTML = rows || `<tr><td colspan="9" class="empty">Нет нод. Нажмите «Добавить ноду».</td></tr>`;
+}
+
+function hostOf(url) {
+    let rest = String(url || '');
+    const i = rest.indexOf('://');
+    if (i >= 0) rest = rest.slice(i + 3);
+    rest = rest.split('/')[0];
+    if (rest.startsWith('[')) { const j = rest.indexOf(']'); return j > 0 ? rest.slice(1, j) : rest; }
+    return rest.split(':')[0];
+}
+
+// ---------------------------------------------------------------- CRUD нод
+$('nodes-body').addEventListener('click', async e => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    const node = state.nodes.find(n => n.id === id);
+    if (!node) return;
+
+    if (btn.dataset.act === 'edit') openNodeModal(node);
+    if (btn.dataset.act === 'del') {
+        if (!confirm(`Удалить ноду «${node.name}» (${node.url})?`)) return;
+        try {
+            await api('/api/v1/nodes/' + encodeURIComponent(id), { method: 'DELETE' });
+            toast('Нода удалена', 'ok');
+            refreshAll();
+        } catch (err) { toast('Ошибка удаления: ' + err.message, 'err'); }
+    }
+    if (btn.dataset.act === 'toggle') {
+        try {
+            await api('/api/v1/nodes/' + encodeURIComponent(id), { method: 'PUT', body: { enabled: !node.enabled } });
+            toast(node.enabled ? 'Нода выключена' : 'Нода включена', 'ok');
+            refreshAll();
+        } catch (err) { toast('Ошибка: ' + err.message, 'err'); }
+    }
+    if (btn.dataset.act === 'task') {
+        document.querySelector('nav.tabs button[data-tab="tasks"]').click();
+        setTimeout(() => {
+            const cb = document.querySelector(`#t-nodes input[value="${CSS.escape(id)}"]`);
+            if (cb) { cb.checked = true; cb.closest('label').style.fontWeight = '600'; }
+            $('t-instruction').focus();
+        }, 60);
+    }
+});
+
+$('btn-toggle-all').addEventListener('click', async () => {
+    const anyEnabled = state.nodes.some(n => n.enabled);
+    try {
+        for (const n of state.nodes) {
+            await api('/api/v1/nodes/' + encodeURIComponent(n.id), { method: 'PUT', body: { enabled: !anyEnabled } });
+        }
+        toast(anyEnabled ? 'Все ноды выключены' : 'Все ноды включены', 'ok');
+        refreshAll();
+    } catch (e) { toast('Ошибка: ' + e.message, 'err'); }
+});
+
+function openNodeModal(node) {
+    state.editing = node || null;
+    $('node-modal-title').textContent = node ? 'Редактировать ноду' : 'Добавить ноду';
+    $('n-name').value = node ? node.name : '';
+    $('n-url').value = node ? node.url : '';
+    $('n-token').value = node && node.token ? node.token : '';
+    $('n-tags').value = node ? (node.tags || []).join(', ') : '';
+    $('n-enabled').checked = node ? !!node.enabled : true;
+    $('node-modal').classList.add('open');
+    $('n-name').focus();
+}
+
+$('btn-add-node').addEventListener('click', () => openNodeModal(null));
+$('node-cancel').addEventListener('click', () => $('node-modal').classList.remove('open'));
+$('node-modal').addEventListener('click', e => { if (e.target === $('node-modal')) $('node-modal').classList.remove('open'); });
+
+$('node-save').addEventListener('click', async () => {
+    const payload = {
+        name: $('n-name').value.trim(),
+        url: $('n-url').value.trim(),
+        token: $('n-token').value.trim(),
+        enabled: $('n-enabled').checked,
+        tags: $('n-tags').value.split(',').map(s => s.trim()).filter(Boolean)
+    };
+    if (!payload.url) { toast('Укажите URL ноды', 'err'); return; }
+    try {
+        if (state.editing) {
+            await api('/api/v1/nodes/' + encodeURIComponent(state.editing.id), { method: 'PUT', body: payload });
+            toast('Нода обновлена', 'ok');
+        } else {
+            await api('/api/v1/nodes', { method: 'POST', body: payload });
+            toast('Нода добавлена', 'ok');
+        }
+        $('node-modal').classList.remove('open');
+        refreshAll();
+    } catch (e) { toast('Ошибка сохранения: ' + e.message, 'err'); }
+});
+
+// ---------------------------------------------------------------- поиск
+$('btn-search').addEventListener('click', doSearch);
+$('search-q').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+$('btn-search-clear').addEventListener('click', () => { $('search-q').value = ''; doSearch(); });
+
+async function doSearch() {
+    const q = $('search-q').value.trim();
+    try {
+        const r = await api('/api/v1/nodes/search?q=' + encodeURIComponent(q));
+        state.nodes = r.nodes || [];
+        renderNodes();
+        const kind = /^\d+\.\d+\.\d+\.\d+$/.test(q) ? 'IP-адрес'
+            : q.includes('/') ? 'подсеть CIDR'
+            : q.includes('-') ? 'диапазон IP' : 'подстрока';
+        $('search-info').textContent = q
+            ? `Фильтр «${q}» (${kind}) — найдено ${r.count} из ${state.nodes.length}`
+            : `Показаны все ноды (${r.count})`;
+        if (q) toast(`Найдено нод: ${r.count}`, 'ok');
+    } catch (e) { toast('Ошибка поиска: ' + e.message, 'err'); }
+}
+
+// ---------------------------------------------------------------- задачи
+function fillNodeSelectors() {
+    const picker = $('t-nodes');
+    const keep = new Set([...picker.querySelectorAll('input:checked')].map(i => i.value));
+    picker.innerHTML = state.nodes.length
+        ? state.nodes.map(n => `<label><input type="checkbox" value="${esc(n.id)}" ${keep.has(n.id) ? 'checked' : ''}>
+             ${esc(n.name)} <span class="muted small">${esc(n.url)}</span></label>`).join('')
+        : '<div class="empty">Нет управляемых нод</div>';
+
+    const filters = [$('task-node-filter'), $('skill-node')];
+    filters.forEach(sel => {
+        const prev = sel.value;
+        sel.innerHTML = (sel.id === 'task-node-filter' ? '<option value="">все ноды</option>' : '<option value="">— выберите ноду —</option>')
+            + state.nodes.map(n => `<option value="${esc(n.id)}">${esc(n.name)}</option>`).join('');
+        if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+    });
+}
+
+$('btn-submit-task').addEventListener('click', async () => {
+    const nodeIds = [...$('t-nodes').querySelectorAll('input:checked')].map(i => i.value);
+    const instruction = $('t-instruction').value.trim();
+    if (!instruction) { toast('Введите инструкцию', 'err'); return; }
+    if (!nodeIds.length) { toast('Выберите хотя бы одну ноду', 'err'); return; }
+    const skills = $('t-skills').value.split(',').map(s => s.trim()).filter(Boolean);
+    $('btn-submit-task').disabled = true;
+    $('t-result').textContent = 'отправка…';
+    try {
+        const r = await api('/api/v1/tasks', {
+            method: 'POST',
+            body: {
+                node_ids: nodeIds,
+                instruction,
+                required_skills: skills,
+                ttl: parseInt($('t-ttl').value || '0', 10),
+                priority: parseInt($('t-priority').value || '0', 10),
+                timeout_seconds: parseInt($('t-timeout').value || '0', 10),
+                allow_shell: $('t-shell').checked,
+                allow_network: $('t-network').checked
+            }
+        });
+        $('t-result').textContent = `отправлено: ${r.submitted}, ошибок: ${r.failed}`;
+        toast(`Задача отправлена (${r.submitted} нод)`, 'ok');
+        loadTasks();
+    } catch (e) {
+        $('t-result').textContent = '';
+        toast('Ошибка отправки: ' + e.message, 'err');
+    } finally { $('btn-submit-task').disabled = false; }
+});
+
+$('btn-refresh-tasks').addEventListener('click', loadTasks);
+$('task-node-filter').addEventListener('change', loadTasks);
+
+async function loadTasks() {
+    const nodeId = $('task-node-filter').value;
+    try {
+        const r = await api('/api/v1/tasks?limit=100' + (nodeId ? '&node_id=' + encodeURIComponent(nodeId) : ''));
+        const rows = (r.tasks || []).map(t => {
+            const node = state.nodes.find(n => n.id === t.node_id);
+            return `<tr>
+                <td class="mono small" title="${esc(t.id || '')}">${esc(shortId(t.id))}</td>
+                <td>${esc(node ? node.name : (t.node_id || '—'))}</td>
+                <td class="small">${esc((t.instruction || '').slice(0, 90))}</td>
+                <td>${statusBadge(t.status)}</td>
+                <td class="small nowrap">${esc(fmtTime(t.created_at || t.created))}</td>
+                <td class="actions">${t.status === 'RUNNING' || t.status === 'PENDING'
+                    ? `<button class="sm danger" data-task-cancel="${esc(t.node_id || '')}" data-task-id="${esc(t.id || '')}">Отменить</button>` : ''}</td>
+            </tr>`;
+        }).join('');
+        $('tasks-body').innerHTML = rows || '<tr><td colspan="6" class="empty">Задач нет</td></tr>';
+    } catch (e) { toast('Ошибка загрузки задач: ' + e.message, 'err'); }
+}
+
+$('tasks-body').addEventListener('click', async e => {
+    const btn = e.target.closest('button[data-task-cancel]');
+    if (!btn) return;
+    try {
+        await api(`/api/v1/tasks/${encodeURIComponent(btn.dataset.taskCancel)}/${encodeURIComponent(btn.dataset.taskId)}/cancel`, { method: 'POST' });
+        toast('Задача отменена', 'ok');
+        loadTasks();
+    } catch (err) { toast('Ошибка отмены: ' + err.message, 'err'); }
+});
+
+// ---------------------------------------------------------------- навыки
+$('btn-load-skills').addEventListener('click', () => loadProxy('skills'));
+$('btn-skills').addEventListener('click', () => loadProxy('skills'));
+$('btn-triggers').addEventListener('click', () => loadProxy('triggers'));
+$('btn-brain').addEventListener('click', () => loadProxy('brain/backends'));
+$('btn-config').addEventListener('click', () => loadProxy('config'));
+
+async function loadProxy(path) {
+    const nodeId = $('skill-node').value;
+    if (!nodeId) { toast('Выберите ноду', 'err'); return; }
+    $('skills-out').innerHTML = '<div class="empty">Загрузка…</div>';
+    try {
+        const r = await api(`/api/v1/proxy/${encodeURIComponent(nodeId)}/${path}`);
+        $('skills-out').innerHTML = `<pre class="mono small" style="white-space:pre-wrap;word-break:break-word">${esc(JSON.stringify(r, null, 2))}</pre>`;
+    } catch (e) {
+        $('skills-out').innerHTML = `<div class="empty" style="color:var(--err)">${esc(e.message)}</div>`;
+    }
+}
+
+// ---------------------------------------------------------------- обнаружение
+$('btn-discover').addEventListener('click', async () => {
+    const body = {};
+    if ($('d-cidr').value.trim()) body.cidr = $('d-cidr').value.trim();
+    if ($('d-from').value.trim() && $('d-to').value.trim()) {
+        body.from = $('d-from').value.trim();
+        body.to = $('d-to').value.trim();
+    }
+    const ports = $('d-ports').value.split(',').map(s => s.trim()).filter(Boolean).map(Number).filter(n => n > 0);
+    if (ports.length) body.ports = ports;
+    $('btn-discover').disabled = true;
+    $('found-body').innerHTML = '<tr><td colspan="6" class="empty">Сканирование…</td></tr>';
+    try {
+        const r = await api('/api/v1/discover', { method: 'POST', body });
+        state.found = r.found || [];
+        $('found-body').innerHTML = state.found.map(f => `<tr>
+            <td class="mono small">${esc(f.ip)}</td>
+            <td>${esc(f.port)}</td>
+            <td>${esc(f.node_name || '—')}</td>
+            <td class="mono small" title="${esc(f.peer_id)}">${esc(shortId(f.peer_id))}</td>
+            <td class="mono small">${esc(f.url)}</td>
+            <td class="actions"><button class="sm primary" data-add-found="${esc(f.url)}">Добавить</button></td>
+        </tr>`).join('') || '<tr><td colspan="6" class="empty">Ничего не найдено</td></tr>';
+        toast(`Найдено узлов: ${state.found.length}`, state.found.length ? 'ok' : 'err');
+    } catch (e) {
+        $('found-body').innerHTML = `<tr><td colspan="6" class="empty" style="color:var(--err)">${esc(e.message)}</td></tr>`;
+    } finally { $('btn-discover').disabled = false; }
+});
+
+$('found-body').addEventListener('click', async e => {
+    const btn = e.target.closest('button[data-add-found]');
+    if (!btn) return;
+    const url = btn.dataset.addFound;
+    const f = state.found.find(x => x.url === url) || {};
+    try {
+        await api('/api/v1/nodes', {
+            method: 'POST',
+            body: { name: f.node_name || hostOf(url), url, tags: ['discovered'] }
+        });
+        toast('Нода добавлена в реестр', 'ok');
+        refreshAll();
+    } catch (err) { toast('Ошибка: ' + err.message, 'err'); }
+});
+
+$('btn-import').addEventListener('click', async () => {
+    if (!state.found.length) { toast('Сначала выполните сканирование', 'err'); return; }
+    try {
+        const r = await api('/api/v1/nodes/import', { method: 'POST', body: { nodes: state.found } });
+        toast(`Импортировано: ${r.added}, пропущено: ${r.skipped.length}`, 'ok');
+        refreshAll();
+    } catch (e) { toast('Ошибка импорта: ' + e.message, 'err'); }
+});
+
+// ---------------------------------------------------------------- граф
+function drawGraph() {
+    const svg = $('graph');
+    const mesh = state.mesh;
+    if (!mesh) return;
+
+    const managed = (mesh.nodes || []).map(n => ({
+        id: n.id, name: n.name || n.id, kind: 'managed',
+        online: !!n.online, peer_id: n.peer_id || '', status: n.status, url: n.url
+    }));
+    const discovered = (mesh.discovered || []).map(n => ({
+        id: n.id, name: n.name || shortId(n.peer_id), kind: 'discovered',
+        online: !!n.online, peer_id: n.peer_id || '', status: null, url: n.url || ''
+    }));
+    const all = managed.concat(discovered);
+    const byId = new Map(all.map(n => [n.id, n]));
+
+    // Рёбра: только между существующими узлами.
+    const links = (mesh.links || []).filter(l => byId.has(l.source) && byId.has(l.target));
+
+    // Сохраняем позиции между перерисовками.
+    const pos = state.graph.pos;
+    all.forEach((n, i) => {
+        if (!pos.has(n.id)) {
+            const a = (i / Math.max(all.length, 1)) * Math.PI * 2;
+            pos.set(n.id, { x: 400 + Math.cos(a) * 190, y: 300 + Math.sin(a) * 190, vx: 0, vy: 0 });
+        }
+    });
+    for (const id of [...pos.keys()]) if (!byId.has(id)) pos.delete(id);
+
+    state.graph.nodes = all;
+    state.graph.links = links;
+    renderGraph();
+    startSim();
+}
+
+function renderGraph() {
+    const svg = $('graph');
+    const rect = svg.getBoundingClientRect();
+    const W = rect.width || 800, H = rect.height || 600;
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+    const pos = state.graph.pos;
+    const byId = new Map(state.graph.nodes.map(n => [n.id, n]));
+    const parts = [];
+
+    parts.push('<g class="links">');
+    for (const l of state.graph.links) {
+        const a = pos.get(l.source), b = pos.get(l.target);
+        if (!a || !b) continue;
+        const cls = l.connected ? 'g-link live' : 'g-link';
+        parts.push(`<line class="${cls}" x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}"/>`);
+    }
+    parts.push('</g><g class="nodes">');
+    for (const n of state.graph.nodes) {
+        const p = pos.get(n.id);
+        if (!p) continue;
+        const fill = n.kind === 'discovered' ? '#a78bfa' : (n.online ? '#22c55e' : '#ef4444');
+        const r = n.kind === 'discovered' ? 8 : 13;
+        const sel = state.selected === n.id ? '#38bdf8' : '#0b1120';
+        parts.push(`<g class="g-node" data-id="${esc(n.id)}">
+            <circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r}" fill="${fill}" stroke="${sel}" stroke-width="2"/>
+            <text class="g-label" x="${(p.x + r + 5).toFixed(1)}" y="${(p.y + 4).toFixed(1)}">${esc(n.name)}</text>
+        </g>`);
+    }
+    parts.push('</g>');
+    svg.innerHTML = parts.join('');
+}
+
+function startSim() {
+    if (state.graph.sim) cancelAnimationFrame(state.graph.sim);
+    const step = () => {
+        const nodes = state.graph.nodes, links = state.graph.links, pos = state.graph.pos;
+        if (!nodes.length) { state.graph.sim = null; return; }
+        const repulse = 9000, spring = 0.012, center = 0.0025, damp = 0.82;
+
+        for (let i = 0; i < nodes.length; i++) {
+            for (let j = i + 1; j < nodes.length; j++) {
+                const a = pos.get(nodes[i].id), b = pos.get(nodes[j].id);
+                if (!a || !b) continue;
+                let dx = b.x - a.x, dy = b.y - a.y;
+                let d2 = dx * dx + dy * dy;
+                if (d2 < 1) { dx = (Math.random() - .5); dy = (Math.random() - .5); d2 = 1; }
+                const f = repulse / d2;
+                const d = Math.sqrt(d2);
+                const fx = (dx / d) * f, fy = (dy / d) * f;
+                a.vx -= fx; a.vy -= fy;
+                b.vx += fx; b.vy += fy;
+            }
+        }
+        for (const l of links) {
+            const a = pos.get(l.source), b = pos.get(l.target);
+            if (!a || !b) continue;
+            const dx = b.x - a.x, dy = b.y - a.y;
+            const d = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
+            const f = (d - 120) * spring;
+            const fx = (dx / d) * f, fy = (dy / d) * f;
+            a.vx += fx; a.vy += fy;
+            b.vx -= fx; b.vy -= fy;
+        }
+        for (const n of nodes) {
+            const p = pos.get(n.id);
+            if (!p) continue;
+            p.vx += (400 - p.x) * center;
+            p.vy += (300 - p.y) * center;
+            p.vx *= damp; p.vy *= damp;
+            p.x += p.vx; p.y += p.vy;
+            p.x = Math.max(24, Math.min(776, p.x));
+            p.y = Math.max(24, Math.min(576, p.y));
+        }
+        renderGraph();
+        state.graph.sim = requestAnimationFrame(step);
+    };
+    state.graph.sim = requestAnimationFrame(step);
+}
+
+$('graph').addEventListener('click', e => {
+    const g = e.target.closest('g.g-node');
+    if (!g) return;
+    const id = g.dataset.id;
+    state.selected = id;
+    const n = state.graph.nodes.find(x => x.id === id);
+    if (!n) return;
+    const st = n.status || {};
+    const rows = [
+        ['Тип', n.kind === 'managed' ? 'управляемая' : 'обнаруженный пир'],
+        ['Статус', n.online ? 'онлайн' : 'офлайн'],
+        ['URL', n.url || '—'],
+        ['Peer ID', n.peer_id || '—'],
+        ['Соседей', n.status ? `${st.neighbors_connected ?? 0}/${st.neighbors_total ?? 0}` : '—'],
+        ['Задач (ок/ош)', n.status ? `${st.tasks_completed ?? 0}/${st.tasks_failed ?? 0}` : '—'],
+        ['Версия', st.version || '—'],
+        ['Адаптер', st.adapter || '—']
+    ];
+    const ins = $('inspector');
+    ins.classList.remove('hidden');
+    ins.innerHTML = `<h3>${esc(n.name)}</h3>` + rows.map(([k, v]) =>
+        `<div class="kv"><span>${esc(k)}</span><span>${esc(v)}</span></div>`).join('');
+});
+
+$('graph').addEventListener('click', e => { if (!e.target.closest('g.g-node')) $('inspector').classList.add('hidden'); });
+
+// ---------------------------------------------------------------- автообновление
+function setPolling(ms) {
+    state.pollMs = ms;
+    if (state.pollTimer) clearInterval(state.pollTimer);
+    if (ms > 0) state.pollTimer = setInterval(refreshAll, ms);
+}
+$('poll-select').addEventListener('change', e => setPolling(parseInt(e.target.value, 10) * 1000));
+$('btn-refresh').addEventListener('click', refreshAll);
+
+window.addEventListener('resize', () => renderGraph());
+
+// ---------------------------------------------------------------- старт
+(async function start() {
+    try {
+        const cfg = await api('/api/v1/ui/config');
+        if (cfg.poll_interval) {
+            $('poll-select').value = String(cfg.poll_interval);
+            setPolling(cfg.poll_interval * 1000);
+        }
+    } catch (_) { setPolling(state.pollMs); }
+    await refreshAll();
+})();
+</script>
+</body>
+</html>
