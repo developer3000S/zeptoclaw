@@ -1070,10 +1070,11 @@ impl Node {
             g.iter()
                 .filter(|(pid, as_)| {
                     !pid.is_empty()
-                        && pid.as_str() != me.as_str()
+                        && pid.as_str() != me
                         && !connected.contains(pid.as_str())
                         && !as_.is_empty()
-                })                .flat_map(|(_, as_)| as_.iter().cloned())
+                })
+                .flat_map(|(_, as_)| as_.iter().cloned())
                 .collect()
         };
         let mut dialed = 0usize;
@@ -1102,7 +1103,10 @@ impl Node {
         let host = std::env::var("HOSTNAME").ok()?;
         let mut addrs = (host.as_str(), 0u16).to_socket_addrs().ok()?;
         let ip = addrs.find(|a| a.is_ipv4() && !a.ip().is_loopback())?.ip();
-        ip.as_ipv4().copied()
+        match ip {
+            std::net::IpAddr::V4(v4) => Some(v4),
+            std::net::IpAddr::V6(_) => None,
+        }
     }
 
     /// Принятый TCP-конн: handshake capabilities → attach reader-loop.
