@@ -286,14 +286,15 @@ generate_docker_compose() {
     nodes_env="$(normalize_nodes "$NODES")"
 
     {
+        # BFF — Rust-бинарь zeptomesh-ui, слушает 8080 внутри контейнера
         echo 'services:'
-        echo "  ${NAME_PREFIX}:"
-        echo "    image: ${IMAGE_NAME}:${IMAGE_TAG}"
-        echo "    container_name: ${NAME_PREFIX}"
-        echo "    hostname: ${NAME_PREFIX}"
+        echo "  ${NAME_PREFIX}-bff:"
+        echo "    image: ${IMAGE_NAME}-bff:${IMAGE_TAG}"
+        echo "    container_name: ${NAME_PREFIX}-bff"
+        echo "    hostname: ${NAME_PREFIX}-bff"
         echo "    restart: unless-stopped"
         echo "    environment:"
-        echo "      ZEPTOMESH_UI_LISTEN: 0.0.0.0:${UI_PORT}"
+        echo "      ZEPTOMESH_UI_LISTEN: 0.0.0.0:8080"
         echo "      ZEPTOMESH_UI_DATA: /app/data"
         echo "      ZEPTOMESH_UI_NODES_FILE: /app/data/nodes.json"
         echo "      ZEPTOMESH_UI_LOG_LEVEL: ${LOG_LEVEL}"
@@ -303,12 +304,28 @@ generate_docker_compose() {
         [[ -n "$API_TOKEN" ]] && echo "      ZEPTOMESH_UI_API_TOKEN: ${API_TOKEN}"
         echo "    volumes:"
         echo "      - ${DATA_DIR}:/app/data"
-        if [[ "$NET_MODE" == "bridge" ]]; then
-            echo "    extra_hosts:"
-            echo '      - "host.docker.internal:host-gateway"'
-        else
-            echo "    network_mode: host"
-        fi
+        echo "    network_mode: host"
+        echo "    healthcheck:"
+        printf '      test: ["CMD-SHELL", "curl -sf http://localhost:8080/healthz"]\n'
+        echo "      interval: 5s"
+        echo "      timeout: 5s"
+        echo "      retries: 12"
+        echo "      start_period: 10s"
+        echo ""
+        # nginx — проксирует статику + /api/ /healthz /metrics на BFF
+        echo "  ${NAME_PREFIX}-nginx:"
+        echo "    image: ${IMAGE_NAME}-nginx:${IMAGE_TAG}"
+        echo "    container_name: ${NAME_PREFIX}-nginx"
+        echo "    hostname: ${NAME_PREFIX}-nginx"
+        echo "    restart: unless-stopped"
+        echo "    environment:"
+        echo "      NGINX_PORT: ${UI_PORT}"
+        echo "    ports:"
+        echo "      - \"${UI_PORT}:${UI_PORT}\""
+        echo "    network_mode: host"
+        echo "    depends_on:"
+        echo "      ${NAME_PREFIX}-bff:"
+        echo "        condition: service_healthy"
     } > "$DATA_DIR/docker-compose.yml"
 
     log_success "docker-compose.yml создан: $DATA_DIR/docker-compose.yml"
@@ -338,32 +355,61 @@ install_docker() {
 
     log_info "Удаление старых образов ${IMAGE_NAME}..."
     docker rmi "$(docker images -q "${IMAGE_NAME}:${IMAGE_TAG}" 2>/dev/null)" 2>/dev/null || true
+    docker rmi "$(docker images -q "${IMAGE_NAME}-nginx:${IMAGE_TAG}" 2>/dev/null)" 2>/dev/null || true
+    docker rmi "$(docker images -q "${IMAGE_NAME}-bff:${IMAGE_TAG}" 2>/dev/null)" 2>/dev/null || true
 
-    log_info "Сборка образа из исходников (контекст $REPO_ROOT)..."
+    log_info "Сборка образа BFF (Rust) из исходников..."
     log_info "Это занимает несколько минут при первом запуске."
-    docker build -f "deploy/docker/Dockerfile.ui" -t "${IMAGE_NAME}:${IMAGE_TAG}" "$REPO_ROOT" || {
-        log_error "Ошибка сборки Docker-образа"
+    docker build -f "deploy/docker/Dockerfile.bff" -t "${IMAGE_NAME}-bff:${IMAGE_TAG}" "$REPO_ROOT" || {
+        log_error "Ошибка сборки BFF Docker-образа"
         exit 1
     }
-    log_success "Docker-образ собран"
+    log_success "BFF-образ собран"
 
-    log_info "Запуск UI..."
+    log_info "Сборка образа nginx из исходников..."
+    docker build -f "deploy/docker/Dockerfile.ui" -t "${IMAGE_NAME}-nginx:${IMAGE_TAG}" "$REPO_ROOT" || {
+        log_error "Ошибка сборки nginx Docker-образа"
+        exit 1
+    }
+    log_success "Nginx-образ собран"
+
+    log_info "Запуск BFF..."
     docker compose -p "$COMPOSE_PROJECT_NAME" -f "$DATA_DIR/docker-compose.yml" up -d
 
-    log_info "Ожидание готовности UI..."
+    # Проверяем BFF напрямую (порт 8080), т.к. nginx зависит от BFF через
+    # depends_on + condition: service_healthy и стартует только когда BFF готов.
+    # Это гарантирует что compose up -d полностью завершился + healthcheck
+    # Docker уже подтвердил готовность, а мы дублируем проверку для надёжности.
+    log_info "Ожидание готовности BFF (порт 8080)..."
     local waited=0
-    while [[ $waited -lt 60 ]]; do
-        if curl -sf "http://127.0.0.1:${UI_PORT}/healthz" &>/dev/null; then
-            log_success "UI готов!"
+    while [[ $waited -lt 120 ]]; do
+        if curl -sf "http://127.0.0.1:8080/healthz" &>/dev/null; then
+            log_success "BFF готов!"
             break
         fi
         sleep 1
         waited=$((waited + 1))
     done
-    if [[ $waited -ge 60 ]]; then
-        log_error "UI не ответил на /healthz за 60 секунд"
+    if [[ $waited -ge 120 ]]; then
+        log_error "BFF не ответил на /healthz за 120 секунд"
         docker compose -p "$COMPOSE_PROJECT_NAME" -f "$DATA_DIR/docker-compose.yml" logs --tail=30 || true
         exit 1
+    fi
+
+    # nginx уже должен быть запущен (depends_on: service_healthy) и
+    # теперь он точно готов — проверяем его порт для финальной уверенности.
+    log_info "Ожидание готовности nginx (порт ${UI_PORT})..."
+    waited=0
+    while [[ $waited -lt 30 ]]; do
+        if curl -sf "http://127.0.0.1:${UI_PORT}/healthz" &>/dev/null; then
+            log_success "UI дашборд готов!"
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if [[ $waited -ge 30 ]]; then
+        log_warn "nginx не ответил за 30 секунд, но BFF работает — проверьте конфигурацию nginx"
     fi
 
     show_status
@@ -443,6 +489,8 @@ uninstall() {
         log_info "Остановка и удаление контейнеров..."
         docker compose -p "$COMPOSE_PROJECT_NAME" -f "$DATA_DIR/docker-compose.yml" down --remove-orphans 2>/dev/null || true
         docker rmi "$(docker images -q "${IMAGE_NAME}:${IMAGE_TAG}" 2>/dev/null)" 2>/dev/null || true
+        docker rmi "$(docker images -q "${IMAGE_NAME}-nginx:${IMAGE_TAG}" 2>/dev/null)" 2>/dev/null || true
+        docker rmi "$(docker images -q "${IMAGE_NAME}-bff:${IMAGE_TAG}" 2>/dev/null)" 2>/dev/null || true
         log_success "Docker контейнеры удалены"
     else
         log_info "Остановка UI..."

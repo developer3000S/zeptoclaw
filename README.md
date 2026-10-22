@@ -149,7 +149,7 @@ bind-адрес `0.0.0.0`, по которому connect ушёл бы в localh
     --api-token $ZEPTOMESH_API_TOKEN
 
 # В локальном режиме на другом порту
-./install-ui.sh --mode local --port 28091 --nodes "http://127.0.0.1:14001"
+./install-ui.sh --mode local --port 28090 --nodes "http://127.0.0.1:14001"
 
 # Удалить UI
 ./install-ui.sh --uninstall

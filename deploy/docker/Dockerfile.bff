@@ -1,0 +1,40 @@
+# ZeptoClaw Agent Mesh UI Dashboard - BFF Docker
+# Multi-stage build: compile Rust BFF binary, ship in minimal runtime image.
+FROM rust:1.99-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY zeptoclaw_rust/ ./zeptoclaw_rust/
+
+WORKDIR /build/zeptoclaw_rust
+# Собираем ТОЛЬКО zeptomesh-ui, не весь проект
+RUN cargo build --release --bin zeptomesh-ui
+
+# Minimal runtime — та же версия Debian, что и builder (trixie)
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3t64 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -u 1000 zepto
+
+WORKDIR /app
+
+COPY --from=builder /build/zeptoclaw_rust/target/release/zeptomesh-ui /app/zeptomesh-ui
+
+# Директория данных
+RUN mkdir -p /app/data && chown -R zepto:zepto /app
+
+USER zepto
+
+EXPOSE 8080
+
+ENTRYPOINT ["/app/zeptomesh-ui"]

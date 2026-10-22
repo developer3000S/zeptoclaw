@@ -1,12 +1,15 @@
-# ZeptoClaw Agent Mesh UI - Docker
+# ZeptoClaw Agent Mesh UI Dashboard - nginx reverse proxy
 FROM nginx:alpine
+
+ARG UI_PORT=28090
+
+# Копируем nginx.conf и подставляем порт
+COPY nginx.conf /src/nginx.conf
+RUN sed "s/28090/${UI_PORT}/g" /src/nginx.conf > /etc/nginx/conf.d/default.conf
 
 # Копируем статику
 COPY static/* /usr/share/nginx/html/
 
-# Копируем конфиг nginx
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-
-EXPOSE 80
+EXPOSE ${UI_PORT}
 
 CMD ["nginx", "-g", "daemon off;"]

@@ -256,3 +256,15 @@
     - Исправлено: остановка отложена на `SHUTDOWN_GRACE_MS` (250 мс) — ответ
       успевает уйти клиенту до выхода процесса
     - Проверено: полный прогон `cargo test --release` — 87 unit + 1 e2e, всё зелёное
+
+31. **UI-дашборд: nginx пытался слушать порт 80 (занятый на хосте)** — ✅ готово
+    - Симптом: `nginx: [emerg] bind() to 0.0.0.0:80 failed (98: Address in use)`
+    - Причина: nginx в контейнере слушал порт 80, но порт 80 был занят на хосте
+    - Исправления:
+      - `nginx.conf`: `listen 80` → `listen 28090`, `proxy_pass` → `localhost:8080`
+      - `Dockerfile.ui`: `EXPOSE 80` → `EXPOSE 28090`
+      - `install-ui.sh`: добавлен `ports: "${UI_PORT}:${UI_PORT}"` и
+        `ZEPTOMESH_UI_LISTEN: 0.0.0.0:8080` (Rust BFF на внутреннем порту 8080,
+        nginx проксирует с 28090)
+      - `README.md`: пример `--port 28091` → `--port 28090`
+    - Архитектура: nginx (28090) → proxy → Rust BFF (8080)
